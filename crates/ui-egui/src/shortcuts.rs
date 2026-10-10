@@ -81,6 +81,10 @@ pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
                 continue;
             }
             let _ = app.run(id, json!({}));
+        } else if let Some(c) =
+            crate::menus::UI_COMMANDS.iter().find(|c| c.3.and_then(parse).is_some_and(|(m, k)| k == key && mods_match(m, mods, mac)))
+        {
+            let _ = app.run(c.0, json!({}));
         }
     }
 }
@@ -102,7 +106,7 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             let _ = app.run("window.search", json!({}));
             true
         }
-        Key::Equals if m.command => {
+        Key::Equals if m.command && !(mac && m.ctrl) => {
             let _ = app.run("window.toggle_mix_edit", json!({}));
             true
         }
