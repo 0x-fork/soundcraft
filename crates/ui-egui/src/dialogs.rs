@@ -100,6 +100,11 @@ impl Dialogs {
                 let s = soundcraft_engine::score::ScoreSetup::from_session(e.session());
                 Dialog::ScoreSetup { title: s.title, composer: s.composer, bars_per_system: s.bars_per_system, show_track_names: s.show_track_names }
             }
+            "clip.rename" => {
+                let target = soundcraft_engine::cmd::clip_ids_param(e, &json!({})).first().and_then(|id| e.session().find_clip(*id));
+                let Some((_, clip)) = target else { return false };
+                Dialog::RenameClip { id: clip.id, name: clip.name.clone() }
+            }
             _ => match path_dialog(id, &home, &name) {
                 Some(d) => d,
                 None => return false,
@@ -273,15 +278,13 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     }
                 }
                 Dialog::RenameTrack { id, name } => {
-                    let r = ui.text_edit_singleline(name);
-                    r.request_focus();
+                    name_field(ui, name);
                     if buttons(ui, "OK", enter) {
                         action = Some(("track.rename".into(), json!({"track": id.0, "name": name})));
                     }
                 }
                 Dialog::RenameClip { id, name } => {
-                    let r = ui.text_edit_singleline(name);
-                    r.request_focus();
+                    name_field(ui, name);
                     if buttons(ui, "OK", enter) {
                         action = Some(("clip.rename".into(), json!({"clip": id.0, "name": name})));
                     }
@@ -436,6 +439,17 @@ fn buttons(ui: &mut egui::Ui, ok: &str, enter: bool) -> bool {
     pressed
 }
 
+/// A name field that takes the focus with its text selected, so typing replaces the old name.
+fn name_field(ui: &mut egui::Ui, name: &mut String) {
+    let mut out = egui::TextEdit::singleline(name).show(ui);
+    if !out.response.has_focus() {
+        out.response.request_focus();
+        let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(name.chars().count()));
+        out.state.cursor.set_char_range(Some(all));
+        out.state.store(ui.ctx(), out.response.id);
+    }
+}
+
 /// The command the tempo-change dialog runs on OK.
 fn tempo_change_action(at: Samples, bpm: f64) -> (String, Value) {
     ("event.tempo".into(), json!({"bpm": bpm, "at": at}))
@@ -513,6 +527,18 @@ mod tests {
         assert!(!takes_path("edit.copy"));
         assert!(d.open_for_command(&e, "file.score_setup"));
         assert!(matches!(d.open, Some(Dialog::ScoreSetup { bars_per_system: 4, .. })));
+    }
+
+    #[test]
+    fn clip_rename_opens_the_rename_dialog_for_the_selected_clip() {
+        let mut e = soundcraft_engine::demo::demo_engine();
+        let mut d = Dialogs::default();
+        e.execute("edit.select_none", &json!({})).unwrap();
+        assert!(!d.open_for_command(&e, "clip.rename"));
+        let clip = e.session().track_by_name("Kick").unwrap().clips()[0].clone();
+        e.execute("edit.select", &json!({"clips": [clip.id.0]})).unwrap();
+        assert!(d.open_for_command(&e, "clip.rename"));
+        assert!(matches!(d.open, Some(Dialog::RenameClip { id, ref name }) if id == clip.id && *name == clip.name));
     }
 
     #[test]

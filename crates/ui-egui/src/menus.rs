@@ -159,6 +159,7 @@ const DIALOG_COMMANDS: &[&str] = &[
     "event.quantize",
     "event.transpose",
     "edit.strip_silence",
+    "clip.rename",
 ];
 
 /// Shared menu hierarchy for egui and native desktop hosts.
