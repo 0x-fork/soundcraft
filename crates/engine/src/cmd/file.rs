@@ -109,11 +109,14 @@ pub fn specs() -> Vec<CommandSpec> {
             }
             Ok(json!({"text": text}))
         }),
-        cmd!(noundo "file.export_clips", "Export Clips as Files...", [], None, "{dir, clips?, format?: wav}", always, |e, p| {
+        cmd!(noundo "file.export_clips", "Export Clips as Files...", [], Some("Cmd+Shift+K"), "{dir, clips?, format?: wav}", always, |e, p| {
             let dir = str_param(p, "dir").ok_or_else(|| bad("file.export_clips", "`dir` required"))?.to_string();
             let ids = clip_ids_param(e, p);
+            if ids.is_empty() {
+                return Err(bad("file.export_clips", "no clips selected"));
+            }
             let n = crate::io::export_clips(e, &ids, &dir)?;
-            Ok(json!({"written": n}))
+            Ok(json!({"written": n, "dir": dir}))
         }),
         cmd!(noundo "file.export_selected_tracks_as_session", "Selected Tracks as New Session...", ["File", "Export"], None, "{path, tracks?}", has_selection, |e, p| {
             let path = str_param(p, "path").ok_or_else(|| bad("file.export_selected_tracks_as_session", "`path` required"))?.to_string();
@@ -427,5 +430,19 @@ mod tests {
         wavs.sort();
         assert_eq!(wavs, vec!["Take-2.wav".to_string(), "Take.wav".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exports_the_selected_clips_and_refuses_an_empty_selection() {
+        let mut e = crate::demo::demo_engine();
+        let dir = std::env::temp_dir().join(format!("soundcraft-clips-{}", std::process::id()));
+        let p = json!({"dir": dir.to_string_lossy()});
+        e.execute("edit.select_none", &json!({})).unwrap();
+        assert!(e.execute("file.export_clips", &p).is_err());
+        e.execute("edit.select", &json!({"tracks": ["Kick"], "start": {"seconds": 10.0}, "end": {"seconds": 11.0}})).unwrap();
+        let r = e.execute("file.export_clips", &p).unwrap();
+        let files = std::fs::read_dir(&dir).map_or(0, Iterator::count);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(files >= 1 && r["written"] == files, "{r}, {files} files");
     }
 }
