@@ -39,7 +39,7 @@ pub fn specs() -> Vec<CommandSpec> {
             s.sources.clear();
             s.videos.clear();
             let text = s.to_json().map_err(|err| EngineError::Io(err.to_string()))?;
-            std::fs::write(&path, text).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+            crate::io::write_file(&path, text.as_bytes())?;
             Ok(json!({"path": path}))
         }),
         cmd!(noundo "session.revert", "Revert Session to Saved...", ["File"], None, "{}", always, |e, _| {
@@ -99,13 +99,13 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(noundo "file.export_midi", "MIDI...", ["File", "Export"], None, "{path, tracks?}", always, |e, p| {
             let path = str_param(p, "path").ok_or_else(|| bad("file.export_midi", "`path` required"))?.to_string();
             let bytes = crate::io::export_midi(e)?;
-            std::fs::write(&path, &bytes).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+            crate::io::write_file(&path, &bytes)?;
             Ok(json!({"path": path, "bytes": bytes.len()}))
         }),
         cmd!(noundo "file.export_session_text", "Session Info as Text...", ["File", "Export"], None, "{path?}", always, |e, p| {
             let text = crate::inspect::session_text(e);
             if let Some(path) = str_param(p, "path") {
-                std::fs::write(path, &text).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+                crate::io::write_file(path, text.as_bytes())?;
             }
             Ok(json!({"text": text}))
         }),
@@ -261,7 +261,7 @@ fn bounce(e: &mut Engine, p: &Value) -> Result<Value> {
     let normalize = bool_or(p, "normalize", false);
     let fold = fold_down_param(p, "file.bounce_mix")?;
     let (bytes, stats) = crate::io::bounce_bytes_with(e, r, &opts, normalize, fold)?;
-    std::fs::write(&path, &bytes).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+    crate::io::write_file(&path, &bytes)?;
     Ok(
         json!({"path": path, "bytes": bytes.len(), "seconds": e.session().sample_rate.seconds(r.len()), "peak_db": stats.0, "lufs": stats.1, "true_peak_db": stats.2}),
     )
@@ -280,7 +280,7 @@ fn write_score(e: &mut Engine, p: &Value, id: &str, svg: bool) -> Result<Value> 
         Some(p) => p.to_string(),
         None => std::env::temp_dir().join(format!("{}.{ext}", crate::io::sanitize_name(&setup.title))).to_string_lossy().to_string(),
     };
-    std::fs::write(&path, &text).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+    crate::io::write_file(&path, text.as_bytes())?;
     let measures = parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
     Ok(json!({"path": path, "parts": parts.len(), "measures": measures}))
 }

@@ -75,7 +75,12 @@ impl Dialogs {
             "session.save_as" | "session.save_copy" => Dialog::PathPrompt {
                 cmd: id.into(),
                 title: "Save Session As".into(),
-                path: format!("{home}/{name}/{name}.scraft"),
+                // The browser has no folders: the name becomes the bundle file's name.
+                path: if home.is_empty() {
+                    format!("{name}.{}", soundcraft_engine::io::BUNDLE_EXTENSION)
+                } else {
+                    format!("{home}/{name}/{name}.scraft")
+                },
                 key: "path".into(),
             },
             "edit.repeat" => Dialog::Number { cmd: id.into(), title: "Repeat".into(), key: "count".into(), value: 2.0, suffix: "times".into() },
