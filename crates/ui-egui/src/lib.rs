@@ -329,6 +329,9 @@ impl SoundApp {
                     // Re-selecting a scrolling mode resumes the playhead follow.
                     self.edit_layout.follow_hold = false;
                 }
+                if id == "track.clear_clip_indicators" {
+                    self.meters.values_mut().chain([&mut self.main_meter]).for_each(|m| m.clip = false);
+                }
                 Ok(v)
             }
             Err(e) => {
@@ -983,6 +986,16 @@ mod tests {
         assert_eq!(app.position(), selection.start);
         assert_eq!(app.engine.session().edit.zoom.scroll, 0);
         assert!(!app.engine.is_dirty());
+    }
+
+    #[test]
+    fn clear_all_clip_indicators_clears_every_meter() {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let kick = app.engine.session().track_by_name("Kick").unwrap().id;
+        app.meters.entry(kick).or_default().clip = true;
+        app.main_meter.clip = true;
+        app.run("track.clear_clip_indicators", json!({})).unwrap();
+        assert!(!app.meters[&kick].clip && !app.main_meter.clip);
     }
 
     #[test]
