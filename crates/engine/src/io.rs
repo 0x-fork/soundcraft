@@ -84,6 +84,16 @@ pub fn import_audio_bytes(e: &mut Engine, name: &str, bytes: &[u8], path: Option
     Ok(json!({"track": track, "clip": cid, "source": src, "frames": frames, "channels": channels}))
 }
 
+/// Loads an audio file's bytes into an instrument track's Sampler as one undo step ("Load
+/// Sampler Sample"): for files that have no path, such as one dropped into the browser. The same
+/// checks as `mix.sampler_load`; not journaled, since the bytes can be large.
+pub fn load_sampler_bytes(e: &mut Engine, track: TrackId, name: &str, bytes: &[u8]) -> Result<Value> {
+    let before = e.session_arc();
+    let r = crate::cmd::sampler::attach(e, track, name, bytes, None, Vec::new())?;
+    e.push_undo("Load Sampler Sample", before);
+    Ok(r)
+}
+
 /// Import a movie: a Video track clip spanning the picture (the movie is referenced by `path`,
 /// never copied) plus its audio on a new audio track when it has a usable audio stream. Fails
 /// only when the file has neither a readable picture nor audio.
