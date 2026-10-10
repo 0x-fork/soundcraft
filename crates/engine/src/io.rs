@@ -519,6 +519,7 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
         s.name = stem.to_string();
     }
     let text = s.to_json().map_err(|err| EngineError::Io(err.to_string()))?;
+    std::fs::create_dir_all(&dir).map_err(|err| EngineError::Io(format!("{}: {err}", dir.display())))?;
     // Atomic-ish write: temp file then rename.
     let tmp = p.with_extension("scraft.tmp");
     std::fs::write(&tmp, text).map_err(|err| EngineError::Io(format!("{}: {err}", tmp.display())))?;

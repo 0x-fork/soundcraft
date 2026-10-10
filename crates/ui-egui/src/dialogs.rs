@@ -72,8 +72,9 @@ impl Dialogs {
             "file.import_audio" => Dialog::PathPrompt { cmd: id.into(), title: "Import Audio".into(), path: home, key: "path".into() },
             "file.import_midi" => Dialog::PathPrompt { cmd: id.into(), title: "Import MIDI".into(), path: home, key: "path".into() },
             "session.open" => Dialog::PathPrompt { cmd: id.into(), title: "Open Session".into(), path: home, key: "path".into() },
-            "session.save_as" | "session.save_copy" => Dialog::PathPrompt {
-                cmd: id.into(),
+            "session.save" if e.path.is_some() => return false,
+            "session.save" | "session.save_as" | "session.save_copy" => Dialog::PathPrompt {
+                cmd: if id == "session.save_copy" { id } else { "session.save_as" }.into(),
                 title: "Save Session As".into(),
                 path: format!("{home}/{name}/{name}.scraft"),
                 key: "path".into(),

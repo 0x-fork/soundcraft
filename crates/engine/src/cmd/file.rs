@@ -391,6 +391,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn saving_a_session_without_audio_creates_its_folder() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-new-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("Song").join("Song.scraft");
+        Engine::default().execute("session.save_as", &json!({"path": path.to_string_lossy()})).unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn tone_engine() -> (Engine, u64) {
         let mut e = Engine::default();
         e.execute("track.new", &json!({"count": 1, "name": "Tone", "format": "mono"})).unwrap();
