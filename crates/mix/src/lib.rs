@@ -905,7 +905,7 @@ fn process_strip(
     for c in strip.buf.iter_mut() {
         for i in 0..frames {
             if let Some(x) = c.get_mut(i) {
-                *x *= lerp_gain(g0, g1, i, frames);
+                *x *= lerp_gain(g0, g1, i, frames.saturating_sub(1));
             }
         }
     }
@@ -1210,7 +1210,7 @@ fn render_clip(s: &Session, clip: &Clip, pos: Samples, frames: usize, buf: &mut 
             let rel1 = pos.saturating_add(seg_end.saturating_sub(1) as i64).saturating_sub(clip.start);
             let g0 = clip.gain_at(rel0);
             let g1 = clip.gain_at(rel1.min(clip.length));
-            let n = (seg_end - i) as f32;
+            let n = (seg_end - i).saturating_sub(1).max(1) as f32;
             for k in i..seg_end {
                 let rel = pos.saturating_add(k as i64).saturating_sub(clip.start);
                 let v = if (stretch - 1.0).abs() < 1e-9 {

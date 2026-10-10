@@ -579,6 +579,10 @@ fn vol_to_clip_gain(e: &mut Engine, p: &Value) -> Result<Value> {
                     let at = rel(pt.at);
                     pts.push((at, env_db(&c.gain_env, at) + delta(pt.at)));
                 }
+                // The clip's own gain points inside the selection keep their shape, offset by the lane.
+                for &(at, _) in c.gain_env.iter().filter(|&&(at, _)| at > rel0 && at < rel1) {
+                    pts.push((at, env_db(&c.gain_env, at) + delta(c.start.saturating_add(at))));
+                }
                 if sel1 - 1 > sel0 {
                     let at = rel(sel1 - 1);
                     pts.push((at, env_db(&c.gain_env, at) + delta(sel1 - 1)));
@@ -597,7 +601,10 @@ fn vol_to_clip_gain(e: &mut Engine, p: &Value) -> Result<Value> {
                 c.gain_env = env;
             }
         }
-        let covers_all = lane.points.iter().all(|pt| pt.at >= r.start && pt.at < r.end);
+        // Clearing the lane is only safe when no audio plays outside the selection; otherwise the
+        // held edge values outside would fall back to the fader level.
+        let clips_inside = tr.clips().iter().all(|c| c.start >= r.start && c.end() <= r.end);
+        let covers_all = clips_inside && lane.points.iter().all(|pt| pt.at >= r.start && pt.at < r.end);
         let lane_m = tr.lane_mut(&AutoParam::Volume);
         if covers_all {
             lane_m.clear_range(r.start, r.end);
@@ -756,6 +763,32 @@ mod tests {
             }
             let delta = rms_db(&before[2048..6144], &after[2048..6144]);
             assert!(delta.abs() < 0.15, "inside changed by {delta} dB for {points:?}");
+        }
+    }
+
+    #[test]
+    fn lane_points_all_inside_the_selection_keep_the_outside_level() {
+        let (mut e, t) = tone_session(&[(2048, -9.0), (6143, -9.0)]);
+        let before = rendered(e.session());
+        convert(&mut e, t, 2048, 6144);
+        let after = rendered(e.session());
+        for (start, end) in [(0, 2000), (2048, 6144), (6200, 8192)] {
+            let delta = rms_db(&before[start..end], &after[start..end]);
+            assert!(delta.abs() < 0.05, "{start}..{end} changed by {delta} dB");
+        }
+    }
+
+    #[test]
+    fn clip_gain_points_inside_the_selection_are_kept() {
+        let (mut e, t) = tone_session(&[(0, -6.0), (8192, -6.0)]);
+        let clip = e.session().track(t).unwrap().clips()[0].id;
+        e.session_mut().find_clip_mut(clip).unwrap().gain_env = vec![(3000, 0.0), (4000, -20.0), (5000, 0.0)];
+        let before = rendered(e.session());
+        convert(&mut e, t, 2048, 6144);
+        let after = rendered(e.session());
+        for (start, end) in [(2048, 3000), (3500, 4500), (5000, 6144)] {
+            let delta = rms_db(&before[start..end], &after[start..end]);
+            assert!(delta.abs() < 0.2, "{start}..{end} changed by {delta} dB");
         }
     }
 }
