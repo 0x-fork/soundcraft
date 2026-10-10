@@ -348,6 +348,20 @@ pub fn wants_light(ctx: &egui::Context, mode: ThemeMode) -> bool {
     }
 }
 
+/// A track's header and lane backgrounds in the Edit window, tinted with its colour by `tint` (0..1).
+pub fn track_backgrounds(color: [u8; 3], selected: bool, tint: f32) -> (Color32, Color32) {
+    let t = Tokens::current();
+    let k = tint.clamp(0.0, 1.0);
+    if k <= 0.0 {
+        return if selected { (t.header_selected, t.playlist_alt) } else { (t.panel_bg2, t.playlist_bg) };
+    }
+    let c = rgb(color);
+    let header = t.panel_bg2.lerp_to_gamma(c, k * 0.55);
+    let header = if selected { crate::widgets::shade(header, 0.1) } else { header };
+    let lane = if selected { t.playlist_alt } else { t.playlist_bg }.lerp_to_gamma(c, k * 0.2);
+    (header, lane)
+}
+
 /// Track colours tinted for clip bodies.
 pub fn clip_colors(rgb: [u8; 3], selected: bool) -> (Color32, Color32, Color32) {
     let [r, g, b] = rgb;
@@ -426,6 +440,12 @@ mod tests {
         // Prefs saved before the setting existed load as Dark.
         let old: UiState = serde_json::from_value(json!({"show_tracks_list": true})).unwrap_or_default();
         assert_eq!(old.theme, ThemeMode::Dark);
+    }
+
+    #[test]
+    fn prefs_saved_before_track_tint_get_the_default() {
+        let ui: UiState = serde_json::from_value(json!({"theme": "light"})).unwrap();
+        assert!((ui.track_tint - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]

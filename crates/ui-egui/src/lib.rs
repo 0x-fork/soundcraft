@@ -68,6 +68,8 @@ pub struct UiState {
     pub mix_views: Vec<String>,
     /// Edit window track-header columns: io, inserts_ae, sends_ae, comments, color.
     pub edit_views: Vec<String>,
+    /// How strongly Edit window tracks take on their colour, 0..1 (0: only the colour strip).
+    pub track_tint: f32,
     /// Open plugin windows (track, slot).
     pub plugin_windows: Vec<(TrackId, usize)>,
     pub audiosuite: Option<String>,
@@ -128,6 +130,7 @@ impl Default for UiState {
             narrow_mix: false,
             mix_views: vec!["inserts_ae".into(), "sends_ae".into(), "io".into(), "color".into()],
             edit_views: vec!["color".into()],
+            track_tint: 0.5,
             plugin_windows: Vec::new(),
             audiosuite: None,
             status: String::new(),

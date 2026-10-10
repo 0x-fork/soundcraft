@@ -143,6 +143,8 @@ fn color_palette(app: &mut SoundApp, ctx: &egui::Context) {
                 }
             }
         });
+        ui.separator();
+        ui.add(egui::Slider::new(&mut app.ui.track_tint, 0.0..=1.0).show_value(false).text("Track tint in the Edit window"));
     });
     app.ui.show_color_palette = open;
 }

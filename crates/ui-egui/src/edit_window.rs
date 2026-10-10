@@ -749,16 +749,19 @@ fn track_row(app: &mut SoundApp, ui: &mut Ui, id: TrackId, row: Rect, tl: Rect) 
     }
     let main_h = track.height.points();
     let lane = lane_rect(&track, row, tl);
-    // Header background.
-    ui.painter().rect_filled(head, 0.0, if selected { t.header_selected } else { t.panel_bg2 });
+    let (head_bg, lane_bg) = crate::theme::track_backgrounds(track.color, selected, app.ui.track_tint);
+    ui.painter().rect_filled(head, 0.0, head_bg);
     ui.painter().rect_filled(Rect::from_min_size(head.min, vec2(5.0, head.height())), 0.0, rgb(track.color));
     ui.painter().line_segment([pos2(head.min.x, row.max.y + 0.5), pos2(tl.max.x, row.max.y + 0.5)], Stroke::new(1.0, t.border));
     ui.painter().hline(head.min.x + 5.0..=head.max.x, head.min.y + 0.5, Stroke::new(1.0, t.edge_light));
+    if selected && app.ui.track_tint > 0.0 {
+        ui.painter().rect_stroke(head.with_min_x(head.min.x + 5.0), 0.0, Stroke::new(2.0, t.accent), StrokeKind::Inside);
+    }
     track_header(app, ui, &track, head, selected);
     // Lane.
     ui.painter().vline(tl.min.x - 0.5, row.y_range(), Stroke::new(1.0, t.border));
     let painter = ui.painter().with_clip_rect(lane.intersect(ui.clip_rect()));
-    painter.rect_filled(lane, 0.0, if selected { t.playlist_alt } else { t.playlist_bg });
+    painter.rect_filled(lane, 0.0, lane_bg);
     let s = app.engine.session().clone();
     grid_lines(&painter, &s, tl, lane);
     let view = Range::new(sample_at(&s, tl, tl.min.x), sample_at(&s, tl, tl.max.x));
@@ -1049,7 +1052,8 @@ fn column_ui(ui: &mut Ui, col: &str, r: Rect) -> Ui {
 /// One optional Edit-window column for a track (instrument, inserts, sends, I/O, comments).
 fn header_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, col: &str, r: Rect) {
     let t = Tokens::current();
-    ui.painter().rect_filled(r, 0.0, t.panel_bg);
+    let selected = app.engine.session().edit.selected_tracks.contains(&track.id);
+    ui.painter().rect_filled(r, 0.0, crate::theme::track_backgrounds(track.color, selected, app.ui.track_tint).0);
     ui.painter().line_segment([pos2(r.min.x, r.min.y), pos2(r.min.x, r.max.y)], Stroke::new(1.0, t.border));
     let line_h = 15.0;
     let rows = ((r.height() - 4.0) / line_h).floor().max(1.0) as usize;
