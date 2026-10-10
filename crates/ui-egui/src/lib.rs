@@ -512,6 +512,12 @@ impl SoundApp {
         best.map(|(_, p)| p)
     }
 
+    /// Whether the meters are live: while playing, and while armed or input-monitored tracks are heard.
+    fn meters_live(&self) -> bool {
+        self.engine.transport.playing
+            || (self.recorder.is_some() && self.engine.session().tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm))
+    }
+
     /// Open the input device once (for recording and input monitoring) and feed the player.
     fn ensure_input(&mut self) {
         if self.recorder.is_some() || self.recorder_failed || self.player.is_none() {
@@ -749,7 +755,7 @@ impl SoundApp {
                 self.stop_play();
             }
         }
-        if !self.engine.transport.playing {
+        if !self.meters_live() {
             for d in self.meters.values_mut() {
                 feed_meter(d, [0.0, 0.0], 0.0, dt);
             }
@@ -805,7 +811,7 @@ impl SoundApp {
         {
             self.ensure_input();
         }
-        if self.is_playing() || self.meters.values().any(|m| m.level[0] > 0.0001) || !self.pending_shots.is_empty() || !self.synthetic.is_empty() {
+        if self.meters_live() || self.meters.values().any(|m| m.level[0] > 0.0001) || !self.pending_shots.is_empty() || !self.synthetic.is_empty() {
             ctx.request_repaint();
         }
         control::collect_screenshots(self, ctx);

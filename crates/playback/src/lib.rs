@@ -171,6 +171,8 @@ impl AudioState {
                 }
                 Cmd::Stop => {
                     self.playing = false;
+                    self.end = None;
+                    self.looped = None;
                     self.mix.reset();
                 }
                 Cmd::Locate(at) => {
@@ -209,6 +211,7 @@ impl AudioState {
         } else if let Some(e) = self.end {
             if self.pos >= e {
                 self.playing = false;
+                self.end = None;
                 self.shared.playing.store(false, Ordering::Relaxed);
                 n = 0;
             } else {
@@ -239,11 +242,6 @@ impl AudioState {
             }
         }
         self.pending_len = n;
-        if !self.playing {
-            return;
-        }
-        self.pos += n as i64;
-        self.shared.position.store(self.pos, Ordering::Relaxed);
         if let Ok(mut m) = self.shared.meters.try_lock() {
             m.main.copy_from(&self.mix.main_meter);
             for (k, v) in &self.mix.meters {
@@ -254,6 +252,10 @@ impl AudioState {
                     }
                 }
             }
+        }
+        if self.playing {
+            self.pos += n as i64;
+            self.shared.position.store(self.pos, Ordering::Relaxed);
         }
     }
 
@@ -895,5 +897,31 @@ mod tests {
         let p = shared.position.load(Ordering::Relaxed);
         assert!(p <= 1000, "position {p} should stay inside the loop");
         assert!(shared.playing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn armed_tracks_are_heard_and_metered_after_playback_stops() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut s = soundcraft_model::Session::default();
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        s.track_mut(t).unwrap().mixer.record_arm = true;
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(s), 48_000.0, channel().0);
+        let ring = record::InputRing::new(1, 48_000);
+        tx.send(Cmd::Input(Arc::clone(&ring))).unwrap();
+        tx.send(Cmd::Play { from: 0, end: Some(1000), looped: None }).unwrap();
+        let mut out = vec![0.0f32; 4096];
+        st.fill(&mut out, 2);
+        assert!(!shared.playing.load(Ordering::Relaxed));
+        ring.push(&[0.5; 4096]);
+        st.fill(&mut out, 2);
+        assert!(out.iter().any(|x| x.abs() > 0.1), "the input is heard");
+        assert!(shared.meters.lock().unwrap().tracks.get(&t).is_some_and(|m| m.peak[0] > 0.1), "and metered");
     }
 }
