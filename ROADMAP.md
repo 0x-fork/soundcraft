@@ -61,6 +61,10 @@ mutated and truncated movies.
 
 ## Current focus
 
+Common toolbar icon buttons and track record-enable buttons use shared `craft-ui` interaction,
+accessible labels and keyboard focus, retaining SoundCraft's blue tool-selection and red record-arm
+states. The specialized transport buttons, faders, meters and saved session model remain local.
+
 1. The alpha list above.
 2. Surround-pan automation; AU editor views.
 3. Built-in plugin depth (more processors, better UIs).
@@ -76,3 +80,5 @@ mutated and truncated movies.
 - **M9 (in progress):** AudioSuite breadth (done), Elastic Audio, Beat Detective.
 - **M10 (next):** alpha release on all platforms.
 - **M11 (mostly done):** third-party plugin hosting (CLAP, VST3, AU), video, surround.
+
+- **2026-10-10 (UI docking):** Tracks and Groups, Clips, MIDI Editor, Memory Locations, and Undo History use movable panels. Edit and Mix retain separate arrangements; Clips and MIDI Editor belong to Edit. Transport, plug-in, and specialist utility windows retain their existing hosts. Panel moves and reset are available as UI commands, and saved UI preferences retain arrangements. No milestone percentage change.

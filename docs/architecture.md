@@ -3,6 +3,13 @@
 SoundCraft is a Cargo workspace of small crates with enforced layering (`cargo xtask layers`).
 Nothing below the UI knows about egui, so the interface can be replaced.
 
+The UI package pins `craft-ui` for common icon-button and track record-enable interactions.
+SoundCraft supplies each state's colors, border, radius and icon painter; selection and command
+dispatch remain in the toolbar and track controls. The single-shape frame option preserves the
+existing fill/border blending when controls are disabled. Specialized transport Play/Stop/Record styling,
+nonlinear meters, faders, pan gestures, fonts and the live theme resolver remain local. Shared adapters read the current palette. The UI
+requires Rust 1.95 or later without raising the core workspace's Rust 1.90 declaration.
+
 ```
 L0  time        audio-io        midi            (standalone: no workspace deps)
 L1  dsp         clap-host                       (plugins; clap-host is the only unsafe crate)
