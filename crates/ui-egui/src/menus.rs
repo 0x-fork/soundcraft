@@ -259,7 +259,8 @@ fn menu_node(app: &mut SoundApp, ui: &mut egui::Ui, n: &MenuNode, extra: &[(&str
     }
     let id = command_for_path(&n.path, extra);
     let (enabled, checked) = item_state(app, &n.path, id.as_deref());
-    let label = if checked { format!("✔ {}", n.label) } else { n.label.clone() };
+    let label = live_label(app, id.as_deref()).unwrap_or_else(|| n.label.clone());
+    let label = if checked { format!("✔ {label}") } else { label };
     let shortcut = id.as_deref().and_then(soundcraft_engine::find_command).and_then(|c| c.shortcut).unwrap_or("");
     let btn = egui::Button::new(label).shortcut_text(crate::shortcuts::shortcut_label(shortcut, ui.ctx().os().is_mac()));
     if ui.add_enabled(enabled, btn).clicked()
@@ -386,6 +387,16 @@ const MENU_WINDOWS: &[(&str, &str)] = &[
     ("Event > MIDI Operations > MIDI Operations Window", "window.midi_ops"),
     ("Event > MIDI Real-Time Properties", "window.rtp"),
 ];
+
+/// Undo and Redo name the step they would undo or redo; other items keep their catalog label.
+pub fn live_label(app: &SoundApp, id: Option<&str>) -> Option<String> {
+    let e = &app.engine;
+    match id? {
+        "edit.undo" => Some(e.undo_label().map_or_else(|| "Can't Undo".into(), |l| format!("Undo {l}"))),
+        "edit.redo" => Some(e.redo_label().map_or_else(|| "Can't Redo".into(), |l| format!("Redo {l}"))),
+        _ => None,
+    }
+}
 
 /// Menu-style invocation: may open a dialog.
 pub fn invoke_menu(app: &mut SoundApp, id: &str, path: &str) {

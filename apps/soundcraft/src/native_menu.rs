@@ -105,6 +105,11 @@ impl NativeMenu {
         self.last_sync = Some(now);
         for entry in &mut self.entries {
             let (enabled, checked) = menus::item_state(app, &entry.path, entry.command.as_deref());
+            if let Some(label) = menus::live_label(app, entry.command.as_deref())
+                && entry.item.text() != label
+            {
+                entry.item.set_text(label);
+            }
             if enabled != entry.enabled {
                 entry.item.set_enabled(enabled);
                 entry.enabled = enabled;
