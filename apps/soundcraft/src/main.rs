@@ -49,6 +49,13 @@ impl eframe::App for App {
         if self.0.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        soundcraft_ui_egui::fit_window_to_screen(ctx);
+        let (inner, maximized) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().maximized.unwrap_or(false)));
+        self.0.ui.window_maximized = maximized;
+        if let Some(r) = inner.filter(|_| !maximized) {
+            self.0.ui.window_size = (r.size() * ctx.zoom_factor()).round().into();
+        }
+        self.0.ui.ui_scale = self.0.extra.ui_scale;
         // With the system menu bar there is no egui bar showing the window and dirty state, so the
         // title carries them; elsewhere the egui menu bar already does.
         let title = if self.0.native_menu_bar {
@@ -213,10 +220,12 @@ fn main() -> eframe::Result {
     }
 
     let engine = if demo { soundcraft_engine::demo::demo_engine() } else { Engine::default() };
+    let prefs = load_prefs().unwrap_or_default();
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("SoundCraft")
-            .with_inner_size([1600.0, 1000.0])
+            .with_inner_size(prefs.window_size)
+            .with_maximized(prefs.window_maximized)
             .with_min_inner_size([960.0, 600.0])
             .with_drag_and_drop(true)
             .with_app_id("ai.storyteller.soundcraft"),
@@ -236,9 +245,8 @@ fn main() -> eframe::Result {
             let mut app = SoundApp::new(engine, player, services());
             app.autosave_dir = prefs_path().and_then(|p| p.parent().map(|d| d.join("Autosave")));
             app.preset_dir = prefs_path().and_then(|p| p.parent().map(|d| d.join("Presets")));
-            if let Some(ui) = load_prefs() {
-                app.ui = ui;
-            }
+            app.extra.ui_scale = prefs.ui_scale;
+            app.ui = prefs;
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
                 app = app.with_control(rx);

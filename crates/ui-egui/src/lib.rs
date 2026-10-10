@@ -101,6 +101,11 @@ pub struct UiState {
     pub configurations: Vec<(String, Value)>,
     /// Appearance (`ui.theme`): dark by default, light or follow the system on request.
     pub theme: theme::ThemeMode,
+    /// The main window's size (logical points) and maximized state, and the interface scale, as
+    /// the desktop app last saw them; it restores them at launch.
+    pub window_size: [f32; 2],
+    pub window_maximized: bool,
+    pub ui_scale: f32,
 }
 
 impl Default for UiState {
@@ -153,6 +158,9 @@ impl Default for UiState {
             workspace_dir: String::new(),
             configurations: Vec::new(),
             theme: theme::ThemeMode::Dark,
+            window_size: [1600.0, 1000.0],
+            window_maximized: false,
+            ui_scale: 1.0,
         }
     }
 }
@@ -167,6 +175,15 @@ pub struct Services {
 /// File-system-safe folder name for a plugin id (`clap:com.x.y` → `clap_com.x.y`).
 pub fn preset_folder_name(plugin: &str) -> String {
     plugin.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' }).collect()
+}
+
+/// On the first frame, maximizes a window too big for the screen it opened on (sized on a larger
+/// monitor) instead of letting it run off the edge; its saved size is kept for that monitor.
+pub fn fit_window_to_screen(ctx: &egui::Context) {
+    let (inner, monitor) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().monitor_size));
+    if ctx.cumulative_pass_nr() == 0 && inner.zip(monitor).is_some_and(|(r, m)| (r.size() - m).max_elem() > 0.0) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+    }
 }
 
 /// Drag-and-drop payload: an audio file (source id) dragged from the Clip List.
@@ -996,5 +1013,34 @@ mod tests {
     #[test]
     fn automation_write_fires_after_loop_wrap() {
         assert!(automation_step_due(0, 1_000_000, 960));
+    }
+
+    #[test]
+    fn preferences_saved_before_the_window_was_remembered_keep_full_scale() {
+        let ui: super::UiState = serde_json::from_value(json!({"show_transport": true})).unwrap();
+        assert_eq!((ui.window_size, ui.window_maximized, ui.ui_scale), ([1600.0, 1000.0], false, 1.0));
+    }
+
+    #[test]
+    fn a_window_bigger_than_its_screen_opens_maximized() {
+        let maximizes = |w: f32, frames: usize| {
+            let ctx = egui::Context::default();
+            let info = egui::ViewportInfo {
+                inner_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, 1000.0))),
+                monitor_size: Some(egui::vec2(1728.0, 1117.0)),
+                ..Default::default()
+            };
+            let mut maximized = false;
+            for _ in 0..frames {
+                let raw = egui::RawInput { viewports: [(egui::ViewportId::ROOT, info.clone())].into_iter().collect(), ..Default::default() };
+                let mut out = ctx.run_ui(raw, |ui| super::fit_window_to_screen(ui.ctx()));
+                out.textures_delta.clear();
+                maximized = out.viewport_output[&egui::ViewportId::ROOT].commands.contains(&egui::ViewportCommand::Maximized(true));
+            }
+            maximized
+        };
+        assert!(maximizes(2400.0, 1));
+        assert!(!maximizes(1600.0, 1));
+        assert!(!maximizes(2400.0, 2));
     }
 }
