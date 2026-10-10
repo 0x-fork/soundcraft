@@ -407,44 +407,46 @@ fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
                 if info.id == "eq_7band" || info.id == "eq_1band" {
                     eq_curve(ui, info.id, &ins);
                 }
-                egui::Grid::new(("pg", tid.0, slot)).num_columns(3).show(ui, |ui| {
-                    for p in info.params {
-                        let v = ins.params.get(p.id).copied().unwrap_or(p.default);
-                        ui.label(p.name);
-                        let mut x = v;
-                        let resp = if !p.choices.is_empty() {
-                            let mut idx = x.round().max(0.0) as usize;
-                            let r = egui::ComboBox::from_id_salt(("pc", tid.0, slot, p.id))
-                                .selected_text(p.choices.get(idx).copied().unwrap_or("?"))
-                                .show_ui(ui, |ui| {
-                                    for (i, c) in p.choices.iter().enumerate() {
-                                        ui.selectable_value(&mut idx, i, *c);
-                                    }
-                                });
-                            x = idx as f32;
-                            r.response
-                        } else {
-                            let mut sl = egui::Slider::new(&mut x, p.min..=p.max).show_value(false);
-                            if p.taper == soundcraft_dsp::Taper::Log && p.min > 0.0 {
-                                sl = sl.logarithmic(true);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::Grid::new(("pg", tid.0, slot)).num_columns(3).show(ui, |ui| {
+                        for p in info.params {
+                            let v = ins.params.get(p.id).copied().unwrap_or(p.default);
+                            ui.label(p.name);
+                            let mut x = v;
+                            let resp = if !p.choices.is_empty() {
+                                let mut idx = x.round().max(0.0) as usize;
+                                let r = egui::ComboBox::from_id_salt(("pc", tid.0, slot, p.id))
+                                    .selected_text(p.choices.get(idx).copied().unwrap_or("?"))
+                                    .show_ui(ui, |ui| {
+                                        for (i, c) in p.choices.iter().enumerate() {
+                                            ui.selectable_value(&mut idx, i, *c);
+                                        }
+                                    });
+                                x = idx as f32;
+                                r.response
+                            } else {
+                                let mut sl = egui::Slider::new(&mut x, p.min..=p.max).show_value(false);
+                                if p.taper == soundcraft_dsp::Taper::Log && p.min > 0.0 {
+                                    sl = sl.logarithmic(true);
+                                }
+                                ui.add(sl)
+                            };
+                            if (x - v).abs() > f32::EPSILON {
+                                let _ = app.engine.execute_merged(
+                                    "mix.insert_param",
+                                    &json!({"track": tid.0, "slot": slot, "param": p.id, "value": x}),
+                                    &format!("param:{}:{slot}:{}", tid.0, p.id),
+                                );
+                                if let Some(pl) = &app.player {
+                                    // Keep the plugin's own editor in step.
+                                    pl.editor_set_param(tid, slot, p.id, x);
+                                }
                             }
-                            ui.add(sl)
-                        };
-                        if (x - v).abs() > f32::EPSILON {
-                            let _ = app.engine.execute_merged(
-                                "mix.insert_param",
-                                &json!({"track": tid.0, "slot": slot, "param": p.id, "value": x}),
-                                &format!("param:{}:{slot}:{}", tid.0, p.id),
-                            );
-                            if let Some(pl) = &app.player {
-                                // Keep the plugin's own editor in step.
-                                pl.editor_set_param(tid, slot, p.id, x);
-                            }
+                            let _ = resp;
+                            ui.label(egui::RichText::new(p.format(x)).font(mono(11.0)));
+                            ui.end_row();
                         }
-                        let _ = resp;
-                        ui.label(egui::RichText::new(p.format(x)).font(mono(11.0)));
-                        ui.end_row();
-                    }
+                    });
                 });
             });
         if open {
