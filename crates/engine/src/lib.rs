@@ -18,6 +18,7 @@ pub mod score;
 use serde_json::{Value, json};
 use soundcraft_model::{Clip, Session, TrackId};
 use soundcraft_time::Samples;
+use std::cell::Cell;
 use std::sync::Arc;
 
 pub use cmd::{CommandInfo, CommandSpec, command_specs, find_command};
@@ -111,6 +112,10 @@ pub struct Engine {
     /// Revision counter; bumps on every document change (UI caches key on it).
     pub revision: u64,
     dirty: bool,
+    /// The document as last opened or saved, for `is_dirty`.
+    saved: Arc<Session>,
+    /// `is_dirty` as of a revision.
+    dirty_at: Cell<(u64, bool)>,
     /// Gesture key for undo coalescing (see `execute_merged`).
     merge_key: Option<String>,
     /// Messages for the UI status line / agents.
@@ -126,8 +131,10 @@ impl Default for Engine {
 impl Engine {
     pub fn new(session: Session) -> Self {
         install_panic_hook();
+        let doc = Arc::new(session);
         Engine {
-            doc: Arc::new(session),
+            saved: Arc::clone(&doc),
+            doc,
             undo: Vec::new(),
             redo: Vec::new(),
             history_limit: 200,
@@ -138,6 +145,7 @@ impl Engine {
             path: None,
             revision: 1,
             dirty: false,
+            dirty_at: Cell::new((0, false)),
             merge_key: None,
             messages: Vec::new(),
         }
@@ -164,17 +172,30 @@ impl Engine {
         self.transport_requests.clear();
         self.transport_requests.push(TransportRequest::ResetSession);
         self.doc = Arc::new(s);
+        self.saved = Arc::clone(&self.doc);
         self.undo.clear();
         self.redo.clear();
         self.revision = self.revision.wrapping_add(1);
         self.dirty = false;
     }
 
+    /// Whether the document changed since it was opened or saved. Selecting, locating and zooming
+    /// don't count, and undoing back to the saved state makes it clean again.
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        if !self.dirty {
+            return false;
+        }
+        let (rev, dirty) = self.dirty_at.get();
+        if rev == self.revision {
+            return dirty;
+        }
+        let dirty = !same_document(&self.saved, &self.doc);
+        self.dirty_at.set((self.revision, dirty));
+        dirty
     }
     pub fn mark_clean(&mut self) {
         self.dirty = false;
+        self.saved = Arc::clone(&self.doc);
     }
 
     pub fn can_undo(&self) -> bool {
@@ -318,6 +339,19 @@ impl Engine {
     }
 }
 
+/// Equal apart from what changes without editing: the selection, the playhead and the zoom.
+fn same_document(saved: &Session, doc: &Session) -> bool {
+    let mut doc = doc.clone();
+    let (from, to) = (&saved.edit, &mut doc.edit);
+    to.selection = from.selection;
+    to.timeline_selection = from.timeline_selection;
+    to.selected_tracks.clone_from(&from.selected_tracks);
+    to.selected_clips.clone_from(&from.selected_clips);
+    to.playhead = from.playhead;
+    to.zoom = from.zoom;
+    *saved == doc
+}
+
 fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -344,5 +378,29 @@ mod merge_tests {
         assert_eq!(e.undo_history().len(), 1);
         e.undo();
         assert_eq!(e.session().track(t).unwrap().mixer.volume_db, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod dirty_tests {
+    use super::*;
+
+    #[test]
+    fn selecting_locating_and_zooming_leave_the_session_clean() {
+        let mut e = crate::demo::demo_engine();
+        for (id, p) in [
+            ("edit.select", json!({"tracks": ["Kick"], "start": 0, "end": 48_000})),
+            ("edit.select_none", json!({})),
+            ("transport.locate", json!({"at": 96_000})),
+            ("view.zoom_in", json!({})),
+            ("view.scroll", json!({"to": 48_000})),
+        ] {
+            e.execute(id, &p).unwrap();
+            assert!(!e.is_dirty(), "{id}");
+        }
+        e.execute("mix.mute", &json!({"track": "Kick"})).unwrap();
+        assert!(e.is_dirty());
+        e.undo();
+        assert!(!e.is_dirty());
     }
 }

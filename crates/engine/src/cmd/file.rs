@@ -42,7 +42,7 @@ pub fn specs() -> Vec<CommandSpec> {
             std::fs::write(&path, text).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
             Ok(json!({"path": path}))
         }),
-        cmd!(noundo "session.revert", "Revert Session to Saved...", ["File"], None, "{}", always, |e, _| {
+        cmd!(noundo "session.revert", "Revert Session to Saved...", ["File"], None, "{}", |e| if e.path.is_some() { Ok(()) } else { Err("the session has not been saved".into()) }, |e, _| {
             let path = e.path.clone().ok_or_else(|| bad("session.revert", "the session has not been saved"))?;
             crate::io::open_session(e, &path)?;
             Ok(json!({}))
