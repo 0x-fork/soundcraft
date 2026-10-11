@@ -105,6 +105,9 @@ fn synth_plays_notes_at_their_offsets() {
     p.all_notes_off();
     p.process(&mut io, 64);
     assert!(io[0].iter().all(|x| x.abs() < 1e-6));
+    p.midi(20, [0xB0, 7, 64]);
+    p.process(&mut io, 64);
+    assert!(io[0][19].abs() < 1e-6 && (io[0][20] - 64.0 / 127.0).abs() < 1e-6, "controllers arrive as MIDI at their offset");
 }
 
 #[test]

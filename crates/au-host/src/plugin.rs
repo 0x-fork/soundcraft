@@ -231,6 +231,13 @@ impl Plugin for AuPlugin {
         }
     }
 
+    fn midi(&mut self, offset: usize, msg: [u8; 3]) {
+        let [status, data1, data2] = msg;
+        if status & 0xF0 >= 0xA0 && status & 0xF0 < 0xF0 {
+            self.push_event(MidiEvent { time: u32::try_from(offset).unwrap_or(u32::MAX), status, data1: data1 & 0x7F, data2: data2 & 0x7F });
+        }
+    }
+
     fn all_notes_off(&mut self) {
         for k in 0..128u8 {
             if self.held.get(k as usize).copied().unwrap_or(false) {

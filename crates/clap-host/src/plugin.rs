@@ -33,6 +33,8 @@ pub struct ClapPlugin {
     in_main: Option<usize>,
     out_main: Option<usize>,
     notes: NoteMode,
+    /// The note port takes raw MIDI (controllers, pitch bend, program changes).
+    midi_in: bool,
     held: [bool; 128],
     channels: usize,
     max_block: usize,
@@ -56,6 +58,7 @@ impl ClapPlugin {
             in_main: None,
             out_main: None,
             notes: NoteMode::None,
+            midi_in: false,
             held: [false; 128],
             channels: 2,
             max_block: 0,
@@ -116,7 +119,9 @@ impl Plugin for ClapPlugin {
         self.out_main = pick_main(&outs);
         self.inputs = PortBuffers::new(&ins.iter().map(|p| p.channels).collect::<Vec<_>>(), mb);
         self.outputs = PortBuffers::new(&outs.iter().map(|p| p.channels).collect::<Vec<_>>(), mb);
-        self.notes = note_mode(self.inst.note_port());
+        let port = self.inst.note_port();
+        self.notes = note_mode(port);
+        self.midi_in = port.is_some_and(|p| p.supported & CLAP_NOTE_DIALECT_MIDI != 0);
         self.max_block = mb;
         self.inst.state().restart.store(false, Ordering::Relaxed);
         match self.inst.activate(sr, 1, u32::try_from(mb).unwrap_or(u32::MAX)) {
@@ -251,6 +256,12 @@ impl Plugin for ClapPlugin {
         }
         if let Some(h) = self.held.get_mut(note as usize) {
             *h = false;
+        }
+    }
+
+    fn midi(&mut self, offset: usize, msg: [u8; 3]) {
+        if self.midi_in {
+            self.push(Event::Midi { time: u32::try_from(offset).unwrap_or(u32::MAX), data: msg });
         }
     }
 

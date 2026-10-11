@@ -53,6 +53,7 @@
 
 use soundcraft_dsp::pan::{PanLaw, SpeakerPos, SurroundParams, gains};
 use soundcraft_dsp::{Plugin, SampleSource, Transport, db_to_gain};
+use soundcraft_midi::CtrlKind;
 use soundcraft_model::{
     AutoParam, BusId, ChannelFormat, Clip, ClipContent, Route, Session, SourceAudio, Speaker, SurroundPan, Track, TrackId, TrackKind,
 };
@@ -199,6 +200,8 @@ struct Strip {
     sample: Option<Arc<SourceAudio>>,
     /// MIDI notes currently sounding on the instrument (pitch), for note-offs at stops/seek.
     held: Vec<u8>,
+    /// The instrument's next block starts somewhere new: send it the controllers in effect there.
+    chase: bool,
     muted: bool,
     gr: f32,
     /// Per-clip effect chains (Clip Effects) and a scratch buffer to render clips into.
@@ -273,6 +276,7 @@ impl Strip {
             instrument: None,
             sample: None,
             held: Vec::new(),
+            chase: true,
             muted: false,
             gr: 0.0,
             clip_fx: HashMap::new(),
@@ -474,6 +478,7 @@ impl MixEngine {
                 i.plugin.reset();
             }
             s.held.clear();
+            s.chase = true;
         }
         self.meters.clear();
         self.main_meter = StripMeter::default();
@@ -576,6 +581,7 @@ impl MixEngine {
                     i.plugin.all_notes_off();
                 }
                 st.held.clear();
+                st.chase = true;
             }
         }
         self.last_end = pos.saturating_add(frames as i64);
@@ -898,6 +904,9 @@ fn process_strip(
                     apply_params(inst, ins, t, INSTRUMENT_SLOT, pos);
                 }
                 inst.plugin.set_transport(&transport);
+                if std::mem::take(&mut strip.chase) {
+                    chase_controllers(s, t, pos, inst);
+                }
                 schedule_notes(s, t, pos, frames, inst, &mut strip.held);
                 if strip.buf.len() >= 2 {
                     inst.plugin.process(&mut strip.buf, frames);
@@ -1310,7 +1319,7 @@ fn render_clip(s: &Session, clip: &Clip, pos: Samples, frames: usize, buf: &mut 
     }
 }
 
-/// Send note on/offs for MIDI clips overlapping the block.
+/// Send note on/offs and controllers for MIDI clips overlapping the block.
 fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mut PluginSlot, held: &mut Vec<u8>) {
     let sr = s.sample_rate;
     let end = pos.saturating_add(frames as i64);
@@ -1356,6 +1365,80 @@ fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mu
                 inst.plugin.note_off(usize::try_from(off - pos).unwrap_or(0), n.pitch);
                 held.retain(|p| *p != n.pitch);
             }
+        }
+        let near = s.tempo.samples_to_ticks(pos, sr).saturating_sub(base).saturating_sub(1)
+            ..=s.tempo.samples_to_ticks(end, sr).saturating_sub(base).saturating_add(1);
+        for c in &sequence.ctrls {
+            let tick = c.tick.saturating_add(delay).max(0);
+            if !near.contains(&tick) {
+                continue;
+            }
+            let at = s.tempo.tick_to_samples(base.saturating_add(tick), sr);
+            if at >= pos && at < end && at < clip.end() {
+                inst.plugin.midi(usize::try_from(at - pos).unwrap_or(0), ctrl_message(c.kind, c.value, dp));
+            }
+        }
+    }
+}
+
+/// A controller event as a MIDI 1.0 message on channel 1 (where the notes go), with `transpose`
+/// applied to a poly-pressure key.
+fn ctrl_message(kind: CtrlKind, value: i32, transpose: i64) -> [u8; 3] {
+    let v7 = value.clamp(0, 127) as u8;
+    match kind {
+        CtrlKind::Cc(n) => [0xB0, n & 0x7F, v7],
+        CtrlKind::PitchBend => {
+            let v = value.saturating_add(8192).clamp(0, 16383);
+            [0xE0, (v & 0x7F) as u8, (v >> 7) as u8]
+        }
+        CtrlKind::ChannelPressure => [0xD0, v7, 0],
+        CtrlKind::PolyPressure(k) => [0xA0, (i64::from(k) + transpose).clamp(0, 127) as u8, v7],
+        CtrlKind::Program => [0xC0, v7, 0],
+    }
+}
+
+/// Before an instrument plays from `pos`: reset its controllers, then send each one the last value
+/// it had on this track before `pos`.
+fn chase_controllers(s: &Session, t: &Track, pos: Samples, inst: &mut PluginSlot) {
+    inst.plugin.midi(0, [0xB0, 121, 0]);
+    const BEND: usize = 128;
+    const PRESSURE: usize = 129;
+    const PROGRAM: usize = 130;
+    let mut last = [(i64::MIN, 0i32); 131];
+    let sr = s.sample_rate;
+    for clip in t.clips() {
+        let ClipContent::Midi { sequence } = &clip.content else { continue };
+        if clip.muted || clip.start >= pos {
+            continue;
+        }
+        let base = s.tempo.samples_to_ticks(clip.start, sr);
+        let until = pos.min(clip.end());
+        for c in &sequence.ctrls {
+            let slot = match c.kind {
+                CtrlKind::Cc(n) => usize::from(n & 0x7F),
+                CtrlKind::PitchBend => BEND,
+                CtrlKind::ChannelPressure => PRESSURE,
+                CtrlKind::Program => PROGRAM,
+                CtrlKind::PolyPressure(_) => continue,
+            };
+            let at = s.tempo.tick_to_samples(base.saturating_add(c.tick), sr);
+            if at < until
+                && let Some(l) = last.get_mut(slot)
+                && at >= l.0
+            {
+                *l = (at, c.value);
+            }
+        }
+    }
+    for (slot, &(at, value)) in last.iter().enumerate() {
+        let kind = match slot {
+            BEND => CtrlKind::PitchBend,
+            PRESSURE => CtrlKind::ChannelPressure,
+            PROGRAM => CtrlKind::Program,
+            n => CtrlKind::Cc(u8::try_from(n).unwrap_or(0)),
+        };
+        if at != i64::MIN {
+            inst.plugin.midi(0, ctrl_message(kind, value, 0));
         }
     }
 }
@@ -2243,6 +2326,58 @@ mod tests {
         assert_eq!((t0.tempo, t0.numerator, t0.denominator, t0.samples, t0.bar), (90.0, 3, 4, 96_000, 1));
         assert!((t0.seconds - 2.0).abs() < 1e-9 && (t0.quarters - 3.0).abs() < 1e-9 && (t0.bar_start - 3.0).abs() < 1e-9);
         assert!(!seen[1].playing);
+    }
+
+    struct Ears {
+        inner: Box<dyn Plugin>,
+        heard: Arc<std::sync::Mutex<Vec<(usize, [u8; 3])>>>,
+    }
+
+    impl Plugin for Ears {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.inner.process(io, frames);
+        }
+        fn midi(&mut self, offset: usize, msg: [u8; 3]) {
+            self.heard.lock().unwrap().push((offset, msg));
+        }
+    }
+
+    #[test]
+    fn controllers_play_at_their_offsets_and_are_chased_after_a_seek() {
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.ears"));
+        let cc = |tick, kind, value| soundcraft_midi::CtrlEvent { tick, channel: 0, kind, value };
+        let ctrls = vec![cc(4, CtrlKind::Cc(64), 127), cc(960, CtrlKind::PitchBend, -8192), cc(1920, CtrlKind::Cc(64), 0)];
+        let seq = soundcraft_midi::Sequence { ctrls, ..Default::default() };
+        let cid = s.new_clip_id();
+        s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::midi(cid, "m", 0, 48_000 * 4, seq));
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ears = Ears { inner: soundcraft_dsp::create("gain").unwrap(), heard: Arc::clone(&heard) };
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.ears".into(), ch: 2, plugin: Box::new(ears) }]);
+        render_block(&mut eng, &s, 0);
+        assert_eq!(std::mem::take(&mut *heard.lock().unwrap()), vec![(0, [0xB0, 121, 0]), (100, [0xB0, 64, 127])]);
+        render_block(&mut eng, &s, 36_000);
+        assert_eq!(std::mem::take(&mut *heard.lock().unwrap()), vec![(0, [0xB0, 121, 0]), (0, [0xB0, 64, 127]), (0, [0xE0, 0, 0])]);
+        render_block(&mut eng, &s, 36_512);
+        assert!(heard.lock().unwrap().is_empty());
     }
 
     fn render_block(eng: &mut MixEngine, s: &Session, pos: i64) -> f32 {

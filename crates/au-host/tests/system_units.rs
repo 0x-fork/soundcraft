@@ -167,4 +167,23 @@ fn dls_synth_plays_a_note() {
     assert!(e > 1e-3, "{e}");
     p.note_off(0, 64);
     p.reset();
+    // Controllers reach the synth: MIDI volume 0 silences a note. (In this test because creating
+    // two DLS instances at once on two threads crashes inside the unit.)
+    p.prepare(48_000.0, 512, 2);
+    let loudest = |p: &mut Box<dyn Plugin>, volume: u8| {
+        p.midi(0, [0xB0, 7, volume]);
+        p.note_on(0, 60, 110);
+        let mut energy = 0.0f32;
+        for _ in 0..20 {
+            let mut io = vec![vec![0.0f32; 512]; 2];
+            p.process(&mut io, 512);
+            energy = energy.max(rms(&io[0]));
+        }
+        p.note_off(0, 60);
+        p.reset();
+        energy
+    };
+    let full = loudest(&mut p, 127);
+    let muted = loudest(&mut p, 0);
+    assert!(full > 1e-3 && muted < full * 0.01, "volume 127: {full}, volume 0: {muted}");
 }

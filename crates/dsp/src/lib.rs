@@ -218,6 +218,9 @@ pub trait Plugin: Send {
     /// Instruments: note events at sample offsets within the next block.
     fn note_on(&mut self, _offset: usize, _note: u8, _velocity: u8) {}
     fn note_off(&mut self, _offset: usize, _note: u8) {}
+    /// Instruments: any other MIDI 1.0 channel message (control change, pitch bend, pressure,
+    /// program change) at a sample offset within the next block.
+    fn midi(&mut self, _offset: usize, _msg: [u8; 3]) {}
     fn all_notes_off(&mut self) {}
     /// Sample-playing instruments (the Sampler): the recorded audio to play, `None` to clear it.
     /// `false` when the plugin does not play samples. Does not allocate; sounding voices stop.
