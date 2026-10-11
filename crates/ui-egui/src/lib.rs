@@ -18,6 +18,7 @@ pub mod mix_window;
 pub mod ops_windows;
 pub mod palette;
 pub mod panels;
+pub mod recovery;
 pub mod score_editor;
 pub mod shortcuts;
 pub mod theme;
@@ -232,6 +233,10 @@ pub struct SoundApp {
     pub native_menu_bar: bool,
     /// Folder for crash-recovery autosaves (native apps set it).
     pub autosave_dir: Option<std::path::PathBuf>,
+    /// This session's autosave folder, once it has been autosaved.
+    autosaved: Option<soundcraft_engine::autosave::Autosave>,
+    /// Unsaved work that earlier runs left in the autosave folder, offered for recovery.
+    pub leftovers: Vec<soundcraft_engine::autosave::Leftover>,
     /// Folder for user plugin presets (native apps set it).
     pub preset_dir: Option<std::path::PathBuf>,
     last_autosave: Option<std::time::Instant>,
@@ -296,6 +301,8 @@ impl SoundApp {
             services,
             native_menu_bar: false,
             autosave_dir: None,
+            autosaved: None,
+            leftovers: Vec::new(),
             preset_dir: None,
             last_autosave: None,
             dialogs: dialogs::Dialogs::default(),
@@ -343,8 +350,12 @@ impl SoundApp {
             // Third-party plugins keep state the session can't see: store it first.
             self.capture_plugin_states();
         }
+        let replacing = matches!(id, "session.new" | "session.open" | "session.close" | "session.revert");
         match self.engine.execute(id, &params) {
             Ok(v) => {
+                if replacing || (id.starts_with("session.save") && !self.engine.is_dirty()) {
+                    self.release_autosave(false);
+                }
                 if id == "app.quit" {
                     self.quit_requested = true;
                 }
@@ -520,14 +531,62 @@ impl SoundApp {
         }
         self.last_autosave = Some(std::time::Instant::now());
         self.capture_plugin_states();
-        let name = soundcraft_engine::io::sanitize_name(&self.engine.session().name);
-        let path = dir.join(&name).join(format!("{name}.scraft"));
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        self.autosave_to(&dir);
+    }
+
+    /// Write the session to its own folder under `root`; false when that failed.
+    fn autosave_to(&mut self, root: &std::path::Path) -> bool {
+        let written = match &mut self.autosaved {
+            Some(a) => a.write(&self.engine),
+            None => soundcraft_engine::autosave::Autosave::create(root, &self.engine.session().name)
+                .and_then(|mut a| a.write(&self.engine).map(|()| self.autosaved = Some(a))),
+        };
+        if let Err(e) = &written {
+            log::warn!("autosave failed: {e}");
+            self.ui.status = format!("Autosave failed: {e}");
         }
-        match soundcraft_engine::io::save_copy(&self.engine, &path.to_string_lossy()) {
-            Ok(_) => log::info!("autosaved to {}", path.display()),
-            Err(e) => log::warn!("autosave failed: {e}"),
+        written.is_ok()
+    }
+
+    /// Autosave now, if the app has an autosave folder.
+    fn write_autosave(&mut self) -> bool {
+        self.autosave_dir.clone().is_some_and(|root| self.autosave_to(&root))
+    }
+
+    /// Done with this session's autosave folder: keep it for the next launch, or delete it.
+    fn release_autosave(&mut self, keep: bool) {
+        if let Some(a) = self.autosaved.take()
+            && !keep
+        {
+            a.discard();
+        }
+    }
+
+    /// Done with the open session. Unsaved changes stay in its autosave folder for the next
+    /// launch, unless the user quit with SoundCraft's Quit.
+    pub fn close_autosave(&mut self) {
+        let keep = self.engine.is_dirty() && !self.quit_requested;
+        if keep {
+            self.capture_plugin_states();
+            self.write_autosave();
+        }
+        self.release_autosave(keep);
+    }
+
+    /// Replace the open session with unsaved work an earlier run left behind.
+    pub fn recover(&mut self, left: &soundcraft_engine::autosave::Leftover) {
+        self.close_autosave();
+        match soundcraft_engine::autosave::recover(&mut self.engine, left) {
+            Ok(missing) => {
+                if self.write_autosave() {
+                    soundcraft_engine::autosave::discard(left);
+                }
+                self.ui.status = match missing.len() {
+                    0 => format!("Recovered “{}”. Save it to keep the changes.", left.name),
+                    n => format!("Recovered “{}”, but {n} audio file(s) are missing. Save it to keep the changes.", left.name),
+                };
+            }
+            Err(e) => self.ui.status = format!("Couldn't recover “{}”: {e}", left.name),
         }
     }
 
@@ -899,6 +958,7 @@ impl SoundApp {
         video_window::show(self, &ctx);
         ops_windows::show(self, &ctx);
         extra_windows::show(self, &ctx);
+        recovery::show(self, &ctx);
         score_editor::show(self, &ctx);
         palette::show(self, &ctx);
         dialogs::show(self, &ctx);
