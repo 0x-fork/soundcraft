@@ -54,7 +54,12 @@ pub fn tool_definitions() -> Vec<Value> {
             &[],
         ),
         tool("open_session", "Open a .scraft session file.", json!({"path": {"type": "string"}}), &["path"]),
-        tool("save_session", "Save the session (path required the first time).", json!({"path": {"type": "string"}}), &[]),
+        tool(
+            "save_session",
+            "Save the session (path required the first time; replace: true to save over another existing file).",
+            json!({"path": {"type": "string"}, "replace": {"type": "boolean"}}),
+            &[],
+        ),
         tool(
             "import_audio",
             "Import an audio file (WAV, AIFF, FLAC, MP3, OGG, AAC/M4A, ALAC, CAF) onto a new or existing track.",

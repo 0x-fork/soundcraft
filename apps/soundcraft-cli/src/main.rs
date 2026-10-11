@@ -187,7 +187,7 @@ fn finish(e: &mut Engine, args: &[String]) -> ExitCode {
         }
     }
     if let Some(path) = arg_value(args, "--save") {
-        match e.execute("session.save", &json!({"path": path})) {
+        match e.execute("session.save", &json!({"path": path, "replace": true})) {
             Ok(v) => outln!("{v}"),
             Err(err) => return fail(err),
         }

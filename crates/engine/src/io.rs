@@ -474,8 +474,7 @@ pub fn save_copy(e: &Engine, path: &str) -> Result<usize> {
 /// Write `session` to `path`; returns the session with updated media paths, the number of audio
 /// files written and the final path.
 fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Session, usize, PathBuf)> {
-    let p = PathBuf::from(path);
-    let p = if p.extension().is_none() { p.with_extension(soundcraft_model::SESSION_EXTENSION) } else { p };
+    let p = session_file(path);
     let dir = p.parent().map(Path::to_path_buf).unwrap_or_default();
     let audio_dir = dir.join("Audio Files");
     let mut s = session.clone();
@@ -519,11 +518,31 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
         s.name = stem.to_string();
     }
     let text = s.to_json().map_err(|err| EngineError::Io(err.to_string()))?;
+    std::fs::create_dir_all(&dir).map_err(|err| EngineError::Io(format!("{}: {err}", dir.display())))?;
     // Atomic-ish write: temp file then rename.
     let tmp = p.with_extension("scraft.tmp");
     std::fs::write(&tmp, text).map_err(|err| EngineError::Io(format!("{}: {err}", tmp.display())))?;
     std::fs::rename(&tmp, &p).map_err(|err| EngineError::Io(format!("{}: {err}", p.display())))?;
     Ok((s, written, p))
+}
+
+/// The file a session saved to `path` goes to: `path`, with `.scraft` added when it has no
+/// extension and isn't an existing file.
+pub fn session_file(path: &str) -> PathBuf {
+    let p = PathBuf::from(path);
+    if p.extension().is_none() && !p.is_file() { p.with_extension(soundcraft_model::SESSION_EXTENSION) } else { p }
+}
+
+/// True when `command` would write a session over the existing `file`. Save, Save As and Save
+/// Copy In may write the open session's own file; other commands never ask.
+pub fn replaces(e: &Engine, command: &str, file: &Path) -> bool {
+    match command {
+        "session.save" | "session.save_as" | "session.save_copy" => {
+            file.exists() && !e.path.as_deref().is_some_and(|own| same_path(Path::new(own), file))
+        }
+        "session.save_template" | "file.export_selected_tracks_as_session" => file.exists(),
+        _ => false,
+    }
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -743,6 +762,34 @@ mod save_tests {
         save_session(&mut missing, &path("B/Moved.scraft")).unwrap();
         let mut r = Engine::default();
         assert_eq!(open_session(&mut r, &path("B/Moved.scraft")).unwrap(), vec![dir.join("A/Audio Files/Audio 1_02.wav").display().to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_over_another_session_needs_replace() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("Song.scraft").to_string_lossy().into_owned();
+        let mut first = with_take(0.5);
+        first.execute("session.save_as", &json!({"path": path})).unwrap();
+        first.execute("session.save", &json!({})).unwrap();
+        first.execute("session.save_as", &json!({"path": dir.join("Song")})).unwrap();
+        assert!(first.execute("session.save_template", &json!({"path": path})).is_err());
+        let mut second = with_take(-0.25);
+        let track = second.session().tracks[0].id.0;
+        for id in ["session.save", "session.save_as", "session.save_copy", "session.save_template", "file.export_selected_tracks_as_session"] {
+            let err = second.execute(id, &json!({"path": path, "tracks": [track]})).unwrap_err();
+            assert!(err.to_string().contains("`replace: true`"), "{id}: {err}");
+        }
+        assert_eq!(std::fs::read_dir(dir.join("Audio Files")).unwrap().count(), 1);
+        Engine::default().execute("session.save_as", &json!({"path": dir.join("New/New.scraft")})).unwrap();
+        std::fs::copy(&path, dir.join("Song")).unwrap();
+        let mut bare = Engine::default();
+        open_session(&mut bare, &dir.join("Song").to_string_lossy()).unwrap();
+        bare.execute("session.save", &json!({})).unwrap();
+        second.execute("session.save_as", &json!({"path": path, "replace": true})).unwrap();
+        let r = reopen(&path);
+        assert_eq!(r.session().pool.get(r.session().sources[0].id).unwrap().buffer.channels[0][0], -0.25);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
