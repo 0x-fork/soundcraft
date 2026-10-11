@@ -31,8 +31,8 @@ pub mod windows;
 use serde_json::{Value, json};
 use soundcraft_engine::{Engine, TransportRequest};
 use soundcraft_model::TrackId;
-use soundcraft_playback::Player;
 use soundcraft_playback::record::Trouble;
+use soundcraft_playback::{OutputTrouble, Player};
 use soundcraft_time::{Range, Samples};
 use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
@@ -681,6 +681,34 @@ impl SoundApp {
         }
     }
 
+    /// Stop the transport, keeping a take in progress, when the audio output fails.
+    fn watch_output(&mut self) {
+        let Some(p) = &self.player else { return };
+        let Some(trouble) = p.trouble() else { return };
+        let name = p.device_name.clone();
+        let (cause, then) = match trouble {
+            OutputTrouble::Bug => (
+                "the audio engine hit an internal error (see the log)".to_string(),
+                "Use Reconnect audio device in Setup ▸ Playback Engine, or restart SoundCraft.",
+            ),
+            OutputTrouble::Gone => {
+                (format!("“{name}” was disconnected"), "Plug it back in, then use Reconnect audio device in Setup ▸ Playback Engine.")
+            }
+            OutputTrouble::Stalled => (format!("“{name}” stopped asking for audio"), "Use Reconnect audio device in Setup ▸ Playback Engine."),
+        };
+        let (recording, playing) = (self.engine.transport.recording, self.engine.transport.playing);
+        if recording || playing {
+            self.stop_play();
+        }
+        self.ui.status = if recording {
+            format!("Recording stopped: {cause}. The take is kept up to there. {then}")
+        } else if playing {
+            format!("Playback stopped: {cause}. {then}")
+        } else {
+            format!("Audio output: {cause}. {then}")
+        };
+    }
+
     /// Stop recording, keeping the take, when the input device or the disk fails, and say as soon
     /// as a slow disk loses input.
     fn watch_input(&mut self) {
@@ -965,10 +993,7 @@ impl SoundApp {
                 self.engine.end_merge();
             }
         }
-        if self.player.as_ref().is_some_and(Player::newly_failed) {
-            self.stop_play();
-            self.ui.status = "The audio engine hit an internal error (see the log) and went silent. Use Reconnect audio device in Setup ▸ Playback Engine, or restart SoundCraft.".into();
-        }
+        self.watch_output();
         self.watch_input();
         // Stop the old playback before sending a replacement session to the audio thread.
         self.handle_transport(dt);

@@ -76,23 +76,66 @@ struct Shared {
     meters: Mutex<MeterSnapshot>,
 }
 
-/// Set once a block panicked: output stays silent from then on.
+/// What stopped the audio output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputTrouble {
+    /// A block panicked; the output stays silent.
+    Bug,
+    /// The device went away.
+    Gone,
+    /// The device stopped asking for audio while playing.
+    Stalled,
+}
+
+/// How the audio output is doing, for the UI.
 #[derive(Default)]
 struct Fault {
+    /// A block panicked: output stays silent from then on.
     failed: AtomicBool,
+    gone: AtomicBool,
+    /// Blocks so far, to tell a device that stopped asking for audio.
+    beats: std::sync::atomic::AtomicU64,
     /// The UI has been told.
     reported: AtomicBool,
 }
 
 impl Fault {
-    fn newly_failed(&self) -> bool {
-        self.failed.load(Ordering::Relaxed) && !self.reported.swap(true, Ordering::Relaxed)
+    /// What stopped the output, once.
+    fn trouble(&self, stalled: bool) -> Option<OutputTrouble> {
+        let trouble = if self.failed.load(Ordering::Relaxed) {
+            OutputTrouble::Bug
+        } else if self.gone.load(Ordering::Relaxed) {
+            OutputTrouble::Gone
+        } else if stalled {
+            OutputTrouble::Stalled
+        } else {
+            return None;
+        };
+        (!self.reported.swap(true, Ordering::Relaxed)).then_some(trouble)
+    }
+}
+
+/// How long a playing output may go without a block before it counts as stalled.
+#[cfg(not(target_arch = "wasm32"))]
+const STALL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// True once the block count `beats` has stood still for `STALL` while playing; `seen` is the
+/// count last seen and since when.
+#[cfg(not(target_arch = "wasm32"))]
+fn stalled(seen: &mut Option<(u64, std::time::Instant)>, beats: u64, playing: bool) -> bool {
+    match *seen {
+        Some((b, since)) if playing && b == beats => since.elapsed() >= STALL,
+        _ => {
+            *seen = Some((beats, std::time::Instant::now()));
+            false
+        }
     }
 }
 
 /// Fill one block with `fill`. If it panics, the block and every later one are silent and the
 /// transport stops, rather than the panic taking the app down.
 fn guarded_block(fault: &Fault, shared: &Shared, out: &mut [f32], fill: impl FnOnce(&mut [f32])) {
+    fault.beats.fetch_add(1, Ordering::Relaxed);
     if fault.failed.load(Ordering::Relaxed) || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fill(out))).is_err() {
         fault.failed.store(true, Ordering::Relaxed);
         shared.playing.store(false, Ordering::Relaxed);
@@ -372,6 +415,9 @@ impl Side {
 pub struct Player {
     shared: Arc<Shared>,
     fault: Arc<Fault>,
+    /// The block count last seen while playing, and since when.
+    #[cfg(not(target_arch = "wasm32"))]
+    watch: Mutex<Option<(u64, std::time::Instant)>>,
     tx: Sender<Cmd>,
     side: Mutex<Side>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -395,9 +441,17 @@ impl Player {
         p
     }
 
-    /// True once after the audio engine hit an internal error and went silent.
-    pub fn newly_failed(&self) -> bool {
-        self.fault.newly_failed()
+    /// What stopped the audio output, once: a bug in the engine, or the device went away or
+    /// stopped asking for audio while playing.
+    pub fn trouble(&self) -> Option<OutputTrouble> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let stalled = {
+            let playing = self.shared.playing.load(Ordering::Relaxed) && !self.silent;
+            stalled(&mut self.watch.lock().unwrap_or_else(PoisonError::into_inner), self.fault.beats.load(Ordering::Relaxed), playing)
+        };
+        #[cfg(target_arch = "wasm32")]
+        let stalled = false;
+        self.fault.trouble(stalled)
     }
 
     fn side(&self) -> std::sync::MutexGuard<'_, Side> {
@@ -425,8 +479,12 @@ impl Player {
                 let (failed, guard) = (Arc::clone(&fault), Arc::clone(&shared));
                 // cpal may call this on the audio thread (on ALSA in a loop while the device
                 // stays broken): marked, so the logger hands the record off instead of writing it.
-                let err_fn = |e: cpal::StreamError| {
+                let gone = Arc::clone(&fault);
+                let err_fn = move |e: cpal::StreamError| {
                     mark_audio_thread();
+                    if matches!(e, cpal::StreamError::DeviceNotAvailable) {
+                        gone.gone.store(true, Ordering::Relaxed);
+                    }
                     log::warn!("audio stream error: {e}");
                 };
                 use cpal::traits::{DeviceTrait, StreamTrait};
@@ -447,6 +505,8 @@ impl Player {
                         Player {
                             shared,
                             fault,
+                            #[cfg(not(target_arch = "wasm32"))]
+                            watch: Mutex::new(None),
                             tx,
                             side,
                             _stream: Some(stream),
@@ -524,6 +584,7 @@ impl Player {
         Player {
             shared,
             fault,
+            watch: Mutex::new(None),
             tx,
             side,
             _stream: None,
@@ -814,12 +875,33 @@ mod tests {
         let fault = Fault::default();
         let mut out = [0.5f32; 8];
         guarded_block(&fault, &shared, &mut out, |o| o.fill(0.25));
-        assert_eq!((out, fault.newly_failed()), ([0.25; 8], false));
+        assert_eq!((out, fault.trouble(false)), ([0.25; 8], None));
         guarded_block(&fault, &shared, &mut out, |_| std::panic::panic_any("a bug in the mix"));
         guarded_block(&fault, &shared, &mut out, |o| o.fill(0.25));
         assert_eq!(out, [0.0; 8]);
         assert!(!shared.playing.load(Ordering::Relaxed));
-        assert_eq!((fault.newly_failed(), fault.newly_failed()), (true, false));
+        assert_eq!((fault.trouble(false), fault.trouble(false)), (Some(OutputTrouble::Bug), None));
+        assert_eq!(fault.beats.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn a_lost_or_stalled_device_is_reported_once() {
+        let ago = |seen: &mut Option<(u64, std::time::Instant)>| {
+            if let Some(s) = seen {
+                s.1 = std::time::Instant::now().checked_sub(STALL).unwrap();
+            }
+        };
+        let mut seen = None;
+        assert!(!stalled(&mut seen, 5, true));
+        ago(&mut seen);
+        assert!(stalled(&mut seen, 5, true));
+        assert!(!stalled(&mut seen, 6, true), "it asked again");
+        ago(&mut seen);
+        assert!(!stalled(&mut seen, 6, false), "stopped, so nothing to ask for");
+        assert_eq!(Fault::default().trouble(true), Some(OutputTrouble::Stalled));
+        let fault = Fault::default();
+        fault.gone.store(true, Ordering::Relaxed);
+        assert_eq!((fault.trouble(false), fault.trouble(true)), (Some(OutputTrouble::Gone), None));
     }
 
     #[test]
