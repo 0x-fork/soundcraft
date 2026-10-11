@@ -1,6 +1,7 @@
 //! Bounce Mix renders across frames behind a progress window instead of freezing the app.
 use egui::vec2;
 use egui_kittest::{Harness, kittest::Queryable};
+use serde_json::json;
 use soundcraft_ui_egui::dialogs::Dialog;
 use soundcraft_ui_egui::{Services, SoundApp};
 use std::path::{Path, PathBuf};
@@ -76,6 +77,24 @@ fn a_bounce_keeps_going_while_the_window_is_hidden() {
     assert!(calls > 3, "{calls}");
     assert!(h.state().ui.status.starts_with("Bounced Hidden.wav"), "{}", h.state().ui.status);
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_session_cannot_be_replaced_while_it_bounces() {
+    let dir = scratch("bounce-replace");
+    let mut h = harness();
+    let tracks = h.state().engine.session().tracks.len();
+    bounce_from_dialog(&mut h, &dir.join("Mix.wav"));
+    for id in ["session.new", "session.open", "session.close", "session.revert"] {
+        let err = h.state_mut().run(id, json!({"path": dir.join("Other.scraft").to_string_lossy()})).unwrap_err();
+        assert!(err.contains("bounce"), "{id}: {err}");
+    }
+    assert_eq!(h.state().engine.session().tracks.len(), tracks);
+    assert!(h.state().bounce.is_some());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.state_mut().run("session.close", json!({})).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

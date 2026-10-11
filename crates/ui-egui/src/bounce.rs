@@ -36,6 +36,15 @@ pub fn step(app: &mut SoundApp, ctx: &egui::Context) {
     app.bounce = None;
 }
 
+/// Refuses to replace the session while a bounce holds its own copy: two large sessions could run
+/// out of memory. True when refused; the status line says why.
+pub fn refuses_session_switch(app: &mut SoundApp) -> bool {
+    if app.bounce.is_some() {
+        app.ui.status = "Finish or cancel the bounce first".into();
+    }
+    app.bounce.is_some()
+}
+
 /// Whether to render another block in this call: for 30 ms.
 #[cfg(not(target_arch = "wasm32"))]
 fn slice() -> impl FnMut() -> bool {
