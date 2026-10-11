@@ -663,7 +663,7 @@ impl MixEngine {
         // through any track, send or insert. Only the playback engine sets `metronome`.
         // Not while monitoring only (transport stopped): the position does not advance there, so the
         // start of the same beat would repeat every block as a buzz.
-        if self.metronome && !self.monitor_only && s.edit.click && !(s.edit.flag("click.only_during_record") && !self.recording) {
+        if self.metronome && !self.monitor_only && s.edit.click && (!s.edit.flag("click.only_during_record") || self.recording) {
             click::render(s, pos, frames, &mut self.main);
         }
         // Output: min(out.len(), main channels) channels; any further output channels are silent.

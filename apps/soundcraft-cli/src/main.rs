@@ -299,7 +299,7 @@ fn app(args: &[String]) -> ExitCode {
     let positional: Vec<&String> = args
         .iter()
         .enumerate()
-        .filter(|(i, a)| !a.starts_with("--") && !(*i > 0 && args.get(i - 1).is_some_and(|p| p == "--port")))
+        .filter(|(i, a)| !(a.starts_with("--") || (*i > 0 && args.get(i - 1).is_some_and(|p| p == "--port"))))
         .map(|(_, a)| a)
         .collect();
     let Some(method) = positional.first() else { return fail("app [--port P] METHOD [JSON]") };
