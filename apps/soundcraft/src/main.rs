@@ -25,6 +25,15 @@ use std::sync::Arc;
 
 struct App(SoundApp, Option<&'static logging::AppLogger>, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
 
+/// Sends the title only when it changes, remembered here as X11 and Wayland can't read it back.
+fn set_title(ctx: &egui::Context, title: String) {
+    let id = egui::Id::new("window_title");
+    if ctx.data(|d| d.get_temp::<String>(id)).as_deref() != Some(title.as_str()) {
+        ctx.data_mut(|d| d.insert_temp(id, title.clone()));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+    }
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // What the realtime audio thread logged is written here, off that thread.
@@ -61,7 +70,7 @@ impl eframe::App for App {
         } else {
             format!("{} — SoundCraft", self.0.engine.session().name)
         };
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        set_title(ctx, title);
     }
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         self.0.raw_input_hook(raw);
@@ -266,4 +275,22 @@ fn main() -> eframe::Result {
             )))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::set_title;
+
+    #[test]
+    fn the_title_is_sent_only_when_it_changes() {
+        let ctx = egui::Context::default();
+        let titles = |title: &str| {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| set_title(ui.ctx(), title.to_string()));
+            out.textures_delta.clear();
+            out.viewport_output.values().flat_map(|v| &v.commands).filter(|c| matches!(c, egui::ViewportCommand::Title(_))).count()
+        };
+        assert_eq!(titles("Song — SoundCraft"), 1);
+        assert_eq!(titles("Song — SoundCraft"), 0);
+        assert_eq!(titles("Song * — SoundCraft"), 1);
+    }
 }

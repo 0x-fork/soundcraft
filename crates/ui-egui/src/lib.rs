@@ -216,7 +216,7 @@ pub struct SoundApp {
     pub autosave_dir: Option<std::path::PathBuf>,
     /// Folder for user plugin presets (native apps set it).
     pub preset_dir: Option<std::path::PathBuf>,
-    last_autosave: f64,
+    last_autosave: Option<std::time::Instant>,
     pub dialogs: dialogs::Dialogs,
     pub meters: HashMap<TrackId, MeterDisplay>,
     pub main_meter: MeterDisplay,
@@ -276,7 +276,7 @@ impl SoundApp {
             native_menu_bar: false,
             autosave_dir: None,
             preset_dir: None,
-            last_autosave: 0.0,
+            last_autosave: None,
             dialogs: dialogs::Dialogs::default(),
             meters: HashMap::new(),
             main_meter: MeterDisplay::default(),
@@ -473,15 +473,14 @@ impl SoundApp {
     }
 
     /// Every two minutes, copy a modified session to the autosave folder (not while recording).
-    fn autosave(&mut self, now: f64) {
+    /// Timed by the wall clock: egui's stands still while the window is hidden.
+    fn autosave(&mut self) {
         let Some(dir) = self.autosave_dir.clone() else { return };
-        if self.last_autosave == 0.0 {
-            self.last_autosave = now;
-        }
-        if now - self.last_autosave < 120.0 || !self.engine.is_dirty() || self.engine.transport.recording {
+        let last = *self.last_autosave.get_or_insert_with(std::time::Instant::now);
+        if last.elapsed().as_secs() < 120 || !self.engine.is_dirty() || self.engine.transport.recording {
             return;
         }
-        self.last_autosave = now;
+        self.last_autosave = Some(std::time::Instant::now());
         self.capture_plugin_states();
         let name = soundcraft_engine::io::sanitize_name(&self.engine.session().name);
         let path = dir.join(&name).join(format!("{name}.scraft"));
@@ -798,16 +797,17 @@ impl SoundApp {
             }
         }
         self.write_automation(ctx);
-        self.autosave(now);
+        self.autosave();
         if self.recorder.is_none()
             && !self.recorder_failed
             && self.engine.session().tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm)
         {
             self.ensure_input();
         }
-        if self.is_playing() || self.meters.values().any(|m| m.level[0] > 0.0001) || !self.pending_shots.is_empty() || !self.synthetic.is_empty() {
-            ctx.request_repaint();
-        }
+        // Autosave and the macOS menu bar only run on frames, and plugin editors are native windows egui never hears from.
+        // egui takes its predicted frame time off every delay, so add it back.
+        let editors = self.player.as_ref().is_some_and(Player::any_editor_open);
+        ctx.request_repaint_after_secs(if editors { 0.03 } else { 1.0 } + ctx.input(|i| i.predicted_dt));
         control::collect_screenshots(self, ctx);
     }
 
@@ -873,6 +873,10 @@ impl SoundApp {
         score_editor::show(self, &ctx);
         palette::show(self, &ctx);
         dialogs::show(self, &ctx);
+        // Here, not in logic(): a covered or minimized window runs only logic(), with no vsync to pace it.
+        if self.is_playing() || self.meters.values().any(|m| m.level[0] > 0.0001) || !self.pending_shots.is_empty() || !self.synthetic.is_empty() {
+            ctx.request_repaint();
+        }
     }
 
     /// UI state as JSON (control channel `ui.inspect`).
@@ -958,6 +962,20 @@ mod tests {
         app.handle_transport(0.25);
         assert!(!app.is_playing());
         assert_eq!(app.engine.transport.position, 0);
+    }
+
+    #[test]
+    fn a_hidden_window_still_autosaves() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-hidden-autosave-{}", std::process::id()));
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        app.autosave_dir = Some(dir.clone());
+        app.run("track.new", json!({"count": 1, "format": "mono"})).unwrap();
+        app.last_autosave = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(121));
+        let hidden = egui::ViewportInfo { minimized: Some(true), ..Default::default() };
+        let raw = egui::RawInput { viewports: [(egui::ViewportId::ROOT, hidden)].into_iter().collect(), ..Default::default() };
+        let _ = egui::Context::default().run_logic(&raw, |ctx| app.logic(ctx));
+        assert!(app.latest_autosave().is_some());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

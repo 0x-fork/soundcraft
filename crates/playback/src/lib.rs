@@ -584,6 +584,10 @@ impl Player {
         self.side().editors.get(&(track, slot)).is_some_and(|e| e.is_open())
     }
 
+    pub fn any_editor_open(&self) -> bool {
+        self.side().editors.values().any(|e| e.is_open())
+    }
+
     /// Shows a parameter change made elsewhere in the plugin's open editor.
     pub fn editor_set_param(&self, track: TrackId, slot: usize, id: &str, value: f32) {
         if let Some(e) = self.side().editors.get_mut(&(track, slot)) {
