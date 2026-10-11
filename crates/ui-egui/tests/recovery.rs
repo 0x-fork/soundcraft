@@ -101,3 +101,24 @@ fn closing_the_session_or_quitting_drops_its_autosave() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_panic_in_a_frame_autosaves_and_the_app_carries_on() {
+    let _one = one_at_a_time();
+    let dir = folder("recovery-panic");
+    let root = dir.join("Autosave");
+    let mut app = launch(&root);
+    app.run("track.new", json!({"name": "Vocal"})).unwrap();
+    app.guarded(|_| std::panic::panic_any("a bug in a frame"));
+    assert!(app.ui.status.contains("autosaved"), "{}", app.ui.status);
+    app.guarded(|app| {
+        app.run("track.new", json!({"name": "Bass"})).unwrap();
+    });
+    assert!(app.engine.session().track_by_name("Bass").is_some());
+    drop(app);
+    let left = leftovers(&root);
+    let mut next = launch(&root);
+    next.recover(&left[0]);
+    assert!(next.engine.session().track_by_name("Vocal").is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -237,6 +237,8 @@ pub struct SoundApp {
     autosaved: Option<soundcraft_engine::autosave::Autosave>,
     /// Unsaved work that earlier runs left in the autosave folder, offered for recovery.
     pub leftovers: Vec<soundcraft_engine::autosave::Leftover>,
+    /// The document revision last autosaved after a caught panic.
+    panic_rev: u64,
     /// Folder for user plugin presets (native apps set it).
     pub preset_dir: Option<std::path::PathBuf>,
     last_autosave: Option<std::time::Instant>,
@@ -303,6 +305,7 @@ impl SoundApp {
             autosave_dir: None,
             autosaved: None,
             leftovers: Vec::new(),
+            panic_rev: 0,
             preset_dir: None,
             last_autosave: None,
             dialogs: dialogs::Dialogs::default(),
@@ -571,6 +574,21 @@ impl SoundApp {
             self.write_autosave();
         }
         self.release_autosave(keep);
+    }
+
+    /// Run part of a frame. If it panics, the session is autosaved (once per change) and the app
+    /// carries on instead of quitting.
+    pub fn guarded(&mut self, f: impl FnOnce(&mut SoundApp)) {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self))).is_ok() || self.panic_rev == self.engine.revision {
+            return;
+        }
+        self.panic_rev = self.engine.revision;
+        let saved = self.engine.is_dirty() && self.write_autosave();
+        self.ui.status = if saved {
+            "SoundCraft hit an internal error (see the log). Your changes were autosaved: save them, then restart SoundCraft.".into()
+        } else {
+            "SoundCraft hit an internal error (see the log). Restart SoundCraft to be safe.".into()
+        };
     }
 
     /// Replace the open session with unsaved work an earlier run left behind.

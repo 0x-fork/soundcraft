@@ -44,7 +44,7 @@ impl eframe::App for App {
         if let Some(menu) = &mut self.2 {
             menu.process(&mut self.0);
         }
-        self.0.logic(ctx);
+        self.0.guarded(|app| app.logic(ctx));
         #[cfg(target_os = "macos")]
         if let Some(menu) = &mut self.2 {
             menu.sync(&self.0);
@@ -85,7 +85,7 @@ impl eframe::App for App {
         self.0.raw_input_hook(raw);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.0.ui(ui);
+        self.0.guarded(|app| app.ui(ui));
     }
     fn on_exit(&mut self) {
         self.0.close_autosave();
