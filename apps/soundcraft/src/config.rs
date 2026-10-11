@@ -37,8 +37,12 @@ fn config_dir_with(platform: Platform, env: impl Fn(&str) -> Option<OsString>) -
     }
 }
 
-/// Read a bounded native settings file and reject invalid docking trees before using them.
+/// Read bounded settings, recovering unreadable docking metadata independently of other settings.
 pub fn load_ui(path: &std::path::Path) -> Result<Option<soundcraft_ui_egui::UiState>, String> {
+    read_ui(path, true)
+}
+
+fn read_ui(path: &std::path::Path, recover_docking: bool) -> Result<Option<soundcraft_ui_egui::UiState>, String> {
     use std::io::Read as _;
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -50,7 +54,20 @@ pub fn load_ui(path: &std::path::Path) -> Result<Option<soundcraft_ui_egui::UiSt
     if bytes.len() as u64 > MAX_UI_BYTES {
         return Err("Settings file exceeds the 4 MiB limit".into());
     }
-    let state: soundcraft_ui_egui::UiState = serde_json::from_slice(&bytes).map_err(|error| format!("Settings could not be restored: {error}"))?;
+    let mut saved: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| format!("Settings could not be restored: {error}"))?;
+    if recover_docking && let Some(fields) = saved.as_object_mut() {
+        for (field, mix) in [("docking", false), ("mix_docking", true)] {
+            let unreadable =
+                fields.get(field).is_some_and(|value| match serde_json::from_value::<soundcraft_ui_egui::docking::Workspace>(value.clone()) {
+                    Ok(workspace) => if mix { workspace.validate_mix() } else { workspace.validate() }.is_err(),
+                    Err(_) => true,
+                });
+            if unreadable {
+                fields.remove(field);
+            }
+        }
+    }
+    let state: soundcraft_ui_egui::UiState = serde_json::from_value(saved).map_err(|error| format!("Settings could not be restored: {error}"))?;
     state.docking.validate()?;
     state.mix_docking.validate_mix()?;
     Ok(Some(state))
@@ -61,7 +78,8 @@ const MAX_UI_BYTES: u64 = 4 * 1024 * 1024;
 /// Write settings atomically. Preserve an unreadable or malformed existing file for recovery.
 pub fn save_ui(path: &std::path::Path, ui: &soundcraft_ui_egui::UiState) -> Result<(), String> {
     use std::io::Write as _;
-    load_ui(path)?;
+    // Loading can recover a future layout for this session, but saving must preserve its source.
+    read_ui(path, false)?;
     ui.docking.validate()?;
     ui.mix_docking.validate_mix()?;
     let mut saved = ui.clone();
@@ -119,13 +137,47 @@ mod config_tests {
         invalid_mix.mix_docking = soundcraft_ui_egui::docking::Workspace::default();
         let invalid_bytes = serde_json::to_vec(&invalid_mix).unwrap();
         std::fs::write(&path, &invalid_bytes).unwrap();
-        assert!(load_ui(&path).is_err());
+        let recovered = load_ui(&path).unwrap().unwrap();
+        assert_eq!(recovered.theme, app.ui.theme);
+        assert_eq!(serde_json::to_value(recovered.docking).unwrap(), serde_json::to_value(&app.ui.docking).unwrap());
+        recovered.mix_docking.validate_mix().unwrap();
         assert!(save_ui(&path, &app.ui).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), invalid_bytes);
         std::fs::write(&path, b"damaged settings").unwrap();
         assert!(load_ui(&path).is_err());
         assert!(save_ui(&path, &app.ui).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"damaged settings");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn future_edit_and_mix_layouts_preserve_other_preferences_and_the_original_file() {
+        use soundcraft_ui_egui::{Services, SoundApp};
+        let directory = std::env::temp_dir().join(format!("soundcraft-future-dock-prefs-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("ui.json");
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        app.run("ui.dock", serde_json::json!({"operation":"float","panel":"tracks","rect":[80,90,260,400]})).unwrap();
+        app.ui.theme = soundcraft_ui_egui::theme::ThemeMode::Light;
+        app.ui.narrow_mix = true;
+        for field in ["docking", "mix_docking"] {
+            for invalid in [serde_json::json!({"layout":{"root":{"FutureLayout":{}}}}), serde_json::json!(false)] {
+                let mut saved = serde_json::to_value(&app.ui).unwrap();
+                saved[field] = invalid;
+                assert!(serde_json::from_value::<soundcraft_ui_egui::UiState>(saved.clone()).is_err());
+                let bytes = serde_json::to_vec(&saved).unwrap();
+                std::fs::write(&path, &bytes).unwrap();
+                let recovered = load_ui(&path).unwrap().unwrap();
+                assert_eq!(recovered.theme, app.ui.theme);
+                assert!(recovered.narrow_mix);
+                recovered.docking.validate().unwrap();
+                recovered.mix_docking.validate_mix().unwrap();
+                let other = if field == "docking" { "mix_docking" } else { "docking" };
+                assert_eq!(serde_json::to_value(&recovered).unwrap()[other], saved[other]);
+                assert!(save_ui(&path, &recovered).is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            }
+        }
         std::fs::remove_dir_all(directory).unwrap();
     }
 
