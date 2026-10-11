@@ -466,7 +466,7 @@ pub fn save_session(e: &mut Engine, path: &str) -> Result<usize> {
 }
 
 /// Write a copy of the session (and any audio it needs) without touching the open document —
-/// used for autosave / crash recovery. Audio files in the target folder are overwritten in place.
+/// used for autosave / crash recovery. Audio already written for a source is reused.
 pub fn save_copy(e: &Engine, path: &str) -> Result<usize> {
     write_session(e.session(), path, true).map(|(_, n, _)| n)
 }
@@ -479,42 +479,42 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
     let dir = p.parent().map(Path::to_path_buf).unwrap_or_default();
     let audio_dir = dir.join("Audio Files");
     let mut s = session.clone();
+    let from = s.folder.clone();
+    let same_dir = from.as_deref().is_some_and(|f| same_path(f, &dir));
     let mut written = 0;
     for src in &mut s.sources {
-        let rel_target = format!("Audio Files/{}.wav", sanitize_name(&src.name));
-        let exists_rel = !Path::new(&src.path).is_absolute() && dir.join(&src.path).exists();
+        if !same_dir
+            && s.pool.get(src.id).is_none()
+            && Path::new(&src.path).is_relative()
+            && let Some(f) = &from
+        {
+            src.path = f.join(&src.path).to_string_lossy().into_owned();
+        }
+        let exists_rel = same_dir && !Path::new(&src.path).is_absolute() && dir.join(&src.path).exists();
         if exists_rel && !src.unsaved {
             continue;
         }
         let Some(audio) = s.pool.get(src.id) else { continue };
         std::fs::create_dir_all(&audio_dir).map_err(|err| EngineError::Io(format!("{}: {err}", audio_dir.display())))?;
-        let mut target = rel_target.clone();
+        let mut stem = sanitize_name(&src.name);
         if overwrite {
             // One file per source id so autosaves never collide or pile up.
-            target = format!("Audio Files/{}_{}.wav", sanitize_name(&src.name), src.id.0);
-            if dir.join(&target).exists() {
-                src.path = target;
+            stem = format!("{stem}_{}", src.id.0);
+            if audio_dir.join(format!("{stem}.wav")).exists() {
+                src.path = format!("Audio Files/{stem}.wav");
                 src.unsaved = false;
                 continue;
-            }
-        } else {
-            let mut k = 1;
-            while dir.join(&target).exists() && !(exists_rel && target == src.path) {
-                target = format!("Audio Files/{}_{k:02}.wav", sanitize_name(&src.name));
-                k += 1;
-                if k > 999 {
-                    break;
-                }
             }
         }
         let opts = EncodeOptions { format: FileFormat::Wav, bit_depth: soundcraft_audio_io::BitDepth::Float32, dither: false, bwf: None };
         let bytes = soundcraft_audio_io::encode(&audio.buffer, &opts).map_err(|err| EngineError::Io(err.to_string()))?;
-        std::fs::write(dir.join(&target), bytes).map_err(|err| EngineError::Io(format!("{target}: {err}")))?;
-        src.path = target;
+        let (name, new) = store_wav(&audio_dir, &stem, &bytes)?;
+        src.path = format!("Audio Files/{name}");
         src.unsaved = false;
         src.format = FileFormat::Wav;
-        written += 1;
+        written += usize::from(new);
     }
+    s.folder = Some(dir.clone());
     if !overwrite && let Some(stem) = p.file_stem().and_then(|x| x.to_str()) {
         s.name = stem.to_string();
     }
@@ -524,6 +524,38 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
     std::fs::write(&tmp, text).map_err(|err| EngineError::Io(format!("{}: {err}", tmp.display())))?;
     std::fs::rename(&tmp, &p).map_err(|err| EngineError::Io(format!("{}: {err}", p.display())))?;
     Ok((s, written, p))
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    let full = |p: &Path| if p.as_os_str().is_empty() { Path::new(".").canonicalize() } else { p.canonicalize() };
+    a == b || matches!((full(a), full(b)), (Ok(x), Ok(y)) if x == y)
+}
+
+/// Store `bytes` as the first of `<stem>.wav`, `<stem>_01.wav`, … in `dir` that is free or already
+/// holds exactly these bytes, so saving never replaces audio; returns the name and whether it was
+/// written.
+fn store_wav(dir: &Path, stem: &str, bytes: &[u8]) -> Result<(String, bool)> {
+    use std::io::Write;
+    for k in 0..10_000u32 {
+        let name = if k == 0 { format!("{stem}.wav") } else { format!("{stem}_{k:02}.wav") };
+        let path = dir.join(&name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                if let Err(err) = f.write_all(bytes) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(EngineError::Io(format!("{}: {err}", path.display())));
+                }
+                return Ok((name, true));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::fs::metadata(&path).is_ok_and(|m| m.len() == bytes.len() as u64) && std::fs::read(&path).is_ok_and(|b| b == bytes) {
+                    return Ok((name, false));
+                }
+            }
+            Err(err) => return Err(EngineError::Io(format!("{}: {err}", path.display()))),
+        }
+    }
+    Err(EngineError::Io(format!("{}: no free file name for {stem}", dir.display())))
 }
 
 /// Open a `.scraft` session and decode its audio files (missing files are reported, not fatal).
@@ -549,6 +581,7 @@ pub fn open_session(e: &mut Engine, path: &str) -> Result<Vec<String>> {
         }
     }
     missing.extend(relink_videos(&mut s, &dir));
+    s.folder = Some(dir);
     e.replace_session(s);
     e.path = Some(path.to_string());
     for m in &missing {
@@ -620,6 +653,96 @@ mod save_tests {
         let mut r = Engine::default();
         open_session(&mut r, &p).unwrap();
         assert_eq!(r.session().track_by_name("Kick").unwrap().mixer.volume_db, -7.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn with_take(level: f32) -> Engine {
+        let mut e = Engine::default();
+        let s = e.session_mut();
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        let src = add_source(s, "Audio 1_02", AudioBuffer { sample_rate: 48_000, channels: vec![vec![level; 4_800]] }, None, FileFormat::Wav);
+        let id = s.new_clip_id();
+        crate::edit::place_clip(s, t, Clip::audio(id, "Audio 1_02", src, 0, 0, 4_800));
+        e
+    }
+
+    fn reopen(path: &str) -> Engine {
+        let mut r = Engine::default();
+        assert_eq!(open_session(&mut r, path).unwrap(), Vec::<String>::new());
+        r
+    }
+
+    #[test]
+    fn saving_never_replaces_audio_of_another_session() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-no-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = |p: &str| dir.join(p).to_string_lossy().into_owned();
+        save_session(&mut with_take(0.5), &path("A/A.scraft")).unwrap();
+        save_session(&mut with_take(-0.25), &path("A/A v2.scraft")).unwrap();
+        save_session(&mut with_take(0.75), &path("B/B.scraft")).unwrap();
+        save_session(&mut reopen(&path("B/B.scraft")), &path("A/B.scraft")).unwrap();
+        let levels = ["A/A.scraft", "A/A v2.scraft", "B/B.scraft", "A/B.scraft"].map(|p| {
+            let r = reopen(&path(p));
+            r.session().pool.get(r.session().sources[0].id).unwrap().buffer.channels[0][0]
+        });
+        assert_eq!(levels, [0.5, -0.25, 0.75, 0.75]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn consolidating_twice_keeps_both_renders() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-consolidate-twice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("Song.scraft").to_string_lossy().into_owned();
+        let mut e = crate::demo::demo_engine();
+        let kick = e.session().track_by_name("Kick").unwrap().id;
+        let end = e.session().content_end();
+        let render = |e: &Engine| soundcraft_mix::render_clips(e.session(), kick, Range::new(0, end));
+        e.execute("edit.consolidate", &json!({"tracks": [kick.0], "start": 500_000, "end": 560_000})).unwrap();
+        save_session(&mut e, &path).unwrap();
+        e.execute("edit.consolidate", &json!({"tracks": [kick.0], "start": 1_400_000, "end": 1_500_000})).unwrap();
+        save_session(&mut e, &path).unwrap();
+        assert!(render(&reopen(&path)) == render(&e));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_after_undo_reuses_the_saved_audio() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-undo-resave-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("Song.scraft").to_string_lossy().into_owned();
+        let mut e = with_take(0.5);
+        e.execute("track.new", &json!({})).unwrap();
+        assert_eq!(save_session(&mut e, &path).unwrap(), 1);
+        e.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(save_session(&mut e, &path).unwrap(), 0);
+        assert_eq!(std::fs::read_dir(dir.join("Audio Files")).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saved_audio_is_trusted_only_in_the_folder_it_was_saved_in() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-own-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = |p: &str| dir.join(p).to_string_lossy().into_owned();
+        let level = |r: &Engine| r.session().pool.get(r.session().sources[0].id).unwrap().buffer.channels[0][0];
+        save_session(&mut with_take(-0.25), &path("B/Other.scraft")).unwrap();
+        let mut e = with_take(0.5);
+        save_session(&mut e, &path("A/A.scraft")).unwrap();
+        e.execute("track.new", &json!({})).unwrap();
+        save_session(&mut e, &path("B/B.scraft")).unwrap();
+        e.execute("edit.undo", &json!({})).unwrap();
+        e.execute("session.save", &json!({})).unwrap();
+        assert_eq!(level(&reopen(&path("B/B.scraft"))), 0.5);
+        e.execute("session.save_copy", &json!({"path": path("A/Copy.scraft")})).unwrap();
+        e.execute("session.save", &json!({})).unwrap();
+        assert_eq!(level(&reopen(&path("B/B.scraft"))), 0.5);
+        std::fs::remove_file(dir.join("A/Audio Files/Audio 1_02.wav")).unwrap();
+        let mut missing = Engine::default();
+        open_session(&mut missing, &path("A/A.scraft")).unwrap();
+        save_session(&mut missing, &path("B/Moved.scraft")).unwrap();
+        let mut r = Engine::default();
+        assert_eq!(open_session(&mut r, &path("B/Moved.scraft")).unwrap(), vec![dir.join("A/Audio Files/Audio 1_02.wav").display().to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
