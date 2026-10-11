@@ -7,6 +7,7 @@
 pub mod control;
 pub mod credits;
 pub mod dialogs;
+pub mod docking;
 pub mod edit_window;
 pub mod extra_windows;
 pub mod fonts;
@@ -47,6 +48,9 @@ pub enum MainWindow {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct UiState {
+    pub docking: docking::Workspace,
+    #[serde(default = "docking::mix_default")]
+    pub mix_docking: docking::Workspace,
     pub window: MainWindow,
     pub show_tracks_list: bool,
     pub show_clip_list: bool,
@@ -102,6 +106,8 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         UiState {
+            docking: docking::Workspace::default(),
+            mix_docking: docking::mix_default(),
             window: MainWindow::Edit,
             show_tracks_list: true,
             show_clip_list: true,
@@ -229,6 +235,8 @@ pub struct SoundApp {
     fonts_installed: bool,
     /// The palette last applied to the context (light?), so visuals are set only on a change.
     theme_applied: Option<bool>,
+    /// Last panel host context, used to cancel renderer-owned gestures on explicit replacement.
+    pub(crate) docking_context: Option<egui::Context>,
     /// Transport simulation when there is no player (tests, offscreen renders).
     sim: Option<(Samples, Option<Samples>, Option<Range>)>,
     pub quit_requested: bool,
@@ -286,6 +294,7 @@ impl SoundApp {
             fonts_ready: false,
             fonts_installed: false,
             theme_applied: None,
+            docking_context: None,
             sim: None,
             quit_requested: false,
             arrange_request: false,
