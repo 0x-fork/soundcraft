@@ -308,6 +308,8 @@ pub struct MixEngine {
     adopt: HashMap<(TrackId, usize), PreparedInstance>,
     /// Instances `sync` took out of service, for the host to drop (see [`MixEngine::take_retired`]).
     retired: Vec<Box<dyn Plugin>>,
+    /// Ownership workspace reused for parallel strip processing.
+    work: Vec<(usize, Strip)>,
 }
 
 /// What `sync` needs to fill a slot.
@@ -370,6 +372,7 @@ impl MixEngine {
             external: false,
             adopt: HashMap::new(),
             retired: Vec::new(),
+            work: Vec::new(),
         }
     }
 
@@ -568,16 +571,17 @@ impl MixEngine {
         }
         let any_solo = s.tracks.iter().any(|t| t.mixer.solo && !t.inactive);
         let order = std::mem::take(&mut self.order);
-        let live = |t: &&Track| !(t.kind == TrackKind::Master || t.inactive || t.kind == TrackKind::Vca);
+        let live = |t: &Track| !(t.kind == TrackKind::Master || t.inactive || t.kind == TrackKind::Vca);
         let is_aux = |t: &Track| matches!(t.kind, TrackKind::Aux | TrackKind::Folder);
         // Phase 1: independent strips (audio, instrument, MIDI) in parallel.
-        let mut work: Vec<(&Track, Strip)> = order
-            .iter()
-            .filter_map(|&i| s.tracks.get(i))
-            .filter(live)
-            .filter(|t| !is_aux(t))
-            .filter_map(|t| self.strips.remove(&t.id).map(|st| (t, st)))
-            .collect();
+        let mut work = std::mem::take(&mut self.work);
+        work.clear();
+        for &i in &order {
+            let Some(t) = s.tracks.get(i).filter(|t| live(t) && !is_aux(t)) else { continue };
+            if let Some(st) = self.strips.remove(&t.id) {
+                work.push((i, st));
+            }
+        }
         for (_, st) in work.iter_mut() {
             if st.scratch.len() < self.max_block {
                 st.scratch.resize(self.max_block, 0.0);
@@ -585,7 +589,11 @@ impl MixEngine {
         }
         let busses = std::mem::take(&mut self.busses);
         let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
-        run_strips(&mut work, |(t, st)| process_strip(s, t, st, &busses, &live_in, pos, frames, any_solo));
+        run_strips(&mut work, |(i, st)| {
+            if let Some(t) = s.tracks.get(*i) {
+                process_strip(s, t, st, &busses, &live_in, pos, frames, any_solo);
+            }
+        });
         self.busses = busses;
         // Delay compensation: align every strip to the slowest; direct-to-main outputs also wait
         // for the slowest aux return (aux latencies are from the previous block; they are stable).
@@ -594,7 +602,8 @@ impl MixEngine {
         let lmax_a =
             if pdc { self.strips.iter().filter(|(id, _)| s.track(**id).is_some_and(is_aux)).map(|(_, st)| st.latency).max().unwrap_or(0) } else { 0 };
         self.latency = lmax_t + lmax_a;
-        for (t, st) in work.iter_mut() {
+        for (i, st) in work.iter_mut() {
+            let Some(t) = s.tracks.get(*i) else { continue };
             let ch = st.buf.len();
             st.align.set(lmax_t.saturating_sub(st.latency), ch);
             st.align.process(&mut st.buf, frames);
@@ -604,15 +613,20 @@ impl MixEngine {
             }
             st.out_extra.set(if t.mixer.output == Route::Main { lmax_a } else { 0 }, ch);
         }
-        for (t, st) in work.iter_mut() {
-            self.route_strip(t, st, pos, frames);
+        for (i, st) in work.iter_mut() {
+            if let Some(t) = s.tracks.get(*i) {
+                self.route_strip(t, st, pos, frames);
+            }
         }
-        for (t, st) in work {
-            self.strips.insert(t.id, st);
+        for (i, st) in work.drain(..) {
+            if let Some(t) = s.tracks.get(i) {
+                self.strips.insert(t.id, st);
+            }
         }
+        self.work = work;
         let is_aux = |t: &Track| matches!(t.kind, TrackKind::Aux | TrackKind::Folder);
         // Phase 2: auxes in dependency order (they read busses).
-        for t in order.iter().filter_map(|&i| s.tracks.get(i)).filter(live).filter(|t| is_aux(t)) {
+        for t in order.iter().filter_map(|&i| s.tracks.get(i)).filter(|t| live(t)).filter(|t| is_aux(t)) {
             let Some(mut st) = self.strips.remove(&t.id) else { continue };
             if st.scratch.len() < self.max_block {
                 st.scratch.resize(self.max_block, 0.0);
@@ -2083,6 +2097,21 @@ mod tests {
         let s = Session::default();
         let out = render_range(&s, Range::new(0, 1000), 128);
         assert!(out.iter().all(|c| c.iter().all(|x| *x == 0.0)));
+    }
+
+    #[test]
+    fn strip_workspace_keeps_its_allocation_between_blocks() {
+        let mut s = Session::default();
+        for _ in 0..6 {
+            s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        }
+        let mut eng = MixEngine::new(48_000.0, 512);
+        let mut out = vec![vec![0.0; 512]; 2];
+        eng.render(&s, 0, 512, &mut out);
+        let capacity = eng.work.capacity();
+        assert!(capacity >= 6);
+        eng.render(&s, 512, 512, &mut out);
+        assert_eq!(eng.work.capacity(), capacity);
     }
 
     #[test]

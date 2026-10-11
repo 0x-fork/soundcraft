@@ -86,7 +86,6 @@ struct AudioState {
     playing: bool,
     end: Option<Samples>,
     looped: Option<Range>,
-    block: Vec<Vec<f32>>,
     /// Rendered frames waiting to be consumed (planar, main channels) and the fractional read index.
     pending: Vec<Vec<f32>>,
     /// Stereo fold-down gains per main channel (used when the device has fewer channels).
@@ -122,7 +121,6 @@ impl AudioState {
             playing: false,
             end: None,
             looped: None,
-            block: vec![vec![0.0; BLOCK]; nch],
             pending: vec![vec![0.0; BLOCK]; nch],
             pending_len: 0,
             read: 0.0,
@@ -151,8 +149,7 @@ impl AudioState {
                     self.mix.adopt(instances);
                     // The main format changed (a document edit, not steady state): resize.
                     let nch = main_channels(&s);
-                    if self.block.len() != nch {
-                        self.block = vec![vec![0.0; BLOCK]; nch];
+                    if self.pending.len() != nch {
                         self.pending = vec![vec![0.0; BLOCK]; nch];
                         self.pending_len = 0;
                         self.read = 0.0;
@@ -197,8 +194,8 @@ impl AudioState {
     }
 
     /// Render the next block at the session rate into `pending`.
-    fn render_next(&mut self) {
-        let mut n = BLOCK;
+    fn render_next(&mut self, quantum: usize) {
+        let mut n = quantum.clamp(1, BLOCK);
         if let Some(l) = self.looped
             && self.pos >= l.end
         {
@@ -231,13 +228,8 @@ impl AudioState {
         }
         self.mix.monitor_only = !self.playing;
         self.mix.recording = self.recording;
-        self.mix.render(&self.session, self.pos, n, &mut self.block);
+        self.mix.render(&self.session, self.pos, n, &mut self.pending);
         self.send_garbage();
-        for (d, s) in self.pending.iter_mut().zip(self.block.iter()) {
-            if let (Some(dd), Some(ss)) = (d.get_mut(..n), s.get(..n)) {
-                dd.copy_from_slice(ss);
-            }
-        }
         self.pending_len = n;
         if !self.playing {
             return;
@@ -272,13 +264,15 @@ impl AudioState {
         }
         let speed = f64::from(self.shared.speed.load(Ordering::Relaxed)) / 1000.0;
         let step = self.session.sample_rate.as_f64() / self.device_rate.max(1.0) * speed.clamp(0.1, 4.0);
+        let callback_frames = out.len() / channels;
+        let quantum = ((callback_frames as f64 * step).ceil() as usize).clamp(1, BLOCK);
         for frame in out.chunks_mut(channels) {
             while self.read >= self.pending_len as f64 {
                 self.read -= self.pending_len as f64;
                 if !self.playing && !monitoring {
                     break;
                 }
-                self.render_next();
+                self.render_next(quantum);
                 if self.pending_len == 0 {
                     break;
                 }
@@ -746,6 +740,23 @@ mod tests {
         st.fill(&mut out, 2);
         assert!(shared.position.load(Ordering::Relaxed) >= 1000);
         assert!(!shared.playing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn short_device_callbacks_render_short_mix_blocks() {
+        let s = Arc::new(soundcraft_model::Session::default());
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let mut st = AudioState::new(rx, Arc::clone(&shared), s, 48_000.0, channel().0);
+        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        let mut out = vec![0.0f32; 2 * 64];
+        st.fill(&mut out, 2);
+        assert_eq!(shared.position.load(Ordering::Relaxed), 64);
     }
 
     #[test]
