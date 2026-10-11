@@ -14,8 +14,10 @@ use crate::{ClapError, scan};
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
-    CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_VALUE, clap_event_header, clap_event_midi,
-    clap_event_note, clap_event_param_value, clap_input_events, clap_output_events,
+    CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT,
+    CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_SECONDS_TIMELINE, CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE,
+    CLAP_TRANSPORT_IS_PLAYING, CLAP_TRANSPORT_IS_RECORDING, clap_event_header, clap_event_midi, clap_event_note, clap_event_param_value,
+    clap_event_transport, clap_input_events, clap_output_events,
 };
 use clap_sys::ext::audio_ports::{CLAP_AUDIO_PORT_IS_MAIN, CLAP_EXT_AUDIO_PORTS, clap_audio_port_info, clap_plugin_audio_ports};
 use clap_sys::ext::gui::{CLAP_EXT_GUI, clap_host_gui, clap_plugin_gui};
@@ -27,12 +29,14 @@ use clap_sys::ext::params::{
 };
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_host_state, clap_plugin_state};
 use clap_sys::factory::plugin_factory::{CLAP_PLUGIN_FACTORY_ID, clap_plugin_factory};
+use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::host::clap_host;
 use clap_sys::id::clap_id;
 use clap_sys::plugin::clap_plugin;
 use clap_sys::process::{CLAP_PROCESS_ERROR, clap_process};
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{CLAP_VERSION, clap_version_is_compatible};
+use soundcraft_dsp::Transport;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::{Path, PathBuf};
@@ -576,6 +580,40 @@ impl RawEvent {
                 RawEvent::Midi(clap_event_midi { header: header(size_of::<clap_event_midi>(), CLAP_EVENT_MIDI, time), port_index: 0, data })
             }
         }
+    }
+}
+
+fn transport_event(t: &Transport) -> clap_event_transport {
+    let fixed = |x: f64, factor: i64| if x.is_finite() { (x * factor as f64).round() as i64 } else { 0 };
+    let mut flags =
+        CLAP_TRANSPORT_HAS_TEMPO | CLAP_TRANSPORT_HAS_BEATS_TIMELINE | CLAP_TRANSPORT_HAS_SECONDS_TIMELINE | CLAP_TRANSPORT_HAS_TIME_SIGNATURE;
+    if t.playing {
+        flags |= CLAP_TRANSPORT_IS_PLAYING;
+    }
+    if t.recording {
+        flags |= CLAP_TRANSPORT_IS_RECORDING;
+    }
+    clap_event_transport {
+        header: clap_event_header {
+            size: u32::try_from(size_of::<clap_event_transport>()).unwrap_or(u32::MAX),
+            time: 0,
+            space_id: CLAP_CORE_EVENT_SPACE_ID,
+            type_: CLAP_EVENT_TRANSPORT,
+            flags: 0,
+        },
+        flags,
+        song_pos_beats: fixed(t.quarters, CLAP_BEATTIME_FACTOR),
+        song_pos_seconds: fixed(t.seconds, CLAP_SECTIME_FACTOR),
+        tempo: t.tempo,
+        tempo_inc: 0.0,
+        loop_start_beats: 0,
+        loop_end_beats: 0,
+        loop_start_seconds: 0,
+        loop_end_seconds: 0,
+        bar_start: fixed(t.bar_start, CLAP_BEATTIME_FACTOR),
+        bar_number: i32::try_from(t.bar).unwrap_or(0),
+        tsig_num: u16::try_from(t.numerator).unwrap_or(4),
+        tsig_denom: u16::try_from(t.denominator).unwrap_or(4),
     }
 }
 
@@ -1186,6 +1224,7 @@ impl Instance {
         outputs: &mut PortBuffers,
         events: &[Event],
         offset: u32,
+        transport: Option<&Transport>,
     ) -> Result<i32, ClapError> {
         if !self.active {
             return Err(ClapError::Process("not active".into()));
@@ -1219,10 +1258,11 @@ impl Instance {
         self.out_params.clear();
         let out_events =
             clap_output_events { ctx: (&mut self.out_params as *mut Vec<(u32, f64)>).cast::<c_void>(), try_push: Some(out_events_try_push) };
+        let transport = transport.map(transport_event);
         let p = clap_process {
             steady_time,
             frames_count: u32::try_from(frames).unwrap_or(0),
-            transport: std::ptr::null(),
+            transport: transport.as_ref().map_or(std::ptr::null(), std::ptr::from_ref),
             audio_inputs: inputs.bufs.as_ptr(),
             audio_outputs: outputs.bufs.as_mut_ptr(),
             audio_inputs_count: u32::try_from(inputs.bufs.len()).unwrap_or(0),
@@ -1232,8 +1272,8 @@ impl Instance {
         };
         // SAFETY: valid, processing instance. Every buffer pointer refers to `frames` (or more)
         // valid f32s owned by `inputs`/`outputs`, which are borrowed for the whole call; the event
-        // lists and their contexts live on this stack frame / in `self.raw`, untouched until the
-        // call returns.
+        // lists and their contexts and the transport live on this stack frame / in `self.raw`,
+        // untouched until the call returns.
         let status = unsafe { process(self.plugin, &p) };
         if !self.out_params.is_empty()
             && let Ok(mut edits) = self.state.edits.try_lock()
@@ -1262,5 +1302,35 @@ impl Drop for Instance {
             unsafe { f(self.plugin) };
         }
         self.created = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_transport_reaches_clap_in_fixed_point() {
+        let t = Transport {
+            playing: true,
+            tempo: 90.0,
+            numerator: 3,
+            denominator: 4,
+            samples: 96_000,
+            seconds: 2.0,
+            quarters: 3.5,
+            bar_start: 3.0,
+            bar: 1,
+            ..Transport::default()
+        };
+        let e = transport_event(&t);
+        assert_eq!((e.header.type_, e.header.size as usize), (CLAP_EVENT_TRANSPORT, size_of::<clap_event_transport>()));
+        assert_eq!(e.flags & CLAP_TRANSPORT_IS_PLAYING, CLAP_TRANSPORT_IS_PLAYING);
+        assert_eq!(e.flags & CLAP_TRANSPORT_IS_RECORDING, 0);
+        assert_eq!((e.song_pos_beats, e.bar_start), (7 * CLAP_BEATTIME_FACTOR / 2, 3 * CLAP_BEATTIME_FACTOR));
+        assert_eq!(e.song_pos_seconds, 2 * CLAP_SECTIME_FACTOR);
+        assert_eq!((e.tempo, e.bar_number, e.tsig_num, e.tsig_denom), (90.0, 1, 3, 4));
+        let nan = transport_event(&Transport { quarters: f64::NAN, ..t });
+        assert_eq!(nan.song_pos_beats, 0);
     }
 }

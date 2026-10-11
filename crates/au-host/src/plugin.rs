@@ -1,7 +1,7 @@
 //! `AuPlugin`: a loaded Audio Unit behind the safe `soundcraft_dsp::Plugin` trait.
 
 use crate::ffi::Instance;
-use soundcraft_dsp::{Plugin, PluginInfo};
+use soundcraft_dsp::{Plugin, PluginInfo, Transport};
 
 /// Most MIDI events queued between two blocks (extra events are dropped).
 const EVENT_CAP: usize = 1024;
@@ -198,6 +198,10 @@ impl Plugin for AuPlugin {
 
     fn latency(&self) -> usize {
         self.latency
+    }
+
+    fn set_transport(&mut self, transport: &Transport) {
+        self.inst.set_transport(transport);
     }
 
     fn tail_samples(&self) -> usize {

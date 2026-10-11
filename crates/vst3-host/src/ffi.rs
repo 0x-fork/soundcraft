@@ -15,6 +15,7 @@
 #![allow(clippy::unnecessary_cast)]
 
 use crate::{Vst3Error, scan};
+use soundcraft_dsp::Transport;
 use std::ffi::{c_char, c_int, c_void};
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
@@ -1072,6 +1073,27 @@ pub(crate) struct Layout {
     pub event_input: bool,
 }
 
+fn apply_transport(c: &mut sv::ProcessContext, t: &Transport) {
+    use sv::ProcessContext_::StatesAndFlags_::*;
+    let mut state = kTempoValid | kTimeSigValid | kProjectTimeMusicValid | kBarPositionValid | kContTimeValid;
+    if t.playing {
+        state |= kPlaying;
+    }
+    if t.recording {
+        state |= kRecording;
+    }
+    // The flag constants are the C default enum type: i32 on Windows, u32 elsewhere.
+    #[allow(clippy::unnecessary_cast)]
+    let state = state as u32;
+    c.state = state;
+    c.tempo = t.tempo;
+    c.timeSigNumerator = i32::try_from(t.numerator).unwrap_or(4);
+    c.timeSigDenominator = i32::try_from(t.denominator).unwrap_or(4);
+    c.projectTimeSamples = t.samples;
+    c.projectTimeMusic = t.quarters;
+    c.barPositionMusic = t.bar_start;
+}
+
 /// A live plugin: component + audio processor (+ edit controller) and the host objects.
 pub(crate) struct Instance {
     processor: Option<ComPtr<sv::IAudioProcessor>>,
@@ -1402,6 +1424,7 @@ impl Instance {
         notes: &[NoteEvent],
         offset: u32,
         project_time: i64,
+        transport: Option<&Transport>,
     ) -> Result<(), Vst3Error> {
         if !self.active {
             return Err(Vst3Error::Process("not active".into()));
@@ -1433,8 +1456,11 @@ impl Instance {
         self.out_events.with(Vec::clear);
         inputs.refresh();
         outputs.refresh();
-        self.context.projectTimeSamples = project_time;
         self.context.continousTimeSamples = project_time;
+        match transport {
+            Some(t) => apply_transport(&mut self.context, t),
+            None => self.context.projectTimeSamples = project_time,
+        }
         let mut data = sv::ProcessData {
             processMode: sv::ProcessModes_::kRealtime as i32,
             symbolicSampleSize: sv::SymbolicSampleSizes_::kSample32 as i32,
@@ -1880,6 +1906,31 @@ mod window {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_transport_fills_the_process_context() {
+        use sv::ProcessContext_::StatesAndFlags_::*;
+        // SAFETY: `ProcessContext` is plain data (numbers and small structs); all-zero is valid.
+        let mut c: sv::ProcessContext = unsafe { std::mem::zeroed() };
+        let t = Transport {
+            playing: true,
+            tempo: 90.0,
+            numerator: 3,
+            denominator: 4,
+            samples: 96_000,
+            quarters: 3.5,
+            bar_start: 3.0,
+            ..Transport::default()
+        };
+        apply_transport(&mut c, &t);
+        let playing = kPlaying as u32;
+        assert_eq!(c.state & playing, playing);
+        assert_eq!(c.state & kRecording as u32, 0);
+        assert_eq!((c.tempo, c.timeSigNumerator, c.timeSigDenominator), (90.0, 3, 4));
+        assert_eq!((c.projectTimeSamples, c.projectTimeMusic, c.barPositionMusic), (96_000, 3.5, 3.0));
+        apply_transport(&mut c, &Transport { playing: false, ..t });
+        assert_eq!(c.state & playing, 0);
+    }
 
     #[test]
     fn state_container_parses_strictly() {

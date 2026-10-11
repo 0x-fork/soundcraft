@@ -1,7 +1,7 @@
 //! `Vst3Plugin`: a loaded VST3 instance behind the safe `soundcraft_dsp::Plugin` trait.
 
 use crate::ffi::{BusBuffers, EVENT_CAP, EditorLink, HostContext, Instance, NoteEvent, PARAM_QUEUE_CAP};
-use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, Unit};
+use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, Transport, Unit};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use vst3::ComWrapper;
@@ -46,6 +46,7 @@ pub struct Vst3Plugin {
     latency: usize,
     tail: usize,
     position: i64,
+    transport: Option<Transport>,
 }
 
 impl Vst3Plugin {
@@ -88,6 +89,7 @@ impl Vst3Plugin {
             latency: 0,
             tail: 0,
             position: 0,
+            transport: None,
             ids,
             maps,
             inst,
@@ -253,7 +255,7 @@ impl Plugin for Vst3Plugin {
             let k = self.notes.iter().position(|e| e.time() >= end).unwrap_or(self.notes.len());
             let offset = u32::try_from(start).unwrap_or(u32::MAX);
             let notes = self.notes.get(..k).unwrap_or(&[]);
-            let r = self.inst.process(n, &mut self.inputs, &mut self.outputs, &self.pending, notes, offset, self.position);
+            let r = self.inst.process(n, &mut self.inputs, &mut self.outputs, &self.pending, notes, offset, self.position, self.transport.as_ref());
             self.pending.clear();
             self.notes.drain(..k);
             self.position = self.position.saturating_add(i64::try_from(n).unwrap_or(0));
@@ -282,6 +284,10 @@ impl Plugin for Vst3Plugin {
 
     fn latency(&self) -> usize {
         self.latency
+    }
+
+    fn set_transport(&mut self, transport: &Transport) {
+        self.transport = Some(*transport);
     }
 
     fn tail_samples(&self) -> usize {

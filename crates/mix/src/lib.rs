@@ -52,11 +52,11 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 use soundcraft_dsp::pan::{PanLaw, SpeakerPos, SurroundParams, gains};
-use soundcraft_dsp::{Plugin, SampleSource, db_to_gain};
+use soundcraft_dsp::{Plugin, SampleSource, Transport, db_to_gain};
 use soundcraft_model::{
     AutoParam, BusId, ChannelFormat, Clip, ClipContent, Route, Session, SourceAudio, Speaker, SurroundPan, Track, TrackId, TrackKind,
 };
-use soundcraft_time::{Range, Samples};
+use soundcraft_time::{Range, Samples, TICKS_PER_QUARTER};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -670,6 +670,7 @@ impl MixEngine {
         }
         self.order = order;
         // Master faders process the main mix.
+        let transport = transport_at(s, pos, !self.monitor_only, self.recording);
         for t in s.tracks.iter().filter(|t| t.kind == TrackKind::Master && !t.inactive) {
             if let Some(strip) = self.strips.get_mut(&t.id) {
                 for (dst, src) in strip.buf.iter_mut().zip(self.main.iter()) {
@@ -683,6 +684,7 @@ impl MixEngine {
                         && !ins.bypass
                     {
                         apply_params(slot, ins, t, i, pos);
+                        slot.plugin.set_transport(&transport);
                         slot.plugin.process(&mut strip.buf, frames);
                     }
                 }
@@ -814,6 +816,7 @@ fn process_strip(
     for c in strip.buf.iter_mut() {
         c.iter_mut().take(frames).for_each(|x| *x = 0.0);
     }
+    let transport = transport_at(s, pos, !live.monitor_only, live.recording);
     match t.kind {
         TrackKind::Audio if !live.input.is_empty() && (t.mixer.input_monitor || (t.mixer.record_arm && (live.monitor_only || live.recording))) => {
             // Input monitoring: the track hears its hardware input instead of its clips.
@@ -894,6 +897,7 @@ fn process_strip(
                 if let Some(ins) = &t.instrument {
                     apply_params(inst, ins, t, INSTRUMENT_SLOT, pos);
                 }
+                inst.plugin.set_transport(&transport);
                 schedule_notes(s, t, pos, frames, inst, &mut strip.held);
                 if strip.buf.len() >= 2 {
                     inst.plugin.process(&mut strip.buf, frames);
@@ -926,6 +930,7 @@ fn process_strip(
             continue;
         }
         apply_params(slot, ins, t, i, pos);
+        slot.plugin.set_transport(&transport);
         slot.plugin.process(&mut strip.buf, frames);
         latency = latency.saturating_add(slot.plugin.latency());
         if gr == 0.0 {
@@ -1433,6 +1438,27 @@ fn apply_values(slot: &mut PluginSlot, ins: &soundcraft_model::Insert, value: im
             slot.plugin.set_param(k, val);
             *last = val;
         }
+    }
+}
+
+fn transport_at(s: &Session, pos: Samples, playing: bool, recording: bool) -> Transport {
+    let sr = s.sample_rate;
+    let ticks = Some(s.tempo.samples_to_ticks_f(pos, sr)).filter(|t| t.is_finite()).unwrap_or(0.0);
+    let tick = ticks.floor() as i64;
+    let meter = s.tempo.meter_at_tick(tick);
+    let bar = s.tempo.bar_beat_at_tick(tick).bar;
+    let q = TICKS_PER_QUARTER as f64;
+    Transport {
+        playing,
+        recording,
+        tempo: s.tempo.tempo_at_tick(tick),
+        numerator: meter.numerator,
+        denominator: meter.denominator,
+        samples: pos,
+        seconds: pos as f64 / sr.as_f64().max(1.0),
+        quarters: ticks / q,
+        bar_start: s.tempo.bar_start_tick(bar) as f64 / q,
+        bar: bar - 1,
     }
 }
 
@@ -2166,6 +2192,57 @@ mod tests {
         fn save_state(&mut self) -> Option<Vec<u8>> {
             Some(self.blob.clone())
         }
+    }
+
+    struct Clock {
+        inner: Box<dyn Plugin>,
+        seen: Arc<std::sync::Mutex<Vec<Transport>>>,
+    }
+
+    impl Plugin for Clock {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.inner.process(io, frames);
+        }
+        fn set_transport(&mut self, t: &Transport) {
+            self.seen.lock().unwrap().push(*t);
+        }
+    }
+
+    #[test]
+    fn plugins_get_the_session_transport() {
+        let (mut s, t) = session_with_dc(0.5, 48_000 * 4);
+        s.tempo.set_tempo(0, 90.0).unwrap();
+        s.tempo.set_meter(0, 3, 4).unwrap();
+        s.track_mut(t).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.clock"));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let clock = Clock { inner: soundcraft_dsp::create("gain").unwrap(), seen: Arc::clone(&seen) };
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: 0, id: "clap:test.clock".into(), ch: 1, plugin: Box::new(clock) }]);
+        render_block(&mut eng, &s, 96_000);
+        eng.monitor_only = true;
+        render_block(&mut eng, &s, 96_000);
+        let seen = seen.lock().unwrap();
+        let t0 = seen[0];
+        assert!(t0.playing && !t0.recording);
+        assert_eq!((t0.tempo, t0.numerator, t0.denominator, t0.samples, t0.bar), (90.0, 3, 4, 96_000, 1));
+        assert!((t0.seconds - 2.0).abs() < 1e-9 && (t0.quarters - 3.0).abs() < 1e-9 && (t0.bar_start - 3.0).abs() < 1e-9);
+        assert!(!seen[1].playing);
     }
 
     fn render_block(eng: &mut MixEngine, s: &Session, pos: i64) -> f32 {

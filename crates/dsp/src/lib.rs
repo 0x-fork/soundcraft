@@ -169,6 +169,24 @@ impl PluginInfo {
     }
 }
 
+/// The host's transport at the start of a block, for tempo-synced plugins.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Transport {
+    pub playing: bool,
+    pub recording: bool,
+    /// Quarter notes per minute.
+    pub tempo: f64,
+    pub numerator: u32,
+    pub denominator: u32,
+    /// Timeline position.
+    pub samples: i64,
+    pub seconds: f64,
+    pub quarters: f64,
+    /// Start of the current bar, in quarter notes, and its number (0 for the first bar).
+    pub bar_start: f64,
+    pub bar: i64,
+}
+
 /// A realtime audio processor or instrument.
 ///
 /// Contract: `process` never allocates or panics. It processes `min(frames, io[c].len())` frames
@@ -195,6 +213,8 @@ pub trait Plugin: Send {
     fn gain_reduction_db(&self) -> f32 {
         0.0
     }
+    /// The transport for the next block, given before `process`.
+    fn set_transport(&mut self, _transport: &Transport) {}
     /// Instruments: note events at sample offsets within the next block.
     fn note_on(&mut self, _offset: usize, _note: u8, _velocity: u8) {}
     fn note_off(&mut self, _offset: usize, _note: u8) {}
