@@ -76,6 +76,30 @@ struct Shared {
     meters: Mutex<MeterSnapshot>,
 }
 
+/// Set once a block panicked: output stays silent from then on.
+#[derive(Default)]
+struct Fault {
+    failed: AtomicBool,
+    /// The UI has been told.
+    reported: AtomicBool,
+}
+
+impl Fault {
+    fn newly_failed(&self) -> bool {
+        self.failed.load(Ordering::Relaxed) && !self.reported.swap(true, Ordering::Relaxed)
+    }
+}
+
+/// Fill one block with `fill`. If it panics, the block and every later one are silent and the
+/// transport stops, rather than the panic taking the app down.
+fn guarded_block(fault: &Fault, shared: &Shared, out: &mut [f32], fill: impl FnOnce(&mut [f32])) {
+    if fault.failed.load(Ordering::Relaxed) || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fill(out))).is_err() {
+        fault.failed.store(true, Ordering::Relaxed);
+        shared.playing.store(false, Ordering::Relaxed);
+        out.fill(0.0);
+    }
+}
+
 /// State owned by the audio callback.
 struct AudioState {
     rx: Receiver<Cmd>,
@@ -347,6 +371,7 @@ impl Side {
 /// The transport and audio device.
 pub struct Player {
     shared: Arc<Shared>,
+    fault: Arc<Fault>,
     tx: Sender<Cmd>,
     side: Mutex<Side>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -370,6 +395,11 @@ impl Player {
         p
     }
 
+    /// True once after the audio engine hit an internal error and went silent.
+    pub fn newly_failed(&self) -> bool {
+        self.fault.newly_failed()
+    }
+
     fn side(&self) -> std::sync::MutexGuard<'_, Side> {
         self.side.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -391,6 +421,8 @@ impl Player {
                 let rate = config.sample_rate.0;
                 let channels = usize::from(config.channels);
                 let mut state = AudioState::new(rx, Arc::clone(&shared), session, f64::from(rate), gtx);
+                let fault = Arc::new(Fault::default());
+                let (failed, guard) = (Arc::clone(&fault), Arc::clone(&shared));
                 // cpal may call this on the audio thread (on ALSA in a loop while the device
                 // stays broken): marked, so the logger hands the record off instead of writing it.
                 let err_fn = |e: cpal::StreamError| {
@@ -402,7 +434,7 @@ impl Player {
                     &config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                         mark_audio_thread();
-                        state.fill(data, channels);
+                        guarded_block(&failed, &guard, data, |d| state.fill(d, channels));
                     },
                     err_fn,
                     None,
@@ -414,6 +446,7 @@ impl Player {
                         log::info!("audio device: {name} @ {rate} Hz, {channels} ch");
                         Player {
                             shared,
+                            fault,
                             tx,
                             side,
                             _stream: Some(stream),
@@ -465,6 +498,8 @@ impl Player {
     ) -> Player {
         let rate = session.sample_rate.hz();
         let mut state = AudioState::new(rx, Arc::clone(&shared), session, f64::from(rate), gtx);
+        let fault = Arc::new(Fault::default());
+        let failed = Arc::clone(&fault);
         let spawn = std::thread::Builder::new().name("soundcraft-clock".into()).spawn(move || {
             let mut buf = vec![0.0f32; 4096];
             let mut last = std::time::Instant::now();
@@ -475,7 +510,8 @@ impl Player {
                 last = now;
                 let n = (frames * 2).min(buf.len());
                 if let Some(b) = buf.get_mut(..n) {
-                    state.fill(b, 2);
+                    let shared = Arc::clone(&state.shared);
+                    guarded_block(&failed, &shared, b, |b| state.fill(b, 2));
                 }
                 if Arc::strong_count(&state.shared) <= 1 {
                     break;
@@ -487,6 +523,7 @@ impl Player {
         }
         Player {
             shared,
+            fault,
             tx,
             side,
             _stream: None,
@@ -508,6 +545,7 @@ impl Player {
     ) -> Player {
         Player {
             shared,
+            fault: Arc::default(),
             tx,
             side,
             _stream: None,
@@ -763,6 +801,25 @@ mod tests {
         assert_eq!(out.tracks.len(), 1);
         assert_eq!(out.tracks[&keep], source.tracks[&keep]);
         assert_eq!(out.main, source.main);
+    }
+
+    #[test]
+    fn a_block_that_panics_goes_silent_and_is_reported_once() {
+        let shared = Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(true),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        };
+        let fault = Fault::default();
+        let mut out = [0.5f32; 8];
+        guarded_block(&fault, &shared, &mut out, |o| o.fill(0.25));
+        assert_eq!((out, fault.newly_failed()), ([0.25; 8], false));
+        guarded_block(&fault, &shared, &mut out, |_| std::panic::panic_any("a bug in the mix"));
+        guarded_block(&fault, &shared, &mut out, |o| o.fill(0.25));
+        assert_eq!(out, [0.0; 8]);
+        assert!(!shared.playing.load(Ordering::Relaxed));
+        assert_eq!((fault.newly_failed(), fault.newly_failed()), (true, false));
     }
 
     #[test]

@@ -894,6 +894,10 @@ impl SoundApp {
                 self.engine.end_merge();
             }
         }
+        if self.player.as_ref().is_some_and(Player::newly_failed) {
+            self.stop_play();
+            self.ui.status = "The audio engine hit an internal error (see the log) and went silent. Use Reconnect audio device in Setup ▸ Playback Engine, or restart SoundCraft.".into();
+        }
         // Stop the old playback before sending a replacement session to the audio thread.
         self.handle_transport(dt);
         if self.engine.revision != self.last_rev {
