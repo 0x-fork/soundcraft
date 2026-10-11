@@ -16,7 +16,8 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         .anchor(Align2::CENTER_CENTER, vec2(0.0, -80.0))
         .show(ctx, |ui| {
             let age = left.saved.elapsed().map_or_else(|_| "recently".into(), |d| ago(d.as_secs()));
-            ui.label(format!("“{}” has unsaved changes from an earlier run, autosaved {age}.", left.name));
+            let what = if left.recording { "unsaved changes and an unfinished recording" } else { "unsaved changes" };
+            ui.label(format!("“{}” has {what} from an earlier run, autosaved {age}.", left.name));
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("Discard").clicked() {
