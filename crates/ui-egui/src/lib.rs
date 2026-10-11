@@ -233,8 +233,10 @@ pub struct SoundApp {
     pub native_menu_bar: bool,
     /// Folder for crash-recovery autosaves (native apps set it).
     pub autosave_dir: Option<std::path::PathBuf>,
-    /// This session's autosave folder, once it has been autosaved.
-    autosaved: Option<soundcraft_engine::autosave::Autosave>,
+    /// Writes the open session's autosaves in the background, once there is something to write.
+    autosaver: Option<soundcraft_engine::autosave::Autosaver>,
+    /// The document revision last handed to the autosaver.
+    autosaved_rev: u64,
     /// Unsaved work that earlier runs left in the autosave folder, offered for recovery.
     pub leftovers: Vec<soundcraft_engine::autosave::Leftover>,
     /// The document revision last autosaved after a caught panic.
@@ -303,7 +305,8 @@ impl SoundApp {
             services,
             native_menu_bar: false,
             autosave_dir: None,
-            autosaved: None,
+            autosaver: None,
+            autosaved_rev: 0,
             leftovers: Vec::new(),
             panic_rev: 0,
             preset_dir: None,
@@ -537,15 +540,36 @@ impl SoundApp {
         self.autosave_to(&dir);
     }
 
-    /// Write the session to its own folder under `root`; false when that failed.
+    /// Autosave a modified session within a second of every change, also while recording. The
+    /// plugins' own state reaches the session every two minutes (`autosave`).
+    fn autosave_changes(&mut self) {
+        if let Some(e) = self.autosaver.as_ref().and_then(soundcraft_engine::autosave::Autosaver::failure) {
+            self.ui.status = format!("Autosave failed: {e}");
+        }
+        if self.autosave_dir.is_none() || self.engine.revision == self.autosaved_rev {
+            return;
+        }
+        self.autosaved_rev = self.engine.revision;
+        if !self.engine.is_dirty() {
+            self.release_autosave(false);
+        } else if let Some(root) = self.autosave_dir.clone() {
+            self.queue_autosave(root);
+        }
+    }
+
+    /// Hand the session to the autosaver for its folder under `root`.
+    fn queue_autosave(&mut self, root: std::path::PathBuf) {
+        self.autosaved_rev = self.engine.revision;
+        let w = self.autosaver.get_or_insert_with(|| soundcraft_engine::autosave::Autosaver::new(root));
+        w.write(self.engine.session_arc(), self.engine.path.clone());
+    }
+
+    /// Write the session to its own folder under `root` and wait for it; false when that failed.
     fn autosave_to(&mut self, root: &std::path::Path) -> bool {
-        let written = match &mut self.autosaved {
-            Some(a) => a.write(&self.engine),
-            None => soundcraft_engine::autosave::Autosave::create(root, &self.engine.session().name)
-                .and_then(|mut a| a.write(&self.engine).map(|()| self.autosaved = Some(a))),
-        };
+        self.queue_autosave(root.to_path_buf());
+        let Some(w) = &self.autosaver else { return false };
+        let written = w.flush();
         if let Err(e) = &written {
-            log::warn!("autosave failed: {e}");
             self.ui.status = format!("Autosave failed: {e}");
         }
         written.is_ok()
@@ -558,10 +582,8 @@ impl SoundApp {
 
     /// Done with this session's autosave folder: keep it for the next launch, or delete it.
     fn release_autosave(&mut self, keep: bool) {
-        if let Some(a) = self.autosaved.take()
-            && !keep
-        {
-            a.discard();
+        if let Some(w) = &self.autosaver {
+            w.close(keep);
         }
     }
 
@@ -574,6 +596,9 @@ impl SoundApp {
             self.write_autosave();
         }
         self.release_autosave(keep);
+        if let Some(w) = &self.autosaver {
+            let _ = w.flush();
+        }
     }
 
     /// Run part of a frame. If it panics, the session is autosaved (once per change) and the app
@@ -906,6 +931,7 @@ impl SoundApp {
                 p.update_session(self.engine.session_arc());
             }
         }
+        self.autosave_changes();
         self.write_automation(ctx);
         self.autosave();
         if self.recorder.is_none()

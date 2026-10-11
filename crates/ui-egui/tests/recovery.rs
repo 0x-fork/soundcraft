@@ -21,6 +21,22 @@ fn folder(name: &str) -> PathBuf {
     dir
 }
 
+/// Autosaves are written in the background.
+fn eventually(done: impl Fn() -> bool) -> bool {
+    for _ in 0..300 {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    done()
+}
+
+fn autosaved(root: &Path) -> String {
+    let folders = std::fs::read_dir(root).into_iter().flatten().flatten();
+    folders.map(|d| std::fs::read_to_string(d.path().join("session.scraft")).unwrap_or_default()).collect()
+}
+
 fn launch(root: &Path) -> SoundApp {
     let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
     app.autosave_dir = Some(root.to_path_buf());
@@ -56,7 +72,27 @@ fn an_exit_without_quit_offers_unsaved_changes_at_the_next_launch() {
     assert!(leftovers(&root).is_empty());
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
     h.state_mut().run("session.save", json!({})).unwrap();
-    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    assert!(eventually(|| std::fs::read_dir(&root).unwrap().count() == 0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn every_change_is_autosaved_within_a_second() {
+    let _one = one_at_a_time();
+    let dir = folder("recovery-changes");
+    let root = dir.join("Autosave");
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_ui_state(
+        |ui, app: &mut SoundApp| {
+            app.logic(&ui.ctx().clone());
+            app.ui(ui);
+        },
+        launch(&root),
+    );
+    for name in ["Vocal", "Bass"] {
+        h.state_mut().run("track.new", json!({"name": name})).unwrap();
+        h.run_steps(1);
+        assert!(eventually(|| autosaved(&root).contains(name)), "{name}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

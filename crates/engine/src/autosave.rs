@@ -1,5 +1,5 @@
-//! Crash-recovery copies of open sessions, one folder each, and the recovery of the ones left
-//! behind with unsaved work.
+//! Crash-recovery copies of open sessions, one folder each, written in the background, and the
+//! recovery of the ones left behind with unsaved work.
 
 use crate::io::{open_session, sanitize_name};
 use crate::{Engine, EngineError, Result};
@@ -8,16 +8,162 @@ use soundcraft_model::{Session, SourceAudio, SourceId};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Weak};
-use std::time::SystemTime;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::time::{Duration, Instant, SystemTime};
 
 const SESSION: &str = "session.scraft";
 const ORIGIN: &str = "origin";
 const LOCK: &str = "lock";
+/// While changes keep coming, the newest is written at most this often.
+const INTERVAL: Duration = Duration::from_secs(1);
+const STOPPED: &str = "the autosave thread stopped";
+
+/// Writes autosaves on a thread of its own, so the UI never waits on the disk.
+pub struct Autosaver {
+    jobs: Option<Sender<Job>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    failure: Arc<Mutex<Option<String>>>,
+}
+
+enum Job {
+    Write(Arc<Session>, Option<String>),
+    /// Done with the session's folder: keep it for the next launch, or delete it.
+    Close(bool),
+    Flush(Sender<std::result::Result<(), String>>),
+}
+
+impl Autosaver {
+    /// A writer for autosave folders under `root`.
+    pub fn new(root: PathBuf) -> Autosaver {
+        let (tx, rx) = channel();
+        let failure = Arc::new(Mutex::new(None));
+        let writer = Writer { root, failure: Arc::clone(&failure), folder: None, pending: None, last: None, written: Ok(()) };
+        let thread = std::thread::Builder::new().name("soundcraft-autosave".into()).spawn(move || writer.run(&rx));
+        if let Err(e) = &thread {
+            report(&failure, format!("{STOPPED}: {e}"));
+        }
+        Autosaver { jobs: Some(tx), thread: thread.ok(), failure }
+    }
+
+    /// Autosave `session`, opened from the session file `origin`, soon.
+    pub fn write(&self, session: Arc<Session>, origin: Option<String>) {
+        self.send(Job::Write(session, origin));
+    }
+
+    /// Done with the open session's folder: keep it for the next launch, or delete it.
+    pub fn close(&self, keep: bool) {
+        self.send(Job::Close(keep));
+    }
+
+    /// Wait until everything handed over so far is done. A failure returned here isn't reported
+    /// again by `failure`.
+    pub fn flush(&self) -> Result<()> {
+        let (tx, rx) = channel();
+        self.send(Job::Flush(tx));
+        let done = rx.recv().unwrap_or_else(|_| Err(STOPPED.into()));
+        if done.is_err() {
+            self.failure();
+        }
+        done.map_err(EngineError::Io)
+    }
+
+    /// The newest failure since the last call.
+    pub fn failure(&self) -> Option<String> {
+        self.failure.lock().unwrap_or_else(PoisonError::into_inner).take()
+    }
+
+    fn send(&self, job: Job) {
+        if self.jobs.as_ref().is_none_or(|tx| tx.send(job).is_err()) {
+            report(&self.failure, STOPPED.into());
+        }
+    }
+}
+
+impl Drop for Autosaver {
+    /// What was handed over is written, and an open folder stays for the next launch.
+    fn drop(&mut self) {
+        drop(self.jobs.take());
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// The writer thread.
+struct Writer {
+    root: PathBuf,
+    failure: Arc<Mutex<Option<String>>>,
+    /// The open session's folder.
+    folder: Option<Autosave>,
+    /// The newest session not written yet.
+    pending: Option<(Arc<Session>, Option<String>)>,
+    last: Option<Instant>,
+    /// How the newest write into the open folder went, for `Flush`.
+    written: std::result::Result<(), String>,
+}
+
+impl Writer {
+    fn run(mut self, jobs: &Receiver<Job>) {
+        loop {
+            let wait = match (&self.pending, self.last) {
+                (None, _) => Duration::MAX,
+                (Some(_), last) => last.map_or(Duration::ZERO, |t| INTERVAL.saturating_sub(t.elapsed())),
+            };
+            match jobs.recv_timeout(wait) {
+                Ok(Job::Write(session, origin)) => self.pending = Some((session, origin)),
+                Ok(Job::Flush(reply)) => {
+                    self.write_pending();
+                    let _ = reply.send(self.written.clone());
+                }
+                Ok(Job::Close(keep)) => {
+                    if keep {
+                        self.write_pending();
+                    }
+                    self.pending = None;
+                    self.written = Ok(());
+                    if let Some(a) = self.folder.take()
+                        && !keep
+                    {
+                        a.discard();
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => self.write_pending(),
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.write_pending();
+                    return;
+                }
+            }
+        }
+    }
+
+    fn write_pending(&mut self) {
+        let Some((session, origin)) = self.pending.take() else { return };
+        self.last = Some(Instant::now());
+        let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+            if self.folder.is_none() {
+                self.folder = Some(Autosave::create(&self.root, &session.name)?);
+            }
+            self.folder.as_mut().map_or(Ok(()), |a| a.write(&session, origin.as_deref()))
+        }));
+        self.written = match written {
+            Ok(written) => written.map_err(|e| e.to_string()),
+            Err(_) => Err("internal error (see the log)".into()),
+        };
+        if let Err(e) = &self.written {
+            report(&self.failure, e.clone());
+        }
+    }
+}
+
+fn report(failure: &Mutex<Option<String>>, e: String) {
+    log::warn!("autosave failed: {e}");
+    *failure.lock().unwrap_or_else(PoisonError::into_inner) = Some(e);
+}
 
 /// An open session's autosave folder, locked while the session is open so a later launch can tell
 /// it from one a crash left behind.
-pub struct Autosave {
+struct Autosave {
     dir: PathBuf,
     lock: Option<std::fs::File>,
     copies: BTreeMap<SourceId, (Weak<SourceAudio>, String)>,
@@ -26,7 +172,7 @@ pub struct Autosave {
 
 impl Autosave {
     /// A new folder under `root` for the session called `name`.
-    pub fn create(root: &Path, name: &str) -> Result<Autosave> {
+    fn create(root: &Path, name: &str) -> Result<Autosave> {
         let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_millis();
         let dir = root.join(format!("{} {stamp}-{}", sanitize_name(name), std::process::id()));
         let lock = std::fs::create_dir_all(&dir).and_then(|()| std::fs::File::create(dir.join(LOCK))).map_err(|err| io_error(&dir, err))?;
@@ -34,12 +180,12 @@ impl Autosave {
         Ok(Autosave { dir, lock: Some(lock), copies: BTreeMap::new(), next: 1 })
     }
 
-    /// Write the session as it is now. Audio saved with it is referenced where it is; audio that
-    /// exists only in memory is copied, once per recording or render.
-    pub fn write(&mut self, e: &Engine) -> Result<()> {
-        let base = e.path.as_deref().and_then(|p| Path::new(p).parent()).and_then(|p| std::path::absolute(p).ok());
+    /// Write `session`, opened from the session file `origin`. Audio saved with it is referenced
+    /// where it is; audio that exists only in memory is copied, once per recording or render.
+    fn write(&mut self, session: &Session, origin: Option<&str>) -> Result<()> {
+        let base = origin.and_then(|p| Path::new(p).parent()).and_then(|p| std::path::absolute(p).ok());
         let audio_dir = self.dir.join("Audio Files");
-        let mut s = e.session().clone();
+        let mut s = session.clone();
         let mut copies = BTreeMap::new();
         for src in &mut s.sources {
             let file = if Path::new(&src.path).is_absolute() { Some(PathBuf::from(&src.path)) } else { base.as_ref().map(|b| b.join(&src.path)) };
@@ -69,7 +215,7 @@ impl Autosave {
             copies.insert(src.id, (Arc::downgrade(audio), name));
         }
         let text = s.to_json().map_err(|err| EngineError::Io(err.to_string()))?;
-        write_atomically(&self.dir.join(ORIGIN), e.path.as_deref().unwrap_or_default().as_bytes())?;
+        write_atomically(&self.dir.join(ORIGIN), origin.unwrap_or_default().as_bytes())?;
         write_atomically(&self.dir.join(SESSION), text.as_bytes())?;
         for (_, name) in std::mem::replace(&mut self.copies, copies).into_values() {
             let _ = std::fs::remove_file(audio_dir.join(name));
@@ -78,7 +224,7 @@ impl Autosave {
     }
 
     /// Delete the folder: the session closed with nothing left to recover.
-    pub fn discard(mut self) {
+    fn discard(mut self) {
         drop(self.lock.take());
         let _ = std::fs::remove_dir_all(&self.dir);
     }
@@ -207,8 +353,8 @@ mod tests {
         crate::io::save_session(&mut e, &path.to_string_lossy()).unwrap();
         record(&mut e, -0.25);
         let mut a = Autosave::create(&dir.join("Autosave"), "Song").unwrap();
-        a.write(&e).unwrap();
-        a.write(&e).unwrap();
+        a.write(e.session(), e.path.as_deref()).unwrap();
+        a.write(e.session(), e.path.as_deref()).unwrap();
         assert_eq!(std::fs::read_dir(a.dir.join("Audio Files")).unwrap().count(), 1);
         drop(a);
         let left = leftovers(&dir.join("Autosave"));
@@ -226,15 +372,41 @@ mod tests {
         let mut e = Engine::default();
         record(&mut e, 0.5);
         let mut a = Autosave::create(&dir, "Untitled").unwrap();
-        a.write(&e).unwrap();
+        a.write(e.session(), None).unwrap();
         e.execute("edit.undo", &json!({})).unwrap();
         record(&mut e, -0.25);
-        a.write(&e).unwrap();
+        a.write(e.session(), None).unwrap();
         drop(a);
         let mut r = Engine::default();
         recover(&mut r, &leftovers(&dir)[0]).unwrap();
         assert_eq!(levels(&r), [-0.25]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_writer_saves_the_newest_change_and_drops_the_folder_when_done() {
+        let root = folder("autosave-writer");
+        let w = Autosaver::new(root.clone());
+        let mut e = Engine::default();
+        for _ in 0..5 {
+            record(&mut e, 0.5);
+            w.write(e.session_arc(), None);
+        }
+        w.flush().unwrap();
+        let file = std::fs::read_dir(&root).unwrap().flatten().map(|d| d.path().join(SESSION)).collect::<Vec<_>>();
+        let mut r = Engine::default();
+        open_session(&mut r, &file[0].to_string_lossy()).unwrap();
+        assert_eq!((file.len(), r.session().sources.len()), (1, 5));
+        w.close(false);
+        w.flush().unwrap();
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        record(&mut e, 0.5);
+        w.write(e.session_arc(), None);
+        drop(w);
+        let mut r = Engine::default();
+        recover(&mut r, &leftovers(&root)[0]).unwrap();
+        assert_eq!(r.session().sources.len(), 6);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -247,7 +419,7 @@ mod tests {
         crate::io::save_session(&mut e, &path).unwrap();
         record(&mut e, 0.5);
         let mut a = Autosave::create(&root, "Song").unwrap();
-        a.write(&e).unwrap();
+        a.write(e.session(), e.path.as_deref()).unwrap();
         assert!(leftovers(&root).is_empty());
         drop(a);
         let left = leftovers(&root);
