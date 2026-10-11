@@ -909,8 +909,11 @@ fn process_strip(
             d.extend_from_slice(src.get(..frames).unwrap_or(&[]));
         }
     }
+    // Endpoints are the first and last sample of this block. The next block starts on its own
+    // first sample, so a breakpoint there does not ramp the block before it.
+    let last = pos.saturating_add(frames.saturating_sub(1) as i64);
     let mut v0 = volume_db_at(t, pos);
-    let mut v1 = volume_db_at(t, pos + frames as i64);
+    let mut v1 = volume_db_at(t, last);
     // Trim automation (an offset on top of the volume curve).
     if let Some(l) = t
         .automation
@@ -919,14 +922,14 @@ fn process_strip(
         .filter(|l| !l.points.is_empty())
     {
         v0 += l.value_at(pos, 0.0);
-        v1 += l.value_at(pos + frames as i64, 0.0);
+        v1 += l.value_at(last, 0.0);
     }
     // VCA master: its fader offsets the member's, and its mute mutes the member.
     if let Some(vid) = t.mixer.vca
         && let Some(vca) = s.tracks.iter().find(|x| x.id.0 == vid && x.kind == TrackKind::Vca)
     {
         v0 += volume_db_at(vca, pos);
-        v1 += volume_db_at(vca, pos + frames as i64);
+        v1 += volume_db_at(vca, last);
         if vca.mixer.mute {
             strip.muted = true;
         }
@@ -935,7 +938,7 @@ fn process_strip(
     for c in strip.buf.iter_mut() {
         for i in 0..frames {
             if let Some(x) = c.get_mut(i) {
-                *x *= lerp_gain(g0, g1, i, frames);
+                *x *= lerp_gain(g0, g1, i, frames.saturating_sub(1));
             }
         }
     }
@@ -1235,10 +1238,12 @@ fn render_clip(s: &Session, clip: &Clip, pos: Samples, frames: usize, buf: &mut 
         while i < i1 {
             let seg_end = (i + STEP).min(i1);
             let rel0 = pos.saturating_add(i as i64).saturating_sub(clip.start);
-            let rel1 = pos.saturating_add(seg_end as i64).saturating_sub(clip.start);
+            // The last sample of this step, not the first sample of the next one, so a breakpoint
+            // on the boundary does not ramp the audio before it.
+            let rel1 = pos.saturating_add(seg_end.saturating_sub(1) as i64).saturating_sub(clip.start);
             let g0 = clip.gain_at(rel0);
             let g1 = clip.gain_at(rel1.min(clip.length));
-            let n = (seg_end - i) as f32;
+            let n = (seg_end - i).saturating_sub(1).max(1) as f32;
             for k in i..seg_end {
                 let rel = pos.saturating_add(k as i64).saturating_sub(clip.start);
                 let v = if (stretch - 1.0).abs() < 1e-9 {
