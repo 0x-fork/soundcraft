@@ -593,9 +593,14 @@ impl SoundApp {
     }
 
     /// Done with the open session. Unsaved changes stay in its autosave folder for the next
-    /// launch, unless the user quit with SoundCraft's Quit.
+    /// launch, unless the user quit with SoundCraft's Quit; a take still recording is finished
+    /// and always stays.
     pub fn close_autosave(&mut self) {
-        let keep = self.engine.is_dirty() && !self.quit_requested;
+        let recording = self.engine.transport.recording;
+        if recording {
+            self.stop_play();
+        }
+        let keep = self.engine.is_dirty() && (recording || !self.quit_requested);
         if keep {
             self.capture_plugin_states();
             self.write_autosave();
@@ -623,6 +628,10 @@ impl SoundApp {
 
     /// Replace the open session with unsaved work an earlier run left behind.
     pub fn recover(&mut self, left: &soundcraft_engine::autosave::Leftover) {
+        if self.engine.transport.recording {
+            self.ui.status = "Stop recording before recovering other work.".into();
+            return;
+        }
         self.close_autosave();
         match soundcraft_engine::autosave::recover(&mut self.engine, left) {
             Ok(missing) => {

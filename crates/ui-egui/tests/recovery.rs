@@ -139,6 +139,22 @@ fn closing_the_session_or_quitting_drops_its_autosave() {
 }
 
 #[test]
+fn quitting_while_recording_keeps_the_take_for_the_next_launch() {
+    let _one = one_at_a_time();
+    let dir = folder("recovery-recording");
+    let root = dir.join("Autosave");
+    let mut app = launch(&root);
+    app.run("track.new", json!({"name": "Vocal"})).unwrap();
+    app.engine.transport.recording = true;
+    assert!(app.run("app.quit", json!({})).is_err(), "Quit waits for the take");
+    app.quit_requested = true;
+    app.close_autosave();
+    assert!(!app.engine.transport.recording);
+    assert_eq!(leftovers(&root).len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_panic_in_a_frame_autosaves_and_the_app_carries_on() {
     let _one = one_at_a_time();
     let dir = folder("recovery-panic");

@@ -252,10 +252,19 @@ impl Engine {
         }
     }
 
+    /// Whether command `id` must wait for the take being recorded: nothing may replace the
+    /// session or quit under it.
+    pub fn blocked_while_recording(&self, id: &str) -> bool {
+        self.transport.recording && matches!(id, "session.new" | "session.open" | "session.close" | "session.revert" | "app.quit")
+    }
+
     /// Run a command by id. Never panics: escaped panics become `EngineError::Internal` and the
     /// document is restored.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        if self.blocked_while_recording(id) {
+            return Err(EngineError::Disabled(id.to_string(), "stop recording first".into()));
+        }
         if let Err(reason) = (spec.enabled)(self) {
             // A call that names its targets (tracks, clips, a range) does not need a selection;
             // the command itself validates them.
