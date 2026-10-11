@@ -15,8 +15,9 @@
 //! Plugins and threads: hosted third-party plugins (CLAP/VST3) are created, given their stored
 //! state and prepared on the thread that calls [`Player::update_session`] (the UI thread), and
 //! travel to the audio thread together with the session snapshot that needs them; the mix
-//! engine adopts them (see `soundcraft_mix`'s crate docs). Instances the engine retires come back
-//! on a return channel and are dropped on the UI thread ([`Player::idle`]). Plugin states for
+//! engine adopts them (see `soundcraft_mix`'s crate docs). Instances the engine retires, and the
+//! session snapshots the callback replaces, come back on return channels and are dropped on the UI
+//! thread ([`Player::idle`]). Plugin states for
 //! saving are read on request ([`Player::capture_states`]: a command with a reply; the audio
 //! thread answers between two blocks, never blocking). Plugin editors are driven on the UI thread
 //! through handles taken from each instance before it leaves ([`Player::open_editor`]).
@@ -30,10 +31,13 @@ use soundcraft_model::{Session, TrackId};
 use soundcraft_time::{Range, Samples};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 
 const BLOCK: usize = 512;
+
+/// Room for replaced snapshots on their way back; `update_session` empties it before each send.
+const OLD_SESSIONS: usize = 16;
 
 /// The realtime audio thread marker lives in the mix engine, which carries it into the strips it
 /// renders on worker threads; the cpal callbacks here set it.
@@ -55,6 +59,8 @@ pub type EditorEdit = (TrackId, usize, String, f32);
 enum Cmd {
     /// A new snapshot plus the third-party instances it needs (created on the UI thread).
     Session(Arc<Session>, Vec<PreparedInstance>),
+    /// Where the callback sends the snapshots it replaces (freeing one takes thousands of frees).
+    OldSessions(SyncSender<Arc<Session>>),
     /// Read every plugin state and reply.
     CaptureStates(Sender<PluginStates>),
     Input(Arc<record::InputRing>),
@@ -97,6 +103,7 @@ struct AudioState {
     recording: bool,
     /// Retired plugin instances go back to the UI thread to be dropped there.
     garbage: Sender<Vec<Box<dyn Plugin>>>,
+    old_sessions: Option<SyncSender<Arc<Session>>>,
 }
 
 fn new_engine(sr: f32) -> MixEngine {
@@ -112,6 +119,7 @@ impl AudioState {
         let nch = main_channels(&session);
         AudioState {
             garbage,
+            old_sessions: None,
             fold: fold_gains(&session),
             rx,
             shared,
@@ -155,8 +163,12 @@ impl AudioState {
                         self.read = 0.0;
                     }
                     self.fold = fold_gains(&s);
-                    self.session = s;
+                    let old = std::mem::replace(&mut self.session, s);
+                    if let Some(tx) = &self.old_sessions {
+                        let _ = tx.try_send(old);
+                    }
                 }
+                Cmd::OldSessions(tx) => self.old_sessions = Some(tx),
                 Cmd::Play { from, end, looped } => {
                     self.pos = from;
                     self.end = end;
@@ -326,14 +338,25 @@ struct Side {
     /// Editor handles of the live instances.
     editors: HashMap<(TrackId, usize), Box<dyn PluginEditor>>,
     garbage: Receiver<Vec<Box<dyn Plugin>>>,
+    old_sessions: Option<Receiver<Arc<Session>>>,
 }
 
 impl Side {
-    /// Drops retired instances (closing their editors first, inside the plugin's drop).
+    /// Drops retired instances (closing their editors first, inside the plugin's drop) and
+    /// replaced session snapshots.
     fn collect_garbage(&mut self) {
         while let Ok(g) = self.garbage.try_recv() {
             drop(g);
         }
+        if let Some(rx) = &self.old_sessions {
+            rx.try_iter().for_each(drop);
+        }
+    }
+
+    fn return_old_sessions(&mut self, tx: &Sender<Cmd>) {
+        let (otx, orx) = sync_channel(OLD_SESSIONS);
+        self.old_sessions = Some(orx);
+        let _ = tx.send(Cmd::OldSessions(otx));
     }
 
     fn forget(&mut self, key: (TrackId, usize)) {
@@ -365,6 +388,7 @@ impl Player {
     /// Open the default output device. Never fails: without a device it runs a silent clock.
     pub fn new(session: Arc<Session>) -> Player {
         let p = Player::open(Arc::clone(&session));
+        p.side().return_old_sessions(&p.tx);
         // Hand the initial session's third-party plugins over.
         p.update_session(session);
         p
@@ -376,7 +400,13 @@ impl Player {
 
     fn open(session: Arc<Session>) -> Player {
         let (gtx, grx) = channel();
-        let side = Mutex::new(Side { shadow: HashMap::new(), rate: session.sample_rate.as_f64() as f32, editors: HashMap::new(), garbage: grx });
+        let side = Mutex::new(Side {
+            shadow: HashMap::new(),
+            rate: session.sample_rate.as_f64() as f32,
+            editors: HashMap::new(),
+            garbage: grx,
+            old_sessions: None,
+        });
         let shared = Arc::new(Shared {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
@@ -916,7 +946,7 @@ mod tests {
     fn side_creates_each_missing_instance_once() {
         use soundcraft_model::{ChannelFormat, Insert, TrackKind};
         let (_gtx, grx) = channel();
-        let mut side = Side { shadow: HashMap::new(), rate: 48_000.0, editors: HashMap::new(), garbage: grx };
+        let mut side = Side { shadow: HashMap::new(), rate: 48_000.0, editors: HashMap::new(), garbage: grx, old_sessions: None };
         let mut s = soundcraft_model::Session::default();
         let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
         s.track_mut(t).unwrap().mixer.inserts[0] = Some(Insert::new("clap:does.not.exist"));
@@ -928,6 +958,34 @@ mod tests {
         s.track_mut(t).unwrap().mixer.inserts[0] = None;
         side.prepare(&s);
         assert!(side.shadow.is_empty());
+    }
+
+    #[test]
+    fn replaced_sessions_are_freed_on_the_ui_thread() {
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let (gtx, grx) = channel();
+        let mut st = AudioState::new(rx, shared, Arc::new(soundcraft_model::Session::default()), 48_000.0, gtx);
+        let mut side = Side { shadow: HashMap::new(), rate: 48_000.0, editors: HashMap::new(), garbage: grx, old_sessions: None };
+        side.return_old_sessions(&tx);
+        let mut out = vec![0.0f32; 256];
+        let mut watched = Vec::new();
+        for _ in 0..3 * OLD_SESSIONS {
+            let s = Arc::new(soundcraft_model::Session::default());
+            watched.push(Arc::downgrade(&s));
+            side.collect_garbage();
+            tx.send(Cmd::Session(s, Vec::new())).unwrap();
+            st.fill(&mut out, 2);
+            let replaced = watched.len().checked_sub(2).and_then(|i| watched.get(i));
+            assert!(replaced.is_none_or(|w| w.strong_count() == 1), "freed on the audio thread");
+        }
+        side.collect_garbage();
+        assert_eq!(watched.iter().filter(|w| w.strong_count() > 0).count(), 1, "only the live snapshot is left");
     }
 
     #[test]
