@@ -396,6 +396,7 @@ mod selector_visual_regressions {
 
     #[test]
     fn capture_selector_visual_fixtures() {
+        let _palette = crate::theme::lock_test_palette();
         let Some(directory) = std::env::var_os("CRAFT_UI_VISUAL_FIXTURES").map(std::path::PathBuf::from) else { return };
         std::fs::create_dir_all(&directory).unwrap();
         for scale in [1.0, 1.5, 2.0] {
@@ -451,6 +452,7 @@ mod selector_visual_regressions {
 
     #[test]
     fn actual_mixer_keeps_every_active_automation_mode_legible() {
+        let _palette = crate::theme::lock_test_palette();
         for narrow in [false, true] {
             for mode in soundcraft_model::AutomationMode::ALL {
                 for scale in [1.0, 1.5, 2.0] {
@@ -491,6 +493,7 @@ mod selector_visual_regressions {
 
     #[test]
     fn capture_actual_mixer_visual_fixtures() {
+        let _palette = crate::theme::lock_test_palette();
         let Some(directory) = std::env::var_os("CRAFT_UI_VISUAL_FIXTURES").map(std::path::PathBuf::from) else { return };
         std::fs::create_dir_all(&directory).unwrap();
         for mode in soundcraft_model::AutomationMode::ALL {
@@ -544,6 +547,7 @@ mod selector_visual_regressions {
 
     #[test]
     fn compact_mixer_selectors_keep_labels_on_one_visible_line() {
+        let _palette = crate::theme::lock_test_palette();
         for width in [46.0, 74.0, 110.0] {
             for label in ["auto read", "no group", "A very long mixer group name"] {
                 for scale in [1.0, 1.5, 2.0] {
