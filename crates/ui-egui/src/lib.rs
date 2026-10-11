@@ -32,6 +32,7 @@ use serde_json::{Value, json};
 use soundcraft_engine::{Engine, TransportRequest};
 use soundcraft_model::TrackId;
 use soundcraft_playback::Player;
+use soundcraft_playback::record::Trouble;
 use soundcraft_time::{Range, Samples};
 use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
@@ -226,6 +227,8 @@ pub struct SoundApp {
     /// Punch range to trim the take to (pre/post-roll recordings).
     punch: Option<Range>,
     recorder_failed: bool,
+    /// Input this take lost to a slow disk, as last reported (ms).
+    lost_shown: u64,
     pub ui: UiState,
     pub audio_health_report: Option<Result<Value, String>>,
     pub services: Services,
@@ -300,6 +303,7 @@ impl SoundApp {
             record_start: 0,
             punch: None,
             recorder_failed: false,
+            lost_shown: 0,
             ui: UiState::default(),
             audio_health_report: None,
             services,
@@ -460,6 +464,7 @@ impl SoundApp {
             self.ui.status = format!("Cannot record: {err}");
             return;
         }
+        self.lost_shown = 0;
         if let Some(p) = &self.player {
             p.set_recording(true);
         }
@@ -674,6 +679,47 @@ impl SoundApp {
                 self.ui.status = format!("No audio input: {e}");
             }
         }
+    }
+
+    /// Stop recording, keeping the take, when the input device or the disk fails, and say as soon
+    /// as a slow disk loses input.
+    fn watch_input(&mut self) {
+        let recording = self.engine.transport.recording;
+        let Some(r) = &mut self.recorder else { return };
+        let Some(trouble) = r.trouble() else {
+            let lost = r.lost_ms();
+            if recording && lost > self.lost_shown {
+                self.lost_shown = lost;
+                self.ui.status = format!("The disk is too slow: this take has lost {lost} ms of input so far.");
+            }
+            return;
+        };
+        if recording {
+            self.stop_play();
+        }
+        let (what, then) = match trouble {
+            Trouble::Device(what) => {
+                self.recorder = None;
+                self.recorder_failed = true;
+                (what, "Reconnect it, then use Reconnect audio device in Setup ▸ Playback Engine.")
+            }
+            Trouble::Disk(what) => (what, "Check the disk, then record again."),
+        };
+        self.ui.status = if recording {
+            format!("Recording stopped: {what}. The take is kept up to there. {then}")
+        } else {
+            format!("Audio input: {what}. {then}")
+        };
+    }
+
+    /// Reopen the audio devices, keeping a take in progress.
+    pub fn reconnect_audio(&mut self) {
+        if self.is_playing() || self.engine.transport.recording {
+            self.stop_play();
+        }
+        self.recorder = None;
+        self.recorder_failed = false;
+        self.player = Some(Player::new(self.engine.session_arc()));
     }
 
     fn finish_recording(&mut self) {
@@ -923,6 +969,7 @@ impl SoundApp {
             self.stop_play();
             self.ui.status = "The audio engine hit an internal error (see the log) and went silent. Use Reconnect audio device in Setup ▸ Playback Engine, or restart SoundCraft.".into();
         }
+        self.watch_input();
         // Stop the old playback before sending a replacement session to the audio thread.
         self.handle_transport(dt);
         if self.engine.revision != self.last_rev {
