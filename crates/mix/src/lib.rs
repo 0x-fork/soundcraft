@@ -58,6 +58,7 @@ use soundcraft_model::{
 };
 use soundcraft_time::{Range, Samples};
 use std::collections::HashMap;
+use std::ops::Bound;
 use std::sync::Arc;
 
 /// Default (stereo) main mix width. The actual width is [`main_channels`].
@@ -852,7 +853,7 @@ fn process_strip(
                         }
                         render_clip(s, clip, pos, frames, &mut strip.clipbuf, &mut strip.scratch);
                         let fx = strip.clip_fx.entry(clip.id.0).or_insert_with(|| ClipFx::new(s.sample_rate.as_f64() as f32, nch));
-                        fx.configure(&params);
+                        fx.configure(params);
                         fx.process(&mut strip.clipbuf, frames);
                         for (d, c) in strip.buf.iter_mut().zip(strip.clipbuf.iter()) {
                             for (x, y) in d.iter_mut().zip(c.iter()).take(frames) {
@@ -980,19 +981,49 @@ fn process_strip(
 }
 
 /// Clip-effect parameters of a clip, or None when it has none or they are bypassed.
-fn clip_fx_params(s: &Session, clip: u64) -> Option<Vec<(String, f32)>> {
-    if s.edit.values.is_empty() {
+fn clip_fx_params(s: &Session, clip: u64) -> Option<impl Iterator<Item = (&str, f32)> + Clone> {
+    if s.edit.values.is_empty() || Key::new(format_args!("clip_fx.bypass.{clip}")).is_none_or(|k| s.edit.flag(k.as_str())) {
         return None;
     }
-    let pre = format!("clip_fx.{clip}.");
-    let v: Vec<(String, f32)> = s
+    let pre = Key::new(format_args!("clip_fx.{clip}."))?;
+    let mut params = s
         .edit
         .values
-        .range(pre.clone()..)
-        .take_while(|(k, _)| k.starts_with(&pre))
-        .map(|(k, v)| (k.get(pre.len()..).unwrap_or("").to_string(), *v as f32))
-        .collect();
-    if v.is_empty() || s.edit.flag(&format!("clip_fx.bypass.{clip}")) { None } else { Some(v) }
+        .range::<str, _>((Bound::Included(pre.as_str()), Bound::Unbounded))
+        .take_while(move |(k, _)| k.starts_with(pre.as_str()))
+        .map(move |(k, v)| (k.get(pre.len..).unwrap_or(""), *v as f32))
+        .peekable();
+    params.peek()?;
+    Some(params)
+}
+
+/// A short key formatted on the stack: lookups made on the audio thread must not allocate.
+#[derive(Clone, Copy)]
+struct Key {
+    buf: [u8; 64],
+    len: usize,
+}
+
+impl Key {
+    /// None when the key doesn't fit.
+    fn new(args: std::fmt::Arguments<'_>) -> Option<Key> {
+        let mut k = Key { buf: [0; 64], len: 0 };
+        std::fmt::Write::write_fmt(&mut k, args).ok()?;
+        Some(k)
+    }
+
+    fn as_str(&self) -> &str {
+        self.buf.get(..self.len).and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("")
+    }
+}
+
+impl std::fmt::Write for Key {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let end = self.len.checked_add(s.len()).ok_or(std::fmt::Error)?;
+        self.buf.get_mut(self.len..end).ok_or(std::fmt::Error)?.copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
 }
 
 impl ClipFx {
@@ -1006,10 +1037,10 @@ impl ClipFx {
         })
     }
     /// Modules exist only when one of their parameters is set.
-    fn configure(&mut self, params: &[(String, f32)]) {
+    fn configure<'a>(&mut self, params: impl Iterator<Item = (&'a str, f32)> + Clone) {
         self.gain_db = 0.0;
-        let has_eq = params.iter().any(|(k, _)| k.starts_with("eq."));
-        let has_comp = params.iter().any(|(k, _)| k.starts_with("comp."));
+        let has_eq = params.clone().any(|(k, _)| k.starts_with("eq."));
+        let has_comp = params.clone().any(|(k, _)| k.starts_with("comp."));
         if has_eq && self.eq.is_none() {
             self.eq = self.make("eq_7band");
         } else if !has_eq {
@@ -1023,18 +1054,18 @@ impl ClipFx {
         for (k, v) in params {
             if let Some(p) = k.strip_prefix("eq.") {
                 if let Some(eq) = &mut self.eq
-                    && eq.param(p) != Some(*v)
+                    && eq.param(p) != Some(v)
                 {
-                    eq.set_param(p, *v);
+                    eq.set_param(p, v);
                 }
             } else if let Some(p) = k.strip_prefix("comp.") {
                 if let Some(c) = &mut self.comp
-                    && c.param(p) != Some(*v)
+                    && c.param(p) != Some(v)
                 {
-                    c.set_param(p, *v);
+                    c.set_param(p, v);
                 }
             } else if k == "gain" {
-                self.gain_db = *v;
+                self.gain_db = v;
             }
         }
     }
@@ -1319,7 +1350,7 @@ fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mu
         }
         let base = s.tempo.samples_to_ticks(clip.start, sr);
         // MIDI Real-Time Properties (non-destructive velocity/transpose/duration/delay).
-        let rtp = |name: &str, d: f64| s.edit.value(&format!("rtp.{}.{name}", t.id.0), d);
+        let rtp = |name: &str, d: f64| Key::new(format_args!("rtp.{}.{name}", t.id.0)).map_or(d, |k| s.edit.value(k.as_str(), d));
         let (dv, dp, dur, delay) = if s.edit.values.is_empty() {
             (0i64, 0i64, 1.0f64, 0i64)
         } else {
@@ -1862,7 +1893,7 @@ pub fn render_clips(s: &Session, track: TrackId, range: Range) -> Vec<Vec<f32>> 
                 let mut tmp = vec![vec![0.0f32; len]; out.len()];
                 render_clip(s, c, range.start, len, &mut tmp, &mut scratch);
                 let mut fx = ClipFx::new(s.sample_rate.as_f64() as f32, tmp.len());
-                fx.configure(&params);
+                fx.configure(params);
                 let mut done = 0;
                 while done < len {
                     let n = (len - done).min(4096);
@@ -2166,6 +2197,55 @@ mod tests {
         fn save_state(&mut self) -> Option<Vec<u8>> {
             Some(self.blob.clone())
         }
+    }
+
+    struct Keys {
+        inner: Box<dyn Plugin>,
+        heard: Arc<std::sync::Mutex<Vec<(u8, u8)>>>,
+    }
+
+    impl Plugin for Keys {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.inner.process(io, frames);
+        }
+        fn note_on(&mut self, _offset: usize, note: u8, velocity: u8) {
+            self.heard.lock().unwrap().push((note, velocity));
+        }
+    }
+
+    #[test]
+    fn real_time_properties_reach_the_instrument() {
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.keys"));
+        let mut seq = soundcraft_midi::Sequence::default();
+        seq.notes.push(soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 480 });
+        let cid = s.new_clip_id();
+        s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::midi(cid, "m", 0, 48_000, seq));
+        s.edit.values.insert(format!("rtp.{}.transpose", t.0), 12.0);
+        s.edit.values.insert(format!("rtp.{}.velocity", t.0), -20.0);
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let keys = Keys { inner: soundcraft_dsp::create("gain").unwrap(), heard: Arc::clone(&heard) };
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.keys".into(), ch: 2, plugin: Box::new(keys) }]);
+        render_block(&mut eng, &s, 0);
+        assert_eq!(*heard.lock().unwrap(), vec![(72, 80)]);
     }
 
     fn render_block(eng: &mut MixEngine, s: &Session, pos: i64) -> f32 {
