@@ -44,7 +44,7 @@ pub fn specs() -> Vec<CommandSpec> {
             s.sources.clear();
             s.videos.clear();
             let text = s.to_json().map_err(|err| EngineError::Io(err.to_string()))?;
-            std::fs::write(&file, text).map_err(|err| EngineError::Io(format!("{}: {err}", file.display())))?;
+            crate::io::replace_file(&file.with_extension("scraft.tmp"), &file, text.as_bytes())?;
             Ok(json!({"path": file}))
         }),
         cmd!(noundo "session.revert", "Revert Session to Saved...", ["File"], None, "{}", always, |e, _| {

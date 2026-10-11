@@ -513,6 +513,9 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
         src.format = FileFormat::Wav;
         written += usize::from(new);
     }
+    if written > 0 {
+        sync_dir(&audio_dir);
+    }
     s.folder = Some(dir.clone());
     if !overwrite && let Some(stem) = p.file_stem().and_then(|x| x.to_str()) {
         s.name = stem.to_string();
@@ -521,9 +524,61 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
     std::fs::create_dir_all(&dir).map_err(|err| EngineError::Io(format!("{}: {err}", dir.display())))?;
     // Atomic-ish write: temp file then rename.
     let tmp = p.with_extension("scraft.tmp");
-    std::fs::write(&tmp, text).map_err(|err| EngineError::Io(format!("{}: {err}", tmp.display())))?;
-    std::fs::rename(&tmp, &p).map_err(|err| EngineError::Io(format!("{}: {err}", p.display())))?;
+    if !overwrite && std::fs::read(&p).is_ok_and(|old| old != text.as_bytes()) {
+        back_up(&p);
+    }
+    replace_file(&tmp, &p, text.as_bytes())?;
     Ok((s, written, p))
+}
+
+/// Write `bytes` to `tmp`, flush it to disk and rename it over `file`, so `file` holds either the
+/// old or the new contents, never a mix.
+pub fn replace_file(tmp: &Path, file: &Path, bytes: &[u8]) -> Result<()> {
+    if let Err(err) = write_synced(tmp, bytes).and_then(|()| std::fs::rename(tmp, file)) {
+        let _ = std::fs::remove_file(tmp);
+        return Err(EngineError::Io(format!("{}: {err}", file.display())));
+    }
+    sync_dir(file.parent().unwrap_or(Path::new("")));
+    Ok(())
+}
+
+fn sync_dir(dir: &Path) {
+    let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+    let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+}
+
+fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
+/// Copy the session file about to be replaced to `Backups/<name> backup <n>.<ext>`, keeping the
+/// newest ten.
+fn back_up(file: &Path) {
+    let (Some(dir), Some(stem), Some(ext)) = (file.parent(), file.file_stem().and_then(|x| x.to_str()), file.extension().and_then(|x| x.to_str()))
+    else {
+        return;
+    };
+    let backups = dir.join("Backups");
+    let prefix = format!("{stem} backup ");
+    let suffix = format!(".{ext}");
+    let numbers: Vec<u32> = std::fs::read_dir(&backups)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|f| f.file_name().to_str()?.strip_prefix(&prefix)?.strip_suffix(&suffix)?.parse().ok())
+        .collect();
+    let next = numbers.iter().max().map_or(1, |n| n.saturating_add(1));
+    let copied = std::fs::create_dir_all(&backups).and_then(|()| std::fs::copy(file, backups.join(format!("{prefix}{next}{suffix}"))));
+    if let Err(err) = copied {
+        log::warn!("no backup of {}: {err}", file.display());
+        return;
+    }
+    for n in numbers.into_iter().filter(|n| n.saturating_add(10) <= next) {
+        let _ = std::fs::remove_file(backups.join(format!("{prefix}{n}{suffix}")));
+    }
 }
 
 /// The file a session saved to `path` goes to: `path`, with `.scraft` added when it has no
@@ -560,7 +615,7 @@ fn store_wav(dir: &Path, stem: &str, bytes: &[u8]) -> Result<(String, bool)> {
         let path = dir.join(&name);
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut f) => {
-                if let Err(err) = f.write_all(bytes) {
+                if let Err(err) = f.write_all(bytes).and_then(|()| f.sync_all()) {
                     let _ = std::fs::remove_file(&path);
                     return Err(EngineError::Io(format!("{}: {err}", path.display())));
                 }
@@ -790,6 +845,26 @@ mod save_tests {
         second.execute("session.save_as", &json!({"path": path, "replace": true})).unwrap();
         let r = reopen(&path);
         assert_eq!(r.session().pool.get(r.session().sources[0].id).unwrap().buffer.channels[0][0], -0.25);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_keeps_the_last_ten_versions_as_backups() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-backups-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Song.scraft");
+        let mut e = Engine::default();
+        let mut versions = Vec::new();
+        for i in 0..12 {
+            e.execute("track.new", &json!({"name": format!("T{i}")})).unwrap();
+            save_session(&mut e, &path.to_string_lossy()).unwrap();
+            save_session(&mut e, &path.to_string_lossy()).unwrap();
+            versions.push(std::fs::read(&path).unwrap());
+        }
+        let backup = |n: usize| std::fs::read(dir.join(format!("Backups/Song backup {n}.scraft"))).ok();
+        assert_eq!(std::fs::read_dir(dir.join("Backups")).unwrap().count(), 10);
+        assert_eq!((backup(1), backup(2), backup(11)), (None, Some(versions[1].clone()), Some(versions[10].clone())));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
