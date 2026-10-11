@@ -424,7 +424,10 @@ mod tests {
         let mut wavs: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         wavs.sort();
         assert_eq!(wavs, vec!["Take-2.wav".to_string(), "Take.wav".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
+    #[test]
     fn save_copy_leaves_the_open_session_alone() {
         let (mut e, _) = tone_engine();
         let dir = std::env::temp_dir().join(format!("sc-save-copy-{}", std::process::id()));
