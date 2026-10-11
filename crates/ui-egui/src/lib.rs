@@ -220,6 +220,8 @@ pub struct SoundApp {
     pub dialogs: dialogs::Dialogs,
     pub meters: HashMap<TrackId, MeterDisplay>,
     pub main_meter: MeterDisplay,
+    /// Reused multichannel snapshot; populated at an adaptive rate by `logic`.
+    meter_snapshot: soundcraft_playback::MeterSnapshot,
     pub gesture: Option<Gesture>,
     pub edit_layout: edit_window::EditLayout,
     pub midi: midi_editor::MidiEditorState,
@@ -247,6 +249,7 @@ pub struct SoundApp {
     last_write_at: Samples,
     pub frame_ms: f32,
     last_frame: Option<f64>,
+    last_meter_poll: f64,
     /// Movies for the Video window and Video track (decoded in the background).
     pub video: video_track::VideoPool,
 }
@@ -280,6 +283,7 @@ impl SoundApp {
             dialogs: dialogs::Dialogs::default(),
             meters: HashMap::new(),
             main_meter: MeterDisplay::default(),
+            meter_snapshot: soundcraft_playback::MeterSnapshot::default(),
             gesture: None,
             edit_layout: edit_window::EditLayout::default(),
             midi: midi_editor::MidiEditorState::default(),
@@ -302,6 +306,7 @@ impl SoundApp {
             last_write_at: i64::MIN,
             frame_ms: 0.0,
             last_frame: None,
+            last_meter_poll: f64::NEG_INFINITY,
             video: video_track::VideoPool::default(),
         }
     }
@@ -725,7 +730,13 @@ impl SoundApp {
             if self.engine.transport.playing {
                 self.engine.transport.position = p.position();
             }
-            let snap = p.meters();
+            let now = self.last_frame.unwrap_or_default();
+            let meter_interval = if self.ui.window == MainWindow::Mix { 1.0 / 60.0 } else { 1.0 / 20.0 };
+            if now - self.last_meter_poll >= meter_interval {
+                p.copy_meters(&mut self.meter_snapshot);
+                self.last_meter_poll = now;
+            }
+            let snap = &self.meter_snapshot;
             for (id, m) in &snap.tracks {
                 let d = self.meters.entry(*id).or_default();
                 feed_meter(d, m.peak, m.gain_reduction_db, dt);
@@ -805,7 +816,12 @@ impl SoundApp {
         {
             self.ensure_input();
         }
-        if self.is_playing() || self.meters.values().any(|m| m.level[0] > 0.0001) || !self.pending_shots.is_empty() || !self.synthetic.is_empty() {
+        if self.is_playing() {
+            let hz = if self.ui.window == MainWindow::Mix { 60 } else { 30 };
+            ctx.request_repaint_after(std::time::Duration::from_millis(1000 / hz));
+        } else if self.meters.values().any(|m| m.level[0] > 0.0001) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(80));
+        } else if !self.pending_shots.is_empty() || !self.synthetic.is_empty() {
             ctx.request_repaint();
         }
         control::collect_screenshots(self, ctx);

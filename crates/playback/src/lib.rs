@@ -633,6 +633,21 @@ impl Player {
     pub fn meters(&self) -> MeterSnapshot {
         self.shared.meters.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
+
+    /// Copy meters into reusable UI storage. Once track/channel counts are stable this performs
+    /// no allocation, unlike cloning a new snapshot every video frame.
+    pub fn copy_meters(&self, out: &mut MeterSnapshot) {
+        let source = self.shared.meters.lock().unwrap_or_else(PoisonError::into_inner);
+        copy_meter_snapshot(&source, out);
+    }
+}
+
+fn copy_meter_snapshot(source: &MeterSnapshot, out: &mut MeterSnapshot) {
+    out.tracks.retain(|id, _| source.tracks.contains_key(id));
+    for (id, meter) in &source.tracks {
+        out.tracks.entry(*id).or_default().copy_from(meter);
+    }
+    out.main.copy_from(&source.main);
 }
 
 impl Side {
@@ -729,6 +744,21 @@ fn open_device(want_rate: u32, want_ch: u16) -> Result<(cpal::Device, cpal::Stre
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reusable_meter_snapshot_updates_and_drops_stale_tracks() {
+        let keep = TrackId(1);
+        let stale = TrackId(2);
+        let mut source = MeterSnapshot::default();
+        source.tracks.insert(keep, StripMeter { peak: [0.5, 0.25], peaks: vec![0.5, 0.25], gain_reduction_db: 3.0 });
+        source.main.peaks = vec![0.75, 0.5];
+        let mut out = MeterSnapshot::default();
+        out.tracks.insert(stale, StripMeter::default());
+        copy_meter_snapshot(&source, &mut out);
+        assert_eq!(out.tracks.len(), 1);
+        assert_eq!(out.tracks[&keep], source.tracks[&keep]);
+        assert_eq!(out.main, source.main);
+    }
 
     #[test]
     fn audio_state_plays_and_stops_at_end() {
