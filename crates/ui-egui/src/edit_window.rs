@@ -744,9 +744,7 @@ fn playlist_lanes(app: &mut SoundApp, ui: &mut Ui, track: &Track, row: Rect, mai
         ui.painter().text(pos2(head.min.x + 4.0, head.center().y), Align2::LEFT_CENTER, &pl.name, regular(10.5), t.text_dim);
         let painter = ui.painter().with_clip_rect(lane.intersect(ui.clip_rect()));
         for c in &pl.clips {
-            let r = Rect::from_min_max(pos2(x_of(&s, tl, c.start), lane.min.y + 3.0), pos2(x_of(&s, tl, c.end()), lane.max.y - 3.0));
-            painter.rect(r, 2.0, rgb(track.color).gamma_multiply(0.45), Stroke::new(1.0, Color32::BLACK), StrokeKind::Inside);
-            painter.text(pos2(r.min.x + 4.0, r.min.y + 7.0), Align2::LEFT_CENTER, &c.name, regular(9.5), t.text);
+            draw_clip(app, &painter, &s, track, c, tl, lane, false);
         }
         let resp = ui.interact(lane, ui.id().with(("pl_lane", track.id.0, i)), Sense::click());
         if resp.clicked()
@@ -1179,58 +1177,15 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
     let body_r = Rect::from_min_max(pos2(r.min.x, r.min.y + name_h), r.max);
     let vis = body_r.intersect(lane);
     match &clip.content {
-        ClipContent::Audio { source, offset } => {
+        _ if track.view == "blocks" => {}
+        ClipContent::Audio { source, .. } => {
             if let Some(audio) = s.pool.get(*source) {
-                let nch = track.channels().min(audio.peaks.len().max(1)).max(1);
-                let ch_h = body_r.height() / nch as f32;
-                let zoom = s.edit.zoom.waveform_zoom;
-                let rectified = s.edit.flag("waveform.rectified");
-                let power = s.edit.flag("waveform.power");
-                let outlines = s.edit.flag("waveform.outlines");
-                let cols = vis.width().max(0.0) as usize;
-                if cols > 0 && vis.height() > 2.0 {
-                    let a = (offset + sample_at(s, tl, vis.min.x) - clip.start) as f64;
-                    let b = (offset + sample_at(s, tl, vis.max.x) - clip.start) as f64;
-                    for ch in 0..nch {
-                        let Some(pk) = audio.peaks.get(ch % audio.peaks.len().max(1)) else { continue };
-                        let cy = body_r.min.y + ch_h * (ch as f32 + 0.5);
-                        let half = ch_h * 0.46;
-                        let colsv = pk.columns(a, b, cols);
-                        let mut mesh = egui::Mesh::default();
-                        for (i, (mn, mx)) in colsv.iter().enumerate() {
-                            let x = vis.min.x + i as f32;
-                            let rel = sample_at(s, tl, x) - clip.start;
-                            let g = clip.gain_at(rel.clamp(0, clip.length));
-                            let (mut top, mut bot) = if rectified {
-                                let a = (mx.abs().max(mn.abs()) * g * zoom).clamp(0.0, 1.0);
-                                let b = cy + half;
-                                (b - a * half * 2.0, b)
-                            } else {
-                                (cy - (mx * g * zoom).clamp(-1.0, 1.0) * half, cy - (mn * g * zoom).clamp(-1.0, 1.0) * half)
-                            };
-                            if power {
-                                // Power view: compress peaks logarithmically around the centre.
-                                let k = |y: f32| cy + (y - cy).signum() * ((y - cy).abs() / half).sqrt() * half;
-                                top = k(top);
-                                bot = k(bot);
-                            }
-                            if outlines {
-                                bot = top + 1.0;
-                            }
-                            let bot = if (bot - top) < 1.0 { top + 1.0 } else { bot };
-                            let idx = mesh.vertices.len() as u32;
-                            mesh.colored_vertex(pos2(x, top), wave);
-                            mesh.colored_vertex(pos2(x + 1.0, top), wave);
-                            mesh.colored_vertex(pos2(x + 1.0, bot), wave);
-                            mesh.colored_vertex(pos2(x, bot), wave);
-                            mesh.add_triangle(idx, idx + 1, idx + 2);
-                            mesh.add_triangle(idx, idx + 2, idx + 3);
-                        }
-                        painter.with_clip_rect(vis).add(Shape::mesh(mesh));
-                        if nch > 1 && ch + 1 < nch {
-                            let y = body_r.min.y + ch_h * (ch as f32 + 1.0);
-                            painter.line_segment([pos2(vis.min.x, y), pos2(vis.max.x, y)], Stroke::new(1.0, body.gamma_multiply(0.7)));
-                        }
+                if vis.width() > 0.0 && vis.height() > 2.0 {
+                    crate::waveform::draw(&painter.with_clip_rect(vis), s, tl, clip, audio, track.channels(), body_r, wave);
+                    let n = track.channels().min(audio.peaks.len()).max(1);
+                    for k in 1..n {
+                        let y = body_r.min.y + body_r.height() / n as f32 * k as f32;
+                        painter.line_segment([pos2(vis.min.x, y), pos2(vis.max.x, y)], Stroke::new(1.0, body.gamma_multiply(0.7)));
                     }
                 }
             } else {
@@ -1254,7 +1209,11 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
                 }
                 let y = body_r.max.y - 3.0 - (f32::from(n.pitch.saturating_sub(lo)) / span) * (body_r.height() - 6.0);
                 let nh = ((body_r.height() - 6.0) / span).clamp(1.5, 6.0);
-                let vcol = Color32::from_rgb(20, 20 + n.velocity, 40);
+                let vcol = if crate::theme::is_light() {
+                    Color32::from_rgb(20, 20 + n.velocity, 40)
+                } else {
+                    wave.gamma_multiply(0.5 + f32::from(n.velocity) / 254.0)
+                };
                 p.rect_filled(
                     Rect::from_min_max(pos2(nx0, y - nh * 0.5), pos2(nx1, y + nh * 0.5)),
                     1.0,
@@ -1262,6 +1221,21 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
                 );
             }
         }
+    }
+    let prev = crossfade_partner(track, clip);
+    if s.edit.flag("waveform.overlapped_crossfades")
+        && track.view != "blocks"
+        && let Some(prev) = prev
+        && let ClipContent::Audio { source, .. } = &prev.content
+        && let Some(audio) = s.pool.get(*source)
+    {
+        let xf = Rect::from_min_max(pos2(x0, body_r.min.y), pos2(x_of(s, tl, prev.end()).min(x1), body_r.max.y)).intersect(vis);
+        let tail = if prev.muted || dim {
+            Color32::from_rgb(70, 70, 70)
+        } else {
+            clip_colors(prev.color.unwrap_or(track.color), false).2.gamma_multiply(0.6)
+        };
+        crate::waveform::draw(&painter.with_clip_rect(xf), s, tl, prev, audio, track.channels(), body_r, tail);
     }
     // Clip gain line.
     let show_gain = s.edit.flag("view.clip.gain_line") && (!clip.gain_env.is_empty() || clip.gain_db.abs() > 0.01 || track.view == "clip_gain");
@@ -1300,12 +1274,12 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
         painter.add(Shape::line(pts, Stroke::new(1.2, fade_col)));
         painter.line_segment([pos2(x0, body_r.min.y), pos2(fx, body_r.min.y)], Stroke::new(1.0, fade_col));
     }
-    if clip.fade_out.len > 0 {
-        let fx = x_of(s, tl, clip.end() - clip.fade_out.len);
+    for c in std::iter::once(clip).chain(prev).filter(|c| c.fade_out.len > 0) {
+        let (fx, ex) = (x_of(s, tl, c.end() - c.fade_out.len), x_of(s, tl, c.end()));
         let pts: Vec<Pos2> = (0..=16)
             .map(|i| {
                 let k = i as f32 / 16.0;
-                pos2(fx + (x1 - fx) * k, body_r.max.y - body_r.height() * clip.fade_out.shape.gain(1.0 - k))
+                pos2(fx + (ex - fx) * k, body_r.max.y - body_r.height() * c.fade_out.shape.gain(1.0 - k))
             })
             .collect();
         painter.add(Shape::line(pts, Stroke::new(1.2, fade_col)));
@@ -1362,6 +1336,15 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
         painter.text(pos2(r.max.x - 10.0, r.min.y + 7.0), Align2::CENTER_CENTER, "🔒", regular(9.0), Color32::WHITE);
     }
     let _ = app;
+}
+
+/// The earlier clip of a crossfade pair: the one before `clip` in its playlist, overlapping its start.
+fn crossfade_partner<'a>(track: &'a Track, clip: &Clip) -> Option<&'a Clip> {
+    let (p, i) = track.playlists.iter().find_map(|p| {
+        let i = p.clips.partition_point(|c| c.start < clip.start);
+        p.clips.get(i).is_some_and(|c| c.id == clip.id).then_some((p, i))
+    })?;
+    p.clips.get(i.checked_sub(1)?).filter(|c| c.end() > clip.start)
 }
 
 fn draw_automation(painter: &egui::Painter, s: &Session, track: &Track, p: &AutoParam, tl: Rect, lane: Rect) {
