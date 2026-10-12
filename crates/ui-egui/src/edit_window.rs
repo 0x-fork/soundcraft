@@ -697,7 +697,10 @@ fn track_row(app: &mut SoundApp, ui: &mut Ui, id: TrackId, row: Rect, tl: Rect) 
     let painter = ui.painter().with_clip_rect(lane.intersect(ui.clip_rect()));
     painter.rect_filled(lane, 0.0, if selected { t.playlist_alt } else { t.playlist_bg });
     let s = app.engine.session().clone();
-    grid_lines(&painter, &s, tl, lane);
+    // Shown grid lines go over the clips; otherwise the bar lines stay behind them.
+    if !s.edit.grid_lines {
+        grid_lines(&painter, &s, tl, lane);
+    }
     let view = Range::new(sample_at(&s, tl, tl.min.x), sample_at(&s, tl, tl.max.x));
     let auto_view = AutoParam::parse(&track.view);
     for clip in track.clips() {
@@ -707,6 +710,9 @@ fn track_row(app: &mut SoundApp, ui: &mut Ui, id: TrackId, row: Rect, tl: Rect) 
         draw_clip(app, &painter, &s, &track, clip, tl, lane, auto_view.is_some());
     }
     crate::video_track::draw_lane(app, &painter, &s, &track, tl, lane);
+    if s.edit.grid_lines {
+        grid_lines(&painter, &s, tl, lane);
+    }
     if let Some(p) = &auto_view {
         draw_automation(&painter, &s, &track, p, tl, lane);
     }
@@ -1130,19 +1136,32 @@ fn grid_lines(painter: &egui::Painter, s: &Session, tl: Rect, lane: Rect) {
     let bar = GridValue::Note { value: NoteValue::Bar, dotted: false, triplet: false };
     let bar_px = bar.step_samples(view.start, sr, &s.tempo, s.frame_rate) as f64 / s.edit.zoom.samples_per_px;
     if bar_px > 6.0 {
+        let col = grid_veil(t.bar_line, t.playlist_bg);
         for at in bar.lines(view.start, view.end, sr, &s.tempo, s.frame_rate, 600) {
             let x = x_of(s, tl, at);
-            painter.line_segment([pos2(x, lane.min.y), pos2(x, lane.max.y)], Stroke::new(1.0, t.bar_line));
+            painter.line_segment([pos2(x, lane.min.y), pos2(x, lane.max.y)], Stroke::new(1.0, col));
         }
     }
     if s.edit.grid_lines {
         let step_px = s.edit.grid.step_samples(view.start, sr, &s.tempo, s.frame_rate) as f64 / s.edit.zoom.samples_per_px;
         if step_px > 7.0 {
+            let col = grid_veil(t.grid_line, t.playlist_bg);
             for at in s.edit.grid.lines(view.start, view.end, sr, &s.tempo, s.frame_rate, 2000) {
                 let x = x_of(s, tl, at);
-                painter.line_segment([pos2(x, lane.min.y), pos2(x, lane.max.y)], Stroke::new(1.0, t.grid_line));
+                painter.line_segment([pos2(x, lane.min.y), pos2(x, lane.max.y)], Stroke::new(1.0, col));
             }
         }
+    }
+}
+
+/// The translucent white or black that turns `bg` into `line`, so grid lines also show over clips.
+fn grid_veil(line: Color32, bg: Color32) -> Color32 {
+    let level = |c: Color32| (f32::from(c.r()) + f32::from(c.g()) + f32::from(c.b())) / 3.0;
+    let (l, b) = (level(line), level(bg));
+    if l > b {
+        Color32::from_white_alpha(((l - b) / (255.0 - b) * 255.0).round() as u8)
+    } else {
+        Color32::from_black_alpha(((b - l) / b.max(1.0) * 255.0).round() as u8)
     }
 }
 
