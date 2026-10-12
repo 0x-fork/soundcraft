@@ -137,7 +137,8 @@ where things are.
 ## Getting started
 
 Download a build from the [releases page](https://github.com/storytold/soundcraft/releases), or build
-from source with a recent stable Rust:
+from source with Rust 1.95 or later for the desktop/web UI (the core workspace's declared
+minimum remains Rust 1.90):
 
 ```sh
 git clone https://github.com/storytold/soundcraft
@@ -276,6 +277,10 @@ Remove-Item Env:WGPU_BACKEND                     # restore the default for later
 An explicit `gl` override can bring the driver crash back on affected systems. The macOS, Linux
 and web backend defaults are unchanged.
 
+DirectX 12 shaders are compiled with FXC, which is part of Windows, so no `dxcompiler.dll` or
+`dxil.dll` is needed ("Parent device is lost" at start, #185). `$env:WGPU_DX12_COMPILER = "dxc"`
+(or `"auto"`) selects wgpu's DXC handling again for troubleshooting.
+
 ### macOS
 
 | Build | File | Notes |
@@ -292,6 +297,8 @@ and web backend defaults are unchanged.
 | Debian/Ubuntu | `soundcraft-<ver>-linux-x86_64.deb` | `soundcraft-<ver>-linux-aarch64.deb` | |
 | Fedora/RHEL/openSUSE | `soundcraft-<ver>-linux-x86_64.rpm` | `soundcraft-<ver>-linux-aarch64.rpm` | |
 | Tarball | `soundcraft-<ver>-linux-x86_64.tar.gz` | `soundcraft-<ver>-linux-aarch64.tar.gz` | Unpack anywhere |
+
+RISC-V (riscv64): `soundcraft-<ver>-linux-riscv64.tar.gz`, a tarball only (glibc 2.39+, e.g. Ubuntu 24.04).
 
 ### FreeBSD
 
@@ -371,3 +378,5 @@ Forks and modified versions must remove them.
   <a href="https://getartcraft.com/"><img alt="ArtCraft" src="docs/brand/artcraft-mark.svg" width="28"></a><br>
   <sub>Made by the <a href="https://getartcraft.com/">ArtCraft</a> team and community.</sub>
 </p>
+
+Tracks and Groups, Clips, MIDI Editor, Memory Locations, and Undo History use movable panels. Edit and Mix retain separate arrangements; Clips and MIDI Editor belong to Edit. Transport, plug-in, and specialist utility windows retain their existing hosts. Drag a panel header to a target edge or another header. Its context menu offers Float panel, Move to group, and Close panel. Existing panel toggles reopen panels at their saved location; Reset Panel Layout restores the app layout. Floating panels remain inside the current app window.

@@ -3,13 +3,28 @@
 use crate::{Engine, EngineError, Result};
 use serde_json::{Value, json};
 use soundcraft_audio_io::{AudioBuffer, EncodeOptions, FileFormat};
-use soundcraft_model::{ChannelFormat, Clip, ClipContent, Session, Source, SourceAudio, SourceId, TrackId, TrackKind};
+use soundcraft_model::{BusId, ChannelFormat, Clip, ClipContent, Session, Source, SourceAudio, SourceId, TrackId, TrackKind};
 use soundcraft_time::{Range, Samples};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Largest import we accept (samples per channel × channels), ~4 GiB of f32.
 const MAX_IMPORT_SAMPLES: usize = 1 << 30;
+
+/// A relative `Audio Files/` path no other source in `s` already uses.
+fn unique_audio_rel(s: &Session, stem: &str) -> String {
+    let stem = sanitize_name(stem);
+    let mut path = format!("Audio Files/{stem}.wav");
+    let mut n = 2u32;
+    while s.sources.iter().any(|src| src.path == path) {
+        path = format!("Audio Files/{stem}-{n}.wav");
+        n = n.saturating_add(1);
+        if n > 10_000 {
+            break;
+        }
+    }
+    path
+}
 
 /// Register decoded audio as a new source. Resamples to the session rate if needed.
 pub fn add_source(s: &mut Session, name: &str, mut buf: AudioBuffer, path: Option<&str>, format: FileFormat) -> SourceId {
@@ -20,10 +35,14 @@ pub fn add_source(s: &mut Session, name: &str, mut buf: AudioBuffer, path: Optio
     }
     let id = SourceId(s.alloc());
     let stem = Path::new(name).file_stem().and_then(|x| x.to_str()).unwrap_or(name).to_string();
+    let stored = match path {
+        Some(p) => p.to_string(),
+        None => unique_audio_rel(s, &stem),
+    };
     s.sources.push(Source {
         id,
         name: stem.clone(),
-        path: path.map_or_else(|| format!("Audio Files/{stem}.wav"), str::to_string),
+        path: stored,
         channels: u16::try_from(buf.num_channels()).unwrap_or(u16::MAX),
         frames: buf.frames() as u64,
         sample_rate: sr,
@@ -56,7 +75,7 @@ pub fn import_audio_bytes(e: &mut Engine, name: &str, bytes: &[u8], path: Option
         Some(t) => t,
         None => {
             let stem = Path::new(name).file_stem().and_then(|x| x.to_str()).unwrap_or("Audio").to_string();
-            s.add_track(TrackKind::Audio, ChannelFormat::for_channels(channels.min(2)), Some(&stem))
+            s.add_track(TrackKind::Audio, ChannelFormat::for_channels(channels), Some(&stem))
         }
     };
     let cid = s.new_clip_id();
@@ -180,8 +199,8 @@ pub fn import_midi_bytes(e: &mut Engine, bytes: &[u8], at: Samples, tempo_map: b
     Ok(out)
 }
 
-/// Export all MIDI clips as a format-1 SMF.
-pub fn export_midi(e: &Engine) -> Result<Vec<u8>> {
+/// Export MIDI clips as a format-1 SMF. `only` limits the file to those tracks.
+pub fn export_midi(e: &Engine, only: Option<&[TrackId]>) -> Result<Vec<u8>> {
     let s = e.session();
     let mut smf = soundcraft_midi::Smf {
         format: 1,
@@ -191,15 +210,24 @@ pub fn export_midi(e: &Engine) -> Result<Vec<u8>> {
         markers: s.markers.iter().map(|m| (s.tempo.samples_to_ticks(m.start, s.sample_rate), m.name.clone())).collect(),
         key_sigs: Vec::new(),
     };
-    for t in s.tracks.iter().filter(|t| t.kind.is_midi()) {
+    let chosen: Vec<_> = s.tracks.iter().filter(|t| t.kind.is_midi() && only.is_none_or(|ids| ids.contains(&t.id))).collect();
+    if only.is_some() && chosen.is_empty() {
+        return Err(EngineError::BadParams("file.export_midi".into(), "none of the requested tracks hold MIDI".into()));
+    }
+    for t in chosen {
         let mut seq = soundcraft_midi::Sequence::default();
         for c in t.clips() {
             if let ClipContent::Midi { sequence } = &c.content {
                 let base = s.tempo.samples_to_ticks(c.start, s.sample_rate);
                 for n in &sequence.notes {
                     let mut n = *n;
-                    n.start += base;
+                    n.start = n.start.saturating_add(base);
                     seq.notes.push(n);
+                }
+                for ev in &sequence.ctrls {
+                    let mut ev = *ev;
+                    ev.tick = ev.tick.saturating_add(base);
+                    seq.ctrls.push(ev);
                 }
             }
         }
@@ -217,11 +245,23 @@ pub fn bounce_bytes(e: &Engine, r: Range, opts: &EncodeOptions, normalize: bool)
 /// Render the main mix in its own format (every main channel, SMPTE/WAV order, with the WAV
 /// speaker mask of the main format), or an ITU stereo fold-down when `fold_stereo`.
 pub fn bounce_bytes_with(e: &Engine, r: Range, opts: &EncodeOptions, normalize: bool, fold_stereo: bool) -> Result<(Vec<u8>, (f32, f32, f32))> {
+    bounce_source(e, r, opts, normalize, fold_stereo, None)
+}
+
+/// [`bounce_bytes_with`] for the main mix, or for `bus` when one is named.
+pub fn bounce_source(
+    e: &Engine,
+    r: Range,
+    opts: &EncodeOptions,
+    normalize: bool,
+    fold_stereo: bool,
+    bus: Option<BusId>,
+) -> Result<(Vec<u8>, (f32, f32, f32))> {
     let s = e.session();
     if r.len() > s.sample_rate.samples(4.0 * 3600.0) {
         return Err(EngineError::BadParams("file.bounce_mix".into(), "bounces are limited to 4 hours".into()));
     }
-    let (mut ch, fmt) = render_main(s, r, fold_stereo);
+    let (mut ch, fmt) = render_bounce(s, r, fold_stereo, bus);
     if normalize {
         soundcraft_dsp::offline::normalize(&mut ch, -0.1, false);
     }
@@ -238,8 +278,19 @@ pub fn bounce_bytes_with(e: &Engine, r: Range, opts: &EncodeOptions, normalize: 
 
 /// The main mix over `r` and its format (folded to stereo on request).
 fn render_main(s: &Session, r: Range, fold_stereo: bool) -> (Vec<Vec<f32>>, ChannelFormat) {
-    let ch = soundcraft_mix::render_range(s, r, 1024);
-    let fmt = if ch.len() <= 2 { ChannelFormat::Stereo } else { s.main_format() };
+    render_bounce(s, r, fold_stereo, None)
+}
+
+/// The main mix, or one bus, over `r`.
+fn render_bounce(s: &Session, r: Range, fold_stereo: bool, bus: Option<BusId>) -> (Vec<Vec<f32>>, ChannelFormat) {
+    let (ch, fmt) = if let Some(id) = bus {
+        let fmt = s.bus(id).map(|b| b.format).unwrap_or(ChannelFormat::Stereo);
+        (soundcraft_mix::render_bus(s, id, r, 1024), fmt)
+    } else {
+        let ch = soundcraft_mix::render_range(s, r, 1024);
+        let fmt = if ch.len() <= 2 { ChannelFormat::Stereo } else { s.main_format() };
+        (ch, fmt)
+    };
     if fold_stereo && ch.len() > 2 { (soundcraft_mix::fold_down_stereo(fmt, &ch), ChannelFormat::Stereo) } else { (ch, fmt) }
 }
 
@@ -379,6 +430,9 @@ pub fn render_clip_gain(e: &mut Engine, id: soundcraft_model::ClipId) -> Result<
         cl.content = ClipContent::Audio { source: src, offset: 0 };
         cl.gain_db = 0.0;
         cl.gain_env.clear();
+        // The new source is the clip as it already sounds, stretch included.
+        // Keeping the old ratio would play that audio through the stretch again.
+        cl.stretch = 1.0;
     }
     Ok(true)
 }
@@ -477,6 +531,12 @@ pub fn save_copy(e: &Engine, path: &str) -> Result<usize> {
     write_session(e.session(), path, true).map(|(_, n, _)| n)
 }
 
+/// File › Save Session Copy In: a normal session folder that does not rename, retarget or
+/// clean the session that stays open.
+pub fn save_session_copy(e: &Engine, path: &str) -> Result<usize> {
+    write_session(e.session(), path, false).map(|(_, n, _)| n)
+}
+
 /// Write `session` to `path`; returns the session with updated media paths, the number of audio
 /// files written and the final path.
 fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Session, usize, PathBuf)> {
@@ -486,10 +546,13 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
     let audio_dir = dir.join("Audio Files");
     let mut s = session.clone();
     let mut written = 0;
-    for src in &mut s.sources {
+    let shared_paths: Vec<bool> =
+        s.sources.iter().enumerate().map(|(i, src)| s.sources.iter().enumerate().any(|(j, other)| j != i && other.path == src.path)).collect();
+    for (i, src) in s.sources.iter_mut().enumerate() {
         let rel_target = format!("Audio Files/{}.wav", sanitize_name(&src.name));
         let exists_rel = !Path::new(&src.path).is_absolute() && dir.join(&src.path).exists();
-        if exists_rel && !src.unsaved {
+        let shared = shared_paths.get(i).copied().unwrap_or(false);
+        if exists_rel && !src.unsaved && !shared {
             continue;
         }
         let Some(audio) = s.pool.get(src.id) else { continue };
@@ -505,7 +568,7 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
             }
         } else {
             let mut k = 1;
-            while dir.join(&target).exists() && !(exists_rel && target == src.path) {
+            while dir.join(&target).exists() && !(exists_rel && target == src.path && !shared) {
                 target = format!("Audio Files/{}_{k:02}.wav", sanitize_name(&src.name));
                 k += 1;
                 if k > 999 {
@@ -788,6 +851,28 @@ mod save_tests {
         let mut r = Engine::default();
         open_session(&mut r, &p).unwrap();
         assert_eq!(r.session().track_by_name("Kick").unwrap().mixer.volume_db, -7.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_gives_sources_that_share_a_path_their_own_files() {
+        let mut s = Session::default();
+        let loud = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 64]] };
+        let quiet = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.0; 64]] };
+        add_source(&mut s, "tone", loud, Some("Audio Files/tone.wav"), FileFormat::Wav);
+        add_source(&mut s, "tone", quiet, Some("Audio Files/tone.wav"), FileFormat::Wav);
+        let mut e = Engine::new(s);
+        let dir = std::env::temp_dir().join(format!("soundcraft-shared-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Shared.scraft");
+        save_session(&mut e, &path.to_string_lossy()).unwrap();
+        let paths: Vec<_> = e.session().sources.iter().map(|src| src.path.clone()).collect();
+        assert_eq!(paths.len(), 2);
+        assert_ne!(paths[0], paths[1], "{paths:?}");
+        let a = std::fs::read(dir.join(&paths[0])).unwrap();
+        let b = std::fs::read(dir.join(&paths[1])).unwrap();
+        assert_ne!(a, b);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
