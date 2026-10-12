@@ -763,8 +763,7 @@ impl MixEngine {
             let m = build_matrix(src_fmt, src.len(), dst.fmt, dst.buf.len(), &PanSpec { stereo, surround }, law);
             apply_matrix(src, frames, &mut dst.buf, &m, gain);
         }
-        let spec = PanSpec { stereo: [pan_at(t, 0, pos), pan_at(t, 1, pos)], surround: t.mixer.surround.as_ref() };
-        match &t.mixer.output {
+        let src: &[Vec<f32>] = match &t.mixer.output {
             Route::Main if strip.out_extra.len > 0 => {
                 if strip.outbuf.len() != strip.buf.len() {
                     strip.outbuf = vec![Vec::new(); strip.buf.len()];
@@ -774,20 +773,25 @@ impl MixEngine {
                     d.extend_from_slice(src.get(..frames).unwrap_or(&[]));
                 }
                 strip.out_extra.process(&mut strip.outbuf, frames);
-                let m = build_matrix(src_fmt, strip.outbuf.len(), self.main_fmt, self.main.len(), &spec, law);
-                apply_matrix(&strip.outbuf, frames, &mut self.main, &m, 1.0);
+                &strip.outbuf
             }
-            Route::Main => {
-                let m = build_matrix(src_fmt, strip.buf.len(), self.main_fmt, self.main.len(), &spec, law);
-                apply_matrix(&strip.buf, frames, &mut self.main, &m, 1.0);
-            }
-            Route::Bus(b) => {
-                if let Some(dst) = self.busses.get_mut(b) {
-                    let m = build_matrix(src_fmt, strip.buf.len(), dst.fmt, dst.buf.len(), &spec, law);
-                    apply_matrix(&strip.buf, frames, &mut dst.buf, &m, 1.0);
-                }
-            }
-            _ => {}
+            _ => &strip.buf,
+        };
+        let (dst, dst_fmt) = match &t.mixer.output {
+            Route::Main => (&mut self.main, self.main_fmt),
+            Route::Bus(b) => match self.busses.get_mut(b) {
+                Some(d) => (&mut d.buf, d.fmt),
+                None => return,
+            },
+            _ => return,
+        };
+        let mut start = 0;
+        while start < frames {
+            let (at, end) = pan_segment(t, pos, start, frames);
+            let spec = PanSpec { stereo: [pan_at(t, 0, at), pan_at(t, 1, at)], surround: t.mixer.surround.as_ref() };
+            let m = build_matrix(src_fmt, src.len(), dst_fmt, dst.len(), &spec, law);
+            apply_matrix_span(src, start..end, dst, &m, 1.0);
+            start = end;
         }
     }
 }
@@ -1458,6 +1462,23 @@ fn pan_at(t: &Track, idx: usize, pos: Samples) -> f32 {
     base
 }
 
+/// Pan automation is read on a grid of [`PAN_STEP`] timeline samples rather than once per block,
+/// so playback (callback-sized blocks) and bounces (1024-frame blocks) pan identically.
+const PAN_STEP: Samples = 64;
+
+/// The position to read the pan at for the frames from `start` of the block at `pos`, and the end
+/// of the frames that share it. Without pan automation the whole block shares one pan.
+fn pan_segment(t: &Track, pos: Samples, start: usize, frames: usize) -> (Samples, usize) {
+    let automated = t.mixer.automation_mode.reads() && t.automation.iter().any(|l| matches!(l.param, AutoParam::Pan(_)) && !l.points.is_empty());
+    if !automated {
+        return (pos, frames);
+    }
+    let here = pos.saturating_add(start as i64);
+    let at = here.div_euclid(PAN_STEP).saturating_mul(PAN_STEP);
+    let left = usize::try_from(at.saturating_add(PAN_STEP).saturating_sub(here)).unwrap_or(1).max(1);
+    (at, start.saturating_add(left).min(frames))
+}
+
 fn send_level(t: &Track, i: usize, base: f32, pos: Samples) -> f32 {
     if t.mixer.automation_mode.reads()
         && let Some(l) = t.lane(&AutoParam::SendLevel(u8::try_from(i).unwrap_or(0)))
@@ -1707,6 +1728,11 @@ fn build_matrix(src_fmt: ChannelFormat, ns: usize, dst_fmt: ChannelFormat, nd: u
 
 /// `dst[d] += Σ_s src[s] × gain × m[s][d]` for every destination channel (no allocation).
 fn apply_matrix(src: &[Vec<f32>], frames: usize, dst: &mut [Vec<f32>], m: &Matrix, gain: f32) {
+    apply_matrix_span(src, 0..frames, dst, m, gain);
+}
+
+/// [`apply_matrix`] over the frames in `span` only.
+fn apply_matrix_span(src: &[Vec<f32>], span: std::ops::Range<usize>, dst: &mut [Vec<f32>], m: &Matrix, gain: f32) {
     let ns = src.len().min(MAX_CHANNELS);
     for (d, out) in dst.iter_mut().enumerate().take(MAX_CHANNELS) {
         let mut idx = [(0usize, 0.0f32); MAX_CHANNELS];
@@ -1724,7 +1750,7 @@ fn apply_matrix(src: &[Vec<f32>], frames: usize, dst: &mut [Vec<f32>], m: &Matri
         if taps.is_empty() {
             continue;
         }
-        for (i, o) in out.iter_mut().enumerate().take(frames) {
+        for (i, o) in out.iter_mut().enumerate().take(span.end).skip(span.start) {
             let mut acc = 0.0f32;
             for &(s, g) in taps {
                 acc += src.get(s).and_then(|c| c.get(i)).copied().unwrap_or(0.0) * gain * g;
@@ -2061,6 +2087,22 @@ mod tests {
         s.track_mut(t).unwrap().mixer.pan = vec![-1.0];
         let out = render_range(&s, Range::new(0, 4800), 256);
         assert!(out[0][100] > 0.49 && out[1][100].abs() < 1e-4);
+    }
+
+    #[test]
+    fn pan_automation_does_not_depend_on_the_block_size() {
+        // Bounces render in 1024-frame blocks, playback in whatever its callback asks for (#244).
+        let (mut s, t) = session_with_dc(0.5, 4800);
+        {
+            let l = s.track_mut(t).unwrap().lane_mut(&AutoParam::Pan(0));
+            l.set_point(0, -1.0);
+            l.set_point(480, 1.0);
+        }
+        let bounce = render_range(&s, Range::new(0, 4800), 1024);
+        assert!(bounce[0][600].abs() < 1e-4 && bounce[1][600] > 0.49, "{} {}", bounce[0][600], bounce[1][600]);
+        for block in [512, 100, 37] {
+            assert_eq!(render_range(&s, Range::new(0, 4800), block), bounce, "block {block}");
+        }
     }
 
     #[test]
