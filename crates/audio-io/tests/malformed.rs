@@ -240,6 +240,7 @@ fn detect_format_by_magic_and_hint() {
     assert_eq!(detect_format(b"", Some(".WAV")), FileFormat::Wav);
     assert_eq!(detect_format(b"zz", Some("aif")), FileFormat::Aiff);
     assert_eq!(detect_format(b"zz", Some("m4a")), FileFormat::Aac);
+    assert_eq!(detect_format(b"zz", Some("M4B")), FileFormat::Aac);
     assert_eq!(detect_format(b"zz", Some("flac")), FileFormat::Flac);
     assert_eq!(detect_format(b"zz", Some("xyz")), FileFormat::Other);
     assert_eq!(detect_format(b"zz", None), FileFormat::Other);

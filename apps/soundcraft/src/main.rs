@@ -162,7 +162,7 @@ fn services() -> Services {
                 "file.import_midi" => d.add_filter("MIDI", &["mid", "midi", "smf"]),
                 _ => d.add_filter(
                     "Audio",
-                    &["wav", "wave", "bwf", "aif", "aiff", "aifc", "flac", "mp3", "ogg", "oga", "m4a", "aac", "mp4", "caf", "mkv", "webm"],
+                    &["wav", "wave", "bwf", "aif", "aiff", "aifc", "flac", "mp3", "ogg", "oga", "m4a", "m4b", "aac", "mp4", "caf", "mkv", "webm"],
                 ),
             };
             d.pick_file().map(|p| p.to_string_lossy().into_owned())

@@ -187,7 +187,7 @@ fn detect_by_ext(ext: &str) -> FileFormat {
         "flac" => FileFormat::Flac,
         "mp3" | "mp2" | "mp1" => FileFormat::Mp3,
         "ogg" | "oga" => FileFormat::Ogg,
-        "aac" | "m4a" | "mp4" | "adts" => FileFormat::Aac,
+        "aac" | "m4a" | "m4b" | "mp4" | "adts" => FileFormat::Aac,
         "caf" => FileFormat::Caf,
         _ => FileFormat::Other,
     }
