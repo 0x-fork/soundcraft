@@ -330,6 +330,23 @@ fn delay_repeats_at_time() {
 }
 
 #[test]
+fn modulation_tail_covers_feedback_echoes() {
+    for (id, delay, feedback) in [("chorus", 30.0, 90.0), ("flanger", 10.0, 95.0), ("flanger", 10.0, -95.0)] {
+        let mut p = prepared(id);
+        for (param, v) in [("delay", delay), ("feedback", feedback), ("depth", 0.0), ("mix", 100.0)] {
+            assert!(p.set_param(param, v));
+        }
+        p.reset();
+        let mut x = vec![0.0f32; 48_000 * 5];
+        x[0] = 0.5;
+        let out = run(p.as_mut(), &[x]);
+        let floor = peak(&out[0]) * 1e-3;
+        let last = out[0].iter().rposition(|v| v.abs() > floor).unwrap();
+        assert!(last < p.tail_samples(), "{id} feedback {feedback}: echo at {last}, tail {}", p.tail_samples());
+    }
+}
+
+#[test]
 fn trim_and_invert() {
     let mut p = prepared("invert");
     let out = run(p.as_mut(), &[vec![0.5; 16]]);
