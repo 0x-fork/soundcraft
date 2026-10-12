@@ -93,6 +93,7 @@ pub fn import(e: &mut Engine, path: &str, first: Option<TrackId>, at: Samples) -
     let dir = Path::new(path).parent().map(Path::to_path_buf).unwrap_or_default();
     // Decode audio first so a bad file changes nothing.
     let mut decoded = BTreeMap::new();
+    let rate = e.session().sample_rate.hz();
     for (old, rel) in &file.audio {
         let full = dir.join(rel);
         if !full.starts_with(&dir) || rel.contains("..") {
@@ -100,6 +101,8 @@ pub fn import(e: &mut Engine, path: &str, first: Option<TrackId>, at: Samples) -
         }
         let bytes = crate::io::read_file(&full).map_err(|err| EngineError::Io(format!("{}: {err}", full.display())))?;
         let (_, buf) = soundcraft_audio_io::decode(&bytes, Some("wav")).map_err(|err| EngineError::Io(format!("{rel}: {err}")))?;
+        let buf =
+            crate::io::at_rate(buf, rate, crate::io::MAX_IMPORT_SAMPLES).ok_or_else(|| EngineError::Io(format!("{rel}: too large to import")))?;
         decoded.insert(*old, (rel.clone(), buf));
     }
     let src_rate = f64::from(file.sample_rate.max(1));

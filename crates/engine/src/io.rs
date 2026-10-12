@@ -9,7 +9,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Largest import we accept (samples per channel × channels), ~4 GiB of f32.
-const MAX_IMPORT_SAMPLES: usize = 1 << 30;
+pub(crate) const MAX_IMPORT_SAMPLES: usize = 1 << 30;
+
+/// `buf` converted to `rate`, unless it would then hold more than `limit` samples: a file with a
+/// tiny sample rate grows by orders of magnitude.
+pub(crate) fn at_rate(mut buf: AudioBuffer, rate: u32, limit: usize) -> Option<AudioBuffer> {
+    let from = buf.sample_rate.max(1);
+    if buf.frames() as f64 * buf.num_channels() as f64 * f64::from(rate) / f64::from(from) > limit as f64 {
+        return None;
+    }
+    if from != rate {
+        buf.channels = soundcraft_dsp::offline::resample(&buf.channels, from, rate);
+        buf.sample_rate = rate;
+    }
+    Some(buf)
+}
 
 /// A relative `Audio Files/` path no other source in `s` already uses.
 fn unique_audio_rel(s: &Session, stem: &str) -> String {
@@ -58,9 +72,8 @@ pub fn add_source(s: &mut Session, name: &str, mut buf: AudioBuffer, path: Optio
 pub fn import_audio_bytes(e: &mut Engine, name: &str, bytes: &[u8], path: Option<&str>, target: Option<TrackId>, at: Samples) -> Result<Value> {
     let ext = Path::new(name).extension().and_then(|x| x.to_str()).map(str::to_ascii_lowercase);
     let (info, buf) = soundcraft_audio_io::decode(bytes, ext.as_deref()).map_err(|err| EngineError::Io(format!("{name}: {err}")))?;
-    if buf.frames().saturating_mul(buf.num_channels().max(1)) > MAX_IMPORT_SAMPLES {
-        return Err(EngineError::Io(format!("{name}: file is too large to import")));
-    }
+    let buf = at_rate(buf, e.session().sample_rate.hz(), MAX_IMPORT_SAMPLES)
+        .ok_or_else(|| EngineError::Io(format!("{name}: file is too large to import")))?;
     if buf.frames() == 0 {
         return Err(EngineError::Io(format!("{name}: no audio")));
     }
@@ -752,11 +765,8 @@ pub fn open_session(e: &mut Engine, path: &str) -> Result<Vec<String>> {
 
 /// Decode one source's audio file into the session pool, at the session rate.
 fn load_source_audio(s: &mut Session, id: SourceId, bytes: &[u8], ext: Option<&str>) -> std::result::Result<(), String> {
-    let (_, mut buf) = soundcraft_audio_io::decode(bytes, ext).map_err(|err| err.to_string())?;
-    if buf.sample_rate != s.sample_rate.hz() && buf.sample_rate > 0 {
-        buf.channels = soundcraft_dsp::offline::resample(&buf.channels, buf.sample_rate, s.sample_rate.hz());
-        buf.sample_rate = s.sample_rate.hz();
-    }
+    let (_, buf) = soundcraft_audio_io::decode(bytes, ext).map_err(|err| err.to_string())?;
+    let buf = at_rate(buf, s.sample_rate.hz(), MAX_IMPORT_SAMPLES).ok_or("too large to load")?;
     s.pool.insert(id, Arc::new(SourceAudio::new(buf)));
     Ok(())
 }
@@ -1229,6 +1239,19 @@ mod save_tests {
         let b = std::fs::read(dir.join(&paths[1])).unwrap();
         assert_ne!(a, b);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::*;
+
+    #[test]
+    fn a_tiny_sample_rate_is_refused_before_it_is_converted() {
+        let buf = |rate| AudioBuffer { sample_rate: rate, channels: vec![vec![0.5; 100]; 2] };
+        assert!(at_rate(buf(1), 48_000, 1_000_000).is_none());
+        let ok = at_rate(buf(8_000), 48_000, 1_000_000).unwrap();
+        assert_eq!((ok.sample_rate, ok.frames()), (48_000, 600));
     }
 }
 

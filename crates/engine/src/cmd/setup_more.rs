@@ -405,12 +405,8 @@ fn midi_inputs(e: &mut Engine, p: &Value) -> Result<Value> {
 fn load_source(dir: &Path, src: &Source, sr: u32) -> Option<soundcraft_audio_io::AudioBuffer> {
     let p = if Path::new(&src.path).is_absolute() { PathBuf::from(&src.path) } else { dir.join(&src.path) };
     let bytes = crate::io::read_file(&p).ok()?;
-    let (_, mut buf) = soundcraft_audio_io::decode(&bytes, p.extension().and_then(|x| x.to_str())).ok()?;
-    if buf.sample_rate != sr && buf.sample_rate > 0 {
-        buf.channels = soundcraft_dsp::offline::resample(&buf.channels, buf.sample_rate, sr);
-        buf.sample_rate = sr;
-    }
-    Some(buf)
+    let (_, buf) = soundcraft_audio_io::decode(&bytes, p.extension().and_then(|x| x.to_str())).ok()?;
+    crate::io::at_rate(buf, sr, crate::io::MAX_IMPORT_SAMPLES)
 }
 
 fn import_session_data(e: &mut Engine, p: &Value) -> Result<Value> {

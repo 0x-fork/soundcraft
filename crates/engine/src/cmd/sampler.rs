@@ -62,9 +62,8 @@ fn load(e: &mut Engine, p: &Value) -> Result<Value> {
     if buf.frames() == 0 || buf.num_channels() == 0 {
         return Err(EngineError::Io(format!("{name}: no audio")));
     }
-    if buf.frames().saturating_mul(buf.num_channels()) > MAX_SAMPLE_VALUES {
-        return Err(EngineError::Io(format!("{name}: too long for a sample (ten minutes of 192 kHz stereo at most)")));
-    }
+    let buf = crate::io::at_rate(buf, e.session().sample_rate.hz(), MAX_SAMPLE_VALUES)
+        .ok_or_else(|| EngineError::Io(format!("{name}: too long for a sample (ten minutes of 192 kHz stereo at most)")))?;
     let channels = buf.num_channels();
     let s = e.session_mut();
     let src = crate::io::add_source(s, &name, buf, Some(&path), format.format);
