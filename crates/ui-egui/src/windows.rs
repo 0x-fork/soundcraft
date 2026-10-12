@@ -493,10 +493,13 @@ pub fn shortcuts_window(app: &mut SoundApp, ctx: &egui::Context) {
     win(ctx, &mut open, "Keyboard Shortcuts", vec2(520.0, 480.0), |ui| {
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Grid::new("sc").num_columns(3).striped(true).show(ui, |ui| {
-                for c in soundcraft_engine::command_specs().iter().filter(|c| c.shortcut.is_some()) {
-                    ui.label(egui::RichText::new(crate::shortcuts::shortcut_label(c.shortcut.unwrap_or(""), mac)).font(mono(11.0)));
-                    ui.label(c.label);
-                    ui.label(egui::RichText::new(c.menu.join(" › ")).small());
+                let engine = soundcraft_engine::command_specs().iter().map(|c| (c.shortcut, c.label, c.menu.join(" › ")));
+                let windows = crate::menus::UI_COMMANDS.iter().map(|c| (c.3, c.1, c.2.replace(" > ", " › ")));
+                for (shortcut, label, menu) in engine.chain(windows) {
+                    let Some(shortcut) = shortcut else { continue };
+                    ui.label(egui::RichText::new(crate::shortcuts::shortcut_label(shortcut, mac)).font(mono(11.0)));
+                    ui.label(label);
+                    ui.label(egui::RichText::new(menu).small());
                     ui.end_row();
                 }
             });
