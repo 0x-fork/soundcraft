@@ -9,6 +9,9 @@ use soundcraft_time::{FrameRate, GridValue, Range, SampleRate, Samples, TempoMap
 /// Native session file extension.
 pub const SESSION_EXTENSION: &str = "scraft";
 
+/// `EditState::values` key holding the feet+frames reading of sample 0, in frames.
+pub const FEET_FRAMES_START: &str = "feet_frames.start";
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SessionError {
     #[error("not a SoundCraft session: {0}")]
@@ -419,6 +422,21 @@ impl Session {
     /// End of the last clip on any track (session length).
     pub fn content_end(&self) -> Samples {
         self.tracks.iter().filter_map(|t| t.playlist().map(|p| p.end())).max().unwrap_or(0)
+    }
+
+    /// Feet+frames reading of sample 0, in frames (Setup › Current Feet+Frames Position).
+    pub fn feet_frames_start(&self) -> i64 {
+        self.edit.value(FEET_FRAMES_START, 0.0) as i64
+    }
+
+    /// Format a position against this session's timecode and feet+frames references.
+    pub fn format_position(&self, at: Samples, fmt: TimeFormat) -> String {
+        soundcraft_time::format_position(at, fmt, self.sample_rate, &self.tempo, self.frame_rate, self.timecode_start, self.feet_frames_start())
+    }
+
+    /// Parse a position typed in `fmt` against this session's references.
+    pub fn parse_position(&self, text: &str, fmt: TimeFormat) -> Result<Samples, soundcraft_time::TimeError> {
+        soundcraft_time::parse_position(text, fmt, self.sample_rate, &self.tempo, self.frame_rate, self.timecode_start, self.feet_frames_start())
     }
 
     pub fn next_track_color(&self) -> [u8; 3] {

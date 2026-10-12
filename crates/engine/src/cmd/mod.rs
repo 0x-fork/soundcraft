@@ -275,7 +275,7 @@ fn position_param_raw(e: &Engine, cmd: &str, p: &Value, key: &str) -> Result<Opt
             }
         };
         for f in fmts {
-            if let Ok(x) = soundcraft_time::parse_position(body, f, s.sample_rate, &s.tempo, s.frame_rate, s.timecode_start) {
+            if let Ok(x) = s.parse_position(body, f) {
                 return Ok(Some(x));
             }
         }

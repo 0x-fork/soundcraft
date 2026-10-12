@@ -655,13 +655,9 @@ fn timebase_ruler(_ui: &Ui, painter: &egui::Painter, s: &Session, tl: Rect, row:
                 TimeFormat::BarsBeats => s.tempo.bar_beat_at(at, sr).bar.to_string(),
                 TimeFormat::MinSecs => {
                     let secs = sr.seconds(at);
-                    if secs.fract().abs() < 1e-9 {
-                        format!("{}:{:02}", (secs / 60.0) as i64, (secs as i64) % 60)
-                    } else {
-                        format_position(at, f, sr, &s.tempo, s.frame_rate, s.timecode_start)
-                    }
+                    if secs.fract().abs() < 1e-9 { format!("{}:{:02}", (secs / 60.0) as i64, (secs as i64) % 60) } else { s.format_position(at, f) }
                 }
-                _ => format_position(at, f, sr, &s.tempo, s.frame_rate, s.timecode_start),
+                _ => s.format_position(at, f),
             };
             painter.text(pos2(x + 3.0, row.center().y), Align2::LEFT_CENTER, label, regular(11.0), t.ruler_text);
         } else {
@@ -1325,7 +1321,7 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
         painter.line_segment([pos2(x, r.min.y + name_h), pos2(x, r.max.y)], Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 90)));
     }
     let time_text = if s.edit.flag("view.clip.time.current") {
-        Some(format_position(clip.start, s.edit.main_counter, s.sample_rate, &s.tempo, s.frame_rate, s.timecode_start))
+        Some(s.format_position(clip.start, s.edit.main_counter))
     } else if s.edit.flag("view.clip.time.original") || s.edit.flag("view.clip.time.user") {
         clip.source().and_then(|src| s.source(src)).map(|src| {
             format_position(
@@ -1334,6 +1330,7 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
                 s.sample_rate,
                 &s.tempo,
                 s.frame_rate,
+                0,
                 0,
             )
         })

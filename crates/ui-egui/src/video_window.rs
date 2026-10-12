@@ -7,7 +7,7 @@ use crate::video_track::{MovieKey, movie_secs, online, picture_at};
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use serde_json::json;
 use soundcraft_model::{ClipContent, TrackKind};
-use soundcraft_time::{TimeFormat, format_position};
+use soundcraft_time::TimeFormat;
 
 pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
     if app.ui.show_video {
@@ -81,7 +81,7 @@ fn video(app: &mut SoundApp, ctx: &egui::Context) {
             painter.text(img.center(), Align2::CENTER_CENTER, m, regular(12.0), Color32::from_gray(170));
         }
         if burn {
-            let tc = format_position(pos, TimeFormat::Timecode, s.sample_rate, &s.tempo, s.frame_rate, s.timecode_start);
+            let tc = s.format_position(pos, TimeFormat::Timecode);
             let size = (h / 12.0).clamp(10.0, 36.0);
             let galley = painter.layout_no_wrap(tc, mono(size), Color32::WHITE);
             let at = pos2(img.center().x - galley.size().x / 2.0, img.max.y - galley.size().y - size * 0.6);
