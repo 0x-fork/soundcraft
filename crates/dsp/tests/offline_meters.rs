@@ -156,6 +156,19 @@ fn pitch_shift_preserves_length_and_shifts() {
 }
 
 #[test]
+fn pitch_shift_reaches_the_ends_of_its_range() {
+    let sr = 48_000.0;
+    let x = sine(440.0, 0.5, sr, 48_000);
+    for st in [40.0f32, 48.0, -40.0, -48.0] {
+        let out = offline::pitch_shift(std::slice::from_ref(&x), st, sr);
+        assert_eq!(out[0].len(), x.len());
+        let f = dominant_hz(&out[0], sr);
+        let want = 440.0 * 2f32.powf(st / 12.0);
+        assert!((f / want - 1.0).abs() < 0.002, "{st} semitones: {f} vs {want}");
+    }
+}
+
+#[test]
 fn normalize_hits_target_peak() {
     let mut ch = vec![sine(100.0, 0.2, 48_000.0, 4800), sine(100.0, 0.05, 48_000.0, 4800)];
     offline::normalize(&mut ch, -1.0, false);
