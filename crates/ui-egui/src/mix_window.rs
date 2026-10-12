@@ -22,11 +22,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
 pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
     let ids: Vec<TrackId> = app.engine.session().tracks.iter().filter(|x| !x.hidden && x.kind != TrackKind::Video).map(|x| x.id).collect();
     // Per-channel peaks for multichannel meters (read once per frame).
-    let snap = app
-        .player
-        .as_ref()
-        .filter(|_| app.engine.transport.playing || app.engine.session().tracks.iter().any(|t| t.mixer.input_monitor))
-        .map(|p| p.meters());
+    let snap = app.player.as_ref().filter(|_| app.meters_live()).map(|p| p.meters());
     egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 1.0;
