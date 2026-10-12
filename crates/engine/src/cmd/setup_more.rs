@@ -404,7 +404,7 @@ fn midi_inputs(e: &mut Engine, p: &Value) -> Result<Value> {
 /// Decode a source file of another session (paths relative to that session's folder).
 fn load_source(dir: &Path, src: &Source, sr: u32) -> Option<soundcraft_audio_io::AudioBuffer> {
     let p = if Path::new(&src.path).is_absolute() { PathBuf::from(&src.path) } else { dir.join(&src.path) };
-    let bytes = std::fs::read(&p).ok()?;
+    let bytes = crate::io::read_file(&p).ok()?;
     let (_, mut buf) = soundcraft_audio_io::decode(&bytes, p.extension().and_then(|x| x.to_str())).ok()?;
     if buf.sample_rate != sr && buf.sample_rate > 0 {
         buf.channels = soundcraft_dsp::offline::resample(&buf.channels, buf.sample_rate, sr);
@@ -416,7 +416,7 @@ fn load_source(dir: &Path, src: &Source, sr: u32) -> Option<soundcraft_audio_io:
 fn import_session_data(e: &mut Engine, p: &Value) -> Result<Value> {
     let id = "file.import_session_data";
     let path = str_param(p, "path").filter(|x| !x.trim().is_empty()).ok_or_else(|| bad(id, "`path` required"))?.to_string();
-    let text_v = std::fs::read_to_string(&path).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+    let text_v = crate::io::read_text(&path)?;
     let other = Session::from_json(&text_v).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
     let dir = Path::new(&path).parent().map(Path::to_path_buf).unwrap_or_default();
     let names: Option<Vec<String>> =

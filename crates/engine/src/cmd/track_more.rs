@@ -271,7 +271,7 @@ fn load_preset(e: &mut Engine, p: &Value) -> Result<Value> {
     let id = "track.load_preset";
     let path = str_param(p, "path").ok_or_else(|| bad(id, "`path` required"))?.to_string();
     let tracks = tracks_required(e, id, p)?;
-    let text = std::fs::read_to_string(&path).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+    let text = crate::io::read_text(&path)?;
     let v: Value = serde_json::from_str(&text).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
     if v.get("format").and_then(Value::as_str) != Some(PRESET_FORMAT) {
         return Err(EngineError::Io(format!("{path}: not a SoundCraft track preset")));

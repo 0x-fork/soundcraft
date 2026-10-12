@@ -11,6 +11,50 @@ use std::sync::Arc;
 /// Largest import we accept (samples per channel × channels), ~4 GiB of f32.
 const MAX_IMPORT_SAMPLES: usize = 1 << 30;
 
+// ─── Checked file access ──────────────────────────────────────────────────────────────────────
+//
+// Every file a command names by path is read and written through the helpers below, so the
+// automation roots (`crate::file_access`, `soundcraft-cli mcp --automation-read-root` and
+// `--automation-write-root`) are checked in one place. A test in `file_access` keeps the rest of
+// the engine from calling `std::fs` itself. Audio is decoded into the session's pool the moment it
+// enters it (import, open, sampler load), so playback and bounce read nothing from disk and
+// need no check of their own.
+
+/// The bytes of the file at `path`, which must be inside the automation read root when there is one.
+pub fn read_file(path: impl AsRef<Path>) -> Result<Vec<u8>> {
+    let path = path.as_ref();
+    crate::file_access::check_read(path).map_err(EngineError::Io)?;
+    std::fs::read(path).map_err(|err| EngineError::Io(format!("{}: {err}", path.display())))
+}
+
+/// [`read_file`] for a text file.
+pub fn read_text(path: impl AsRef<Path>) -> Result<String> {
+    let path = path.as_ref();
+    crate::file_access::check_read(path).map_err(EngineError::Io)?;
+    std::fs::read_to_string(path).map_err(|err| EngineError::Io(format!("{}: {err}", path.display())))
+}
+
+/// Is there a file at `path` the automation read root lets us see? A path outside the root is
+/// reported as not found, so a command can't probe for files beyond it.
+pub fn file_found(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
+    crate::file_access::check_read(path).is_ok() && path.is_file()
+}
+
+/// Create `dir` and its parents, inside the automation write root when there is one.
+pub(crate) fn make_dir(dir: impl AsRef<Path>) -> Result<()> {
+    let dir = dir.as_ref();
+    crate::file_access::check_write(dir).map_err(EngineError::Io)?;
+    std::fs::create_dir_all(dir).map_err(|err| EngineError::Io(format!("{}: {err}", dir.display())))
+}
+
+/// Write `bytes` to the file at `path`, inside the automation write root when there is one.
+pub(crate) fn write_path(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> Result<()> {
+    let path = path.as_ref();
+    crate::file_access::check_write(path).map_err(EngineError::Io)?;
+    std::fs::write(path, bytes).map_err(|err| EngineError::Io(format!("{}: {err}", path.display())))
+}
+
 /// A relative `Audio Files/` path no other source in `s` already uses.
 fn unique_audio_rel(s: &Session, stem: &str) -> String {
     let stem = sanitize_name(stem);
@@ -152,12 +196,13 @@ pub fn relink_videos(s: &mut Session, session_dir: &Path) -> Vec<String> {
     let mut missing = Vec::new();
     for v in &mut s.videos {
         let p = if Path::new(&v.path).is_absolute() { PathBuf::from(&v.path) } else { session_dir.join(&v.path) };
-        if p.is_file() {
+        if file_found(&p) {
             continue;
         }
         let name = Path::new(&v.path).file_name().map(PathBuf::from).unwrap_or_default();
-        let near =
-            [session_dir.join(&name), session_dir.join("Video Files").join(&name)].into_iter().find(|c| !name.as_os_str().is_empty() && c.is_file());
+        let near = [session_dir.join(&name), session_dir.join("Video Files").join(&name)]
+            .into_iter()
+            .find(|c| !name.as_os_str().is_empty() && file_found(c));
         match near {
             Some(c) => v.path = c.to_string_lossy().into_owned(),
             None => missing.push(format!("{} (video)", p.display())),
@@ -303,7 +348,7 @@ pub fn bounce_stems(e: &Engine, dir: &str, r: Range, opts: &EncodeOptions) -> Re
 /// [`bounce_stems`] in the main format, or folded down to stereo when `fold_stereo`.
 pub fn bounce_stems_with(e: &Engine, dir: &str, r: Range, opts: &EncodeOptions, fold_stereo: bool) -> Result<Vec<String>> {
     let s = e.session();
-    std::fs::create_dir_all(dir).map_err(|err| EngineError::Io(format!("{dir}: {err}")))?;
+    make_dir(dir)?;
     let ext = match opts.format {
         FileFormat::Aiff => "aif",
         FileFormat::Flac => "flac",
@@ -325,7 +370,7 @@ pub fn bounce_stems_with(e: &Engine, dir: &str, r: Range, opts: &EncodeOptions, 
         let buf = AudioBuffer { sample_rate: s.sample_rate.hz(), channels: ch };
         let bytes = soundcraft_audio_io::encode_with_channel_mask(&buf, opts, fmt.channel_mask()).map_err(|err| EngineError::Io(err.to_string()))?;
         let path = Path::new(dir).join(format!("{} - {}.{ext}", sanitize_name(&s.name), sanitize_name(&name)));
-        std::fs::write(&path, bytes).map_err(|err| EngineError::Io(format!("{}: {err}", path.display())))?;
+        write_path(&path, bytes)?;
         out.push(path.to_string_lossy().into_owned());
     }
     Ok(out)
@@ -479,7 +524,7 @@ pub fn commit_track(e: &mut Engine, t: TrackId) -> Result<Option<TrackId>> {
 
 pub fn export_clips(e: &Engine, ids: &[soundcraft_model::ClipId], dir: &str) -> Result<usize> {
     let s = e.session();
-    std::fs::create_dir_all(dir).map_err(|err| EngineError::Io(format!("{dir}: {err}")))?;
+    make_dir(dir)?;
     let mut n = 0;
     for id in ids {
         let Some((t, c)) = s.find_clip(*id) else { continue };
@@ -496,7 +541,7 @@ pub fn export_clips(e: &Engine, ids: &[soundcraft_model::ClipId], dir: &str) -> 
                 return Err(EngineError::Io(format!("{dir}: too many files named {stem}")));
             }
         }
-        std::fs::write(&path, bytes).map_err(|err| EngineError::Io(format!("{}: {err}", path.display())))?;
+        write_path(&path, bytes)?;
         n += 1;
     }
     Ok(n)
@@ -541,6 +586,8 @@ pub fn save_session_copy(e: &Engine, path: &str) -> Result<usize> {
 /// files written and the final path.
 fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Session, usize, PathBuf)> {
     let p = session_file(path);
+    // Before any audio is written: a session saved outside the write root changes nothing.
+    crate::file_access::check_write(&p).map_err(EngineError::Io)?;
     let dir = p.parent().map(Path::to_path_buf).unwrap_or_default();
     let audio_dir = dir.join("Audio Files");
     let mut s = session.clone();
@@ -568,7 +615,7 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
             continue;
         }
         let Some(audio) = s.pool.get(src.id) else { continue };
-        std::fs::create_dir_all(&audio_dir).map_err(|err| EngineError::Io(format!("{}: {err}", audio_dir.display())))?;
+        make_dir(&audio_dir)?;
         let mut stem = sanitize_name(&src.name);
         if overwrite {
             // One file per source id so autosaves never collide or pile up.
@@ -595,7 +642,7 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
         s.name = stem.to_string();
     }
     let text = s.to_json().map_err(|err| EngineError::Io(err.to_string()))?;
-    std::fs::create_dir_all(&dir).map_err(|err| EngineError::Io(format!("{}: {err}", dir.display())))?;
+    make_dir(&dir)?;
     // Atomic-ish write: temp file then rename.
     let tmp = p.with_extension("scraft.tmp");
     if !overwrite && std::fs::read(&p).is_ok_and(|old| old != text.as_bytes()) {
@@ -608,6 +655,8 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
 /// Write `bytes` to `tmp`, flush it to disk and rename it over `file`, so `file` holds either the
 /// old or the new contents, never a mix.
 pub fn replace_file(tmp: &Path, file: &Path, bytes: &[u8]) -> Result<()> {
+    crate::file_access::check_write(file).map_err(EngineError::Io)?;
+    crate::file_access::check_write(tmp).map_err(EngineError::Io)?;
     if let Err(err) = write_synced(tmp, bytes).and_then(|()| std::fs::rename(tmp, file)) {
         let _ = std::fs::remove_file(tmp);
         return Err(EngineError::Io(format!("{}: {err}", file.display())));
@@ -636,6 +685,10 @@ fn back_up(file: &Path) {
         return;
     };
     let backups = dir.join("Backups");
+    if let Err(err) = crate::file_access::check_write(&backups) {
+        log::warn!("no backup of {}: {err}", file.display());
+        return;
+    }
     let prefix = format!("{stem} backup ");
     let suffix = format!(".{ext}");
     let numbers: Vec<u32> = std::fs::read_dir(&backups)
@@ -659,7 +712,9 @@ fn back_up(file: &Path) {
 /// extension and isn't an existing file.
 pub fn session_file(path: &str) -> PathBuf {
     let p = PathBuf::from(path);
-    if p.extension().is_none() && !p.is_file() { p.with_extension(soundcraft_model::SESSION_EXTENSION) } else { p }
+    // Only a path the write root allows is probed, so a refused one can't be used to test for files.
+    let is_file = crate::file_access::check_write(&p).is_ok() && p.is_file();
+    if p.extension().is_none() && !is_file { p.with_extension(soundcraft_model::SESSION_EXTENSION) } else { p }
 }
 
 /// True when `command` would write a session over the existing `file`. Save, Save As and Save
@@ -708,12 +763,17 @@ fn store_wav(dir: &Path, stem: &str, bytes: &[u8]) -> Result<(String, bool)> {
 
 /// Open a `.scraft` session and decode its audio files (missing files are reported, not fatal).
 pub fn open_session(e: &mut Engine, path: &str) -> Result<Vec<String>> {
-    let text = std::fs::read_to_string(path).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+    let text = read_text(path)?;
     let mut s = Session::from_json(&text).map_err(|err| EngineError::Io(err.to_string()))?;
     let dir = Path::new(path).parent().map(Path::to_path_buf).unwrap_or_default();
     let mut missing = Vec::new();
     for src in s.sources.clone() {
         let p = if Path::new(&src.path).is_absolute() { PathBuf::from(&src.path) } else { dir.join(&src.path) };
+        // A session file is hostile input too: a path in it that leaves the read root is not read.
+        if let Err(why) = crate::file_access::check_read(&p) {
+            missing.push(why);
+            continue;
+        }
         match std::fs::read(&p) {
             Ok(bytes) => {
                 if let Err(err) = load_source_audio(&mut s, src.id, &bytes, p.extension().and_then(|x| x.to_str())) {
@@ -774,6 +834,7 @@ pub fn write_file(path: &str, bytes: &[u8]) -> Result<()> {
         let name = Path::new(path).file_name().and_then(|n| n.to_str()).filter(|n| !n.is_empty()).unwrap_or("Untitled");
         return deliver(name, bytes).map_err(EngineError::Io);
     }
+    crate::file_access::check_write(path).map_err(EngineError::Io)?;
     std::fs::write(path, bytes).map_err(|err| EngineError::Io(format!("{path}: {err}")))
 }
 
