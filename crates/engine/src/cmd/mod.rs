@@ -36,6 +36,8 @@ mod view;
 mod view_more;
 mod vst3;
 
+pub(crate) use edit::remember_selection;
+
 pub type Run = fn(&mut Engine, &Value) -> Result<Value>;
 /// `Err(reason)` = disabled.
 pub type Enabled = fn(&Engine) -> std::result::Result<(), String>;
