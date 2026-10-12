@@ -305,7 +305,8 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
             let _ = resp;
             let pr = Rect::from_center_size(pos2(cx, y + 42.0), vec2(ks + 8.0, 13.0));
             inset(ui.painter(), pr, t.counter_bg);
-            let (_, entered) = editable_readout(ui, pr, ui.id().with(("pan-value", id.0, i)), &pan_text(v), &format!("{:.0}", v * 100.0), parse_pan);
+            let (_, entered) =
+                editable_readout(ui, pr, ui.id().with(("pan-value", id.0, i)), &pan_text(v), &format!("{:.0}", v * 100.0), parse_pan, 0.0);
             if let Some(v) = entered {
                 let _ = app.engine.execute_merged("mix.pan", &json!({"track": id.0, "pan": v, "index": i}), &format!("pan:{}:{i}", id.0));
             }
@@ -380,6 +381,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         &db_text(track.mixer.volume_db),
         &format!("{:.1}", track.mixer.volume_db),
         parse_db,
+        0.0,
     );
     if let Some(db) = entered {
         let _ = app.engine.execute_merged("mix.volume", &json!({"track": id.0, "db": db}), &format!("fader:{}", id.0));
@@ -653,37 +655,35 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
                 regular(9.0),
                 if s.mute { t.mute } else { t.text },
             );
-            let (level_resp, entered) = editable_readout(
-                ui,
-                level_r,
-                ui.id().with(("send-value", id.0, slot)),
-                &format!("{} dB", db_text(s.level_db)),
-                &format!("{:.1}", s.level_db),
-                parse_db,
-            );
-            if let Some(db) = entered {
-                let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "db": db}));
+            let letter = (b'A' + slot as u8) as char;
+            let shown = app.ui.send_window == Some((id, slot));
+            let level_resp = ui.interact(level_r, ui.id().with(("send-value", id.0, slot)), Sense::click_and_drag());
+            level_resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Send {letter} level")));
+            if shown {
+                ui.painter().rect_stroke(level_r.shrink(0.5), 1.0, Stroke::new(1.5, t.accent), StrokeKind::Inside);
             }
-            if level_resp.as_ref().is_some_and(egui::Response::dragged) {
+            let level = format!("{} dB", db_text(s.level_db));
+            ui.painter().with_clip_rect(level_r).text(level_r.center(), Align2::CENTER_CENTER, level, regular(9.0), t.counter_text);
+            if level_resp.clicked() {
+                if ui.input(|i| i.modifiers.alt) {
+                    let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "db": 0.0}));
+                } else {
+                    app.ui.send_window = (!shown).then_some((id, slot));
+                }
+            }
+            if level_resp.dragged() {
                 // Use this frame's pointer movement. `Response::drag_delta()` is cumulative, so
                 // applying it to the already-updated value made trackpad adjustment accelerate.
                 let (dy, fine) = ui.input(|i| (i.pointer.delta().y, i.modifiers.shift));
-                let db_per_point = if fine { 0.02 } else { 0.15 };
-                let db = (s.level_db.max(-60.0) - dy * db_per_point).clamp(-60.0, 12.0);
+                let db = dragged_send_db(s.level_db, dy, fine);
                 let _ =
                     app.engine.execute_merged("mix.send_level", &json!({"track": id.0, "slot": slot, "db": db}), &format!("send:{}:{slot}", id.0));
             }
-            if level_resp.as_ref().is_some_and(egui::Response::double_clicked) {
-                let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "db": 0.0}));
-            }
-            if let Some(resp) = level_resp {
-                let _ = resp.clone().on_hover_text(format!(
-                    "Send {}: {} dB\nClick to type · drag vertically to adjust · Shift-drag for fine control · double-click for 0 dB · right-click for options",
-                    (b'A' + slot as u8) as char,
-                    db_text(s.level_db)
-                ));
-                resp.context_menu(|ui| send_options_menu(app, ui, id, slot, s));
-            }
+            let _ = level_resp.clone().on_hover_text(format!(
+                "Send {letter}: {} dB\nClick for the send fader · drag vertically to adjust · Shift-drag for fine control · Alt-click for 0 dB · right-click for options",
+                db_text(s.level_db)
+            ));
+            level_resp.context_menu(|ui| send_options_menu(app, ui, id, slot, s));
         }
         None => {
             ui.painter().circle_filled(pos2(r.min.x + 6.0, r.center().y), 1.5, t.text_dim);
@@ -712,6 +712,82 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
             ui.strong(format!("Send {} · Choose destination", (b'A' + slot as u8) as char));
             send_route_menu(app, ui, id, slot, None);
         });
+    }
+}
+
+/// The Send window, as in Pro Tools: one send's fader, level, pan, Mute and Pre-fader. Clicking a
+/// send's level opens it, moves it to that send, or closes it, and so does Escape.
+pub(crate) fn send_window(app: &mut SoundApp, ctx: &egui::Context) {
+    // egui closes menus and drops text focus on Escape before this runs, so whether this Escape
+    // was theirs comes from the last frame. A dialog or the search on top takes it too.
+    let busy_id = egui::Id::new("send_window_escape");
+    let busy = ctx.data(|d| d.get_temp(busy_id)).unwrap_or(false) || app.dialogs.open.is_some() || app.ui.show_search;
+    if !busy && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.ui.send_window = None;
+    }
+    send_window_contents(app, ctx);
+    let busy = egui::Popup::is_any_open(ctx) || ctx.text_edit_focused();
+    ctx.data_mut(|d| d.insert_temp(busy_id, busy));
+}
+
+fn send_window_contents(app: &mut SoundApp, ctx: &egui::Context) {
+    let Some((id, slot)) = app.ui.send_window else { return };
+    let Some((name, send)) = app.engine.session().track(id).and_then(|t| Some((t.name.clone(), t.mixer.sends.get(slot).cloned().flatten()?))) else {
+        app.ui.send_window = None;
+        return;
+    };
+    let t = Tokens::current();
+    let mut open = true;
+    egui::Window::new(format!("{name} · Send {}", (b'A' + slot as u8) as char))
+        .id(egui::Id::new("send_window"))
+        .open(&mut open)
+        .auto_sized()
+        .collapsible(false)
+        .default_pos(ctx.pointer_latest_pos().map_or(pos2(200.0, 200.0), |p| p + vec2(24.0, -160.0)))
+        .show(ctx, |ui| {
+            ui.set_width(150.0);
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new(route_name(app, &send.target)).color(t.counter_text));
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.add_space(((ui.available_width() - 62.0) / 2.0).max(0.0));
+                    if text_toggle(ui, vec2(36.0, 18.0), "PRE", send.pre_fader, t.accent, "Pre-fader").clicked() {
+                        let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "pre_fader": !send.pre_fader}));
+                    }
+                    if text_toggle(ui, vec2(22.0, 18.0), "M", send.mute, t.mute, "Mute send").clicked() {
+                        let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "mute": !send.mute}));
+                    }
+                });
+                let mut pan = send.pan;
+                pan_knob(ui, 32.0, &mut pan, "Send pan (drag; double-click centres)");
+                if (pan - send.pan).abs() > f32::EPSILON {
+                    let _ = app.engine.execute_merged(
+                        "mix.send_level",
+                        &json!({"track": id.0, "slot": slot, "pan": pan}),
+                        &format!("send-pan:{}:{slot}", id.0),
+                    );
+                }
+                ui.label(egui::RichText::new(pan_text(send.pan)).color(t.counter_text).small());
+                let (fr, fresp) = ui.allocate_exact_size(vec2(56.0, 220.0), Sense::hover());
+                fresp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, "Send level"));
+                if let Some(db) = fader(ui, fr, send.level_db, ui.id().with("send_fader")) {
+                    let _ = app.engine.execute_merged(
+                        "mix.send_level",
+                        &json!({"track": id.0, "slot": slot, "db": db}),
+                        &format!("send:{}:{slot}", id.0),
+                    );
+                }
+                let (rr, _) = ui.allocate_exact_size(vec2(64.0, 15.0), Sense::hover());
+                ui.painter().rect_filled(rr, 1.0, t.counter_bg);
+                let shown = db_text(send.level_db);
+                let (_, typed) = editable_readout(ui, rr, ui.id().with("send_level_value"), &shown, &format!("{:.1}", send.level_db), parse_db, 0.0);
+                if let Some(db) = typed {
+                    let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "db": db}));
+                }
+            });
+        });
+    if !open {
+        app.ui.send_window = None;
     }
 }
 
@@ -762,8 +838,16 @@ fn send_options_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, 
     }
 }
 
+/// A send level after a vertical drag of `dy` points: along the fader's taper, like the level bar,
+/// so it runs smoothly down to −∞ and back. About 0.15 dB a point near 0 dB (0.02 when fine).
+fn dragged_send_db(db: f32, dy: f32, fine: bool) -> f32 {
+    let per_point = if fine { 0.0004 } else { 0.003 };
+    soundcraft_model::fader_pos_to_db(soundcraft_model::fader_db_to_pos(db) - dy * per_point)
+}
+
 /// Paint a value until clicked, then replace it with a focused text field. Enter or clicking away
-/// commits a valid value; Escape cancels. The interaction response remains available for dragging.
+/// commits a valid value; Escape cancels, and so does the field losing focus while hidden.
+/// Alt-click returns `reset`. The interaction response remains available for dragging.
 fn editable_readout(
     ui: &mut Ui,
     r: Rect,
@@ -771,6 +855,7 @@ fn editable_readout(
     display: &str,
     edit_initial: &str,
     parse: fn(&str) -> Option<f32>,
+    reset: f32,
 ) -> (Option<egui::Response>, Option<f32>) {
     let t = Tokens::current();
     let active_id = id.with("active");
@@ -778,9 +863,14 @@ fn editable_readout(
     let mut active: bool = ui.data(|d| d.get_temp(active_id)).unwrap_or(false);
     let mut started = false;
     let mut response = None;
+    let mut value = None;
     if !active {
         let resp = ui.interact(r, id, Sense::click_and_drag());
-        if resp.clicked() && !resp.double_clicked() {
+        let alt = ui.input(|i| i.modifiers.alt);
+        if resp.clicked() && alt {
+            value = Some(reset);
+        }
+        if resp.clicked() && !alt && !resp.double_clicked() {
             active = true;
             started = true;
             ui.data_mut(|d| d.insert_temp(text_id, edit_initial.to_string()));
@@ -789,7 +879,6 @@ fn editable_readout(
         }
         response = Some(resp);
     }
-    let mut value = None;
     if active {
         let mut text: String = ui.data(|d| d.get_temp(text_id)).unwrap_or_else(|| edit_initial.to_string());
         let mut child = ui.new_child(egui::UiBuilder::new().id_salt(id).max_rect(r));
@@ -807,13 +896,15 @@ fn editable_readout(
         let (enter, escape) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
         if escape {
             active = false;
-        } else if enter || edit_resp.lost_focus() {
+        } else if (enter && edit_resp.has_focus()) || edit_resp.lost_focus() {
             if let Some(parsed) = parse(&text) {
                 value = Some(parsed);
                 active = false;
             } else if edit_resp.lost_focus() {
                 active = false;
             }
+        } else if !started && !edit_resp.has_focus() {
+            active = false;
         }
         ui.data_mut(|d| d.insert_temp(text_id, text));
     }
@@ -947,7 +1038,8 @@ fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_db, parse_pan};
+    use super::{dragged_send_db, editable_readout, parse_db, parse_pan};
+    use egui::{Event, Modifiers, PointerButton, Rect, pos2, vec2};
 
     #[test]
     fn typed_db_accepts_console_notation_and_clamps() {
@@ -966,5 +1058,48 @@ mod tests {
         assert_eq!(parse_pan("R25"), Some(0.25));
         assert_eq!(parse_pan("0.5"), Some(0.5));
         assert_eq!(parse_pan("center"), None);
+    }
+
+    #[test]
+    fn send_drags_follow_the_fader_taper_down_to_minus_infinity() {
+        assert!((dragged_send_db(0.0, -10.0, false) - 1.44).abs() < 0.01);
+        assert!((dragged_send_db(0.0, -10.0, true) - 0.192).abs() < 0.01);
+        assert_eq!(dragged_send_db(0.0, 400.0, false), -144.0);
+        let up = dragged_send_db(-144.0, -1.0, false);
+        assert!(up > -144.0 && up < -100.0, "one point up leaves −∞ gently, got {up}");
+        assert_eq!(dragged_send_db(12.0, -50.0, false), 12.0);
+    }
+
+    #[test]
+    fn readouts_reset_on_alt_click_and_drop_a_field_that_lost_focus() {
+        let ctx = egui::Context::default();
+        let r = Rect::from_min_size(pos2(10.0, 10.0), vec2(40.0, 14.0));
+        let click = |mods: Modifiers| {
+            let press = |pressed| Event::PointerButton { pos: r.center(), button: PointerButton::Primary, pressed, modifiers: mods };
+            vec![Event::ModifiersChanged(mods), Event::PointerMoved(r.center()), press(true), press(false)]
+        };
+        let mut time = 0.0;
+        let mut frame = |events: Vec<Event>, shown: bool| {
+            time += 0.5;
+            let mut out = (false, None);
+            let mut full = ctx.run_ui(egui::RawInput { events, time: Some(time), ..Default::default() }, |ui| {
+                if shown {
+                    let (resp, value) = editable_readout(ui, r, egui::Id::new("readout"), "-3.0", "-3.0", parse_db, 0.0);
+                    out = (resp.is_some(), value);
+                }
+            });
+            full.textures_delta.clear();
+            out
+        };
+        assert_eq!(frame(vec![], true), (true, None));
+        assert_eq!(frame(click(Modifiers::ALT), true), (true, Some(0.0)), "Alt-click resets");
+        frame(vec![Event::ModifiersChanged(Modifiers::NONE)], true);
+        frame(click(Modifiers::NONE), true);
+        assert_eq!(frame(vec![], true), (false, None), "a click opens the text field");
+        for _ in 0..3 {
+            frame(vec![], false);
+        }
+        frame(vec![], true);
+        assert_eq!(frame(vec![], true), (true, None), "hidden, the field lost focus, so the readout is back");
     }
 }
