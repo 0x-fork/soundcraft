@@ -23,19 +23,22 @@ fn slot(output: &FullOutput, label: &str) -> Slot {
         })
         .unwrap_or_else(|| panic!("missing painted label {label}"));
     let center = text.visual_bounding_rect().center();
-    let rect = output
-        .shapes
-        .iter()
-        .find_map(|shape| match &shape.shape {
-            Shape::Rect(rect) if rect.rect.height() == 15.0 && rect.rect.contains(center) => Some(rect),
+    let rects = || {
+        output.shapes.iter().filter_map(|shape| match &shape.shape {
+            Shape::Rect(rect) if rect.rect.height() <= 15.0 && rect.rect.contains(center) => Some(rect),
             _ => None,
         })
+    };
+    // A filled slot is a key: an opaque face inside a separately stroked rim.
+    let face = rects()
+        .filter(|rect| rect.fill.a() == 255)
+        .min_by(|a, b| a.rect.area().total_cmp(&b.rect.area()))
         .unwrap_or_else(|| panic!("missing painted slot for {label}"));
+    let rim = rects().filter(|rect| rect.stroke.width > 0.0).max_by(|a, b| a.rect.area().total_cmp(&b.rect.area())).unwrap_or(face);
     let foreground = text.override_text_color.unwrap_or(text.galley.job.sections[0].format.color);
     assert_eq!(text.opacity_factor, 1.0);
     assert_eq!(foreground.a(), 255);
-    assert_eq!(rect.fill.a(), 255);
-    Slot { rect: rect.rect, fill: rect.fill, text: foreground, border: rect.stroke.color }
+    Slot { rect: rim.rect, fill: face.fill, text: foreground, border: rim.stroke.color }
 }
 
 fn contrast(a: Color32, b: Color32) -> f64 {
@@ -126,11 +129,8 @@ fn populated_mix_instrument_uses_readable_palette_in_real_frames() {
             if ratio < 4.5 {
                 failures.push(format!("{name} hover={hovered}: contrast {ratio:.6}:1 is below 4.5:1"));
             }
-            if !light {
-                let original = Color32::from_rgb(52, 62, 80);
-                assert_eq!(painted.fill, if hovered { original.gamma_multiply(1.3) } else { original });
-                assert_eq!(painted.border, Color32::from_rgb(16, 16, 16));
-            }
+            assert_eq!(painted.fill, palette.insert_on, "{name} hover={hovered}");
+            assert_eq!(painted.border, palette.button_border, "{name} hover={hovered}");
             if let Some(dir) = &proof_dir {
                 harness.render().unwrap().save(dir.join(format!("{name}-{}.png", if hovered { "hover" } else { "ordinary" }))).unwrap();
             }

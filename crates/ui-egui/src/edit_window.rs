@@ -753,8 +753,10 @@ fn track_row(app: &mut SoundApp, ui: &mut Ui, id: TrackId, row: Rect, tl: Rect) 
     ui.painter().rect_filled(head, 0.0, if selected { t.header_selected } else { t.panel_bg2 });
     ui.painter().rect_filled(Rect::from_min_size(head.min, vec2(5.0, head.height())), 0.0, rgb(track.color));
     ui.painter().line_segment([pos2(head.min.x, row.max.y + 0.5), pos2(tl.max.x, row.max.y + 0.5)], Stroke::new(1.0, t.border));
+    ui.painter().hline(head.min.x + 5.0..=head.max.x, head.min.y + 0.5, Stroke::new(1.0, t.edge_light));
     track_header(app, ui, &track, head, selected);
     // Lane.
+    ui.painter().vline(tl.min.x - 0.5, row.y_range(), Stroke::new(1.0, t.border));
     let painter = ui.painter().with_clip_rect(lane.intersect(ui.clip_rect()));
     painter.rect_filled(lane, 0.0, if selected { t.playlist_alt } else { t.playlist_bg });
     let s = app.engine.session().clone();
@@ -1053,7 +1055,7 @@ fn header_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, col: &str, r: R
     let rows = ((r.height() - 4.0) / line_h).floor().max(1.0) as usize;
     let item = |i: usize| Rect::from_min_size(pos2(r.min.x + 4.0, r.min.y + 3.0 + i as f32 * line_h), vec2(r.width() - 8.0, line_h - 2.0));
     let text = |ui: &Ui, rr: Rect, s: &str, c: Color32| {
-        ui.painter().rect_filled(rr, 2.0, t.slot_bg);
+        ui.painter().rect(rr, 2.0, t.slot_bg, Stroke::new(1.0, t.slot_border), StrokeKind::Inside);
         ui.painter().with_clip_rect(rr).text(pos2(rr.min.x + 4.0, rr.center().y), Align2::LEFT_CENTER, s, regular(10.0), c);
     };
     let route = |r: &soundcraft_model::Route| match r {

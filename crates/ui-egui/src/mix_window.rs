@@ -3,8 +3,8 @@
 use crate::SoundApp;
 use crate::theme::{Tokens, bold, regular, rgb};
 use crate::widgets::{
-    PannerEdit, PannerSpeaker, db_text, fader, meter, multi_meter, pan_knob, pan_text, rec_toggle, selector_box, selector_box_with_tooltip,
-    surround_panner, text_toggle,
+    PannerEdit, PannerSpeaker, db_text, fader, inset, key, meter, multi_meter, pan_knob, pan_text, rec_toggle, selector_box,
+    selector_box_with_tooltip, shade, surround_panner, text_toggle, vgradient,
 };
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
@@ -96,7 +96,9 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
     let h = ui.available_height().max(560.0);
     let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     let selected = app.engine.session().edit.selected_tracks.contains(&id);
-    ui.painter().rect_filled(r, 0.0, if selected { t.strip_selected } else { t.strip_bg });
+    let bg = if selected { t.strip_selected } else { t.strip_bg };
+    vgradient(ui.painter(), r, shade(bg, 0.06), bg);
+    ui.painter().vline(r.min.x + 0.5, r.y_range(), Stroke::new(1.0, t.edge_light));
     let mut y = r.min.y + 4.0;
     let inner_w = w - 8.0;
     let x0 = r.min.x + 4.0;
@@ -109,7 +111,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
     if all || has("mic_preamps") {
         // Input gain stage ahead of the inserts (the track's trim).
         let sec = Rect::from_min_size(pos2(x0, y), vec2(inner_w, 34.0));
-        ui.painter().rect_filled(sec, 2.0, t.strip_section);
+        inset(ui.painter(), sec, t.strip_section);
         section_label(ui, sec, "PREAMP");
         if has_input {
             let kr = Rect::from_min_size(pos2(x0 + 6.0, sec.min.y + 15.0), vec2(inner_w - 12.0, 16.0));
@@ -127,7 +129,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
     }
     if all || has("instruments") {
         let sec = Rect::from_min_size(pos2(x0, y), vec2(inner_w, 34.0));
-        ui.painter().rect_filled(sec, 2.0, t.strip_section);
+        inset(ui.painter(), sec, t.strip_section);
         section_label(ui, sec, "INSTRUMENT");
         let sr = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 16.0), vec2(inner_w - 4.0, 15.0));
         let slot = track.mixer.inserts.iter().position(|i| i.as_ref().is_some_and(|i| plugin_info(&i.plugin).is_some_and(|p| p.is_instrument)));
@@ -163,7 +165,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
             continue;
         }
         let sec = Rect::from_min_size(pos2(x0, y), vec2(inner_w, 16.0 + 5.0 * 17.0));
-        ui.painter().rect_filled(sec, 2.0, t.strip_section);
+        inset(ui.painter(), sec, t.strip_section);
         section_label(ui, sec, title);
         for k in 0..5 {
             let sr = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 15.0 + k as f32 * 17.0), vec2(inner_w - 4.0, 15.0));
@@ -215,7 +217,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
     }
     if all || has("io") {
         let sec = Rect::from_min_size(pos2(x0, y), vec2(inner_w, 16.0 + 2.0 * 18.0 + 30.0));
-        ui.painter().rect_filled(sec, 2.0, t.strip_section);
+        inset(ui.painter(), sec, t.strip_section);
         section_label(ui, sec, "I / O");
         let in_r = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 15.0), vec2(inner_w - 4.0, 16.0));
         let out_r = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 33.0), vec2(inner_w - 4.0, 16.0));
@@ -302,7 +304,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
             }
             let _ = resp;
             let pr = Rect::from_center_size(pos2(cx, y + 42.0), vec2(ks + 8.0, 13.0));
-            ui.painter().rect_filled(pr, 1.0, t.counter_bg);
+            inset(ui.painter(), pr, t.counter_bg);
             let (_, entered) = editable_readout(ui, pr, ui.id().with(("pan-value", id.0, i)), &pan_text(v), &format!("{:.0}", v * 100.0), parse_pan);
             if let Some(v) = entered {
                 let _ = app.engine.execute_merged("mix.pan", &json!({"track": id.0, "pan": v, "index": i}), &format!("pan:{}:{i}", id.0));
@@ -370,7 +372,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
     }
     // Volume readout and name.
     let vr = Rect::from_min_size(pos2(x0 + 4.0, r.max.y - bottom_h + 4.0), vec2(inner_w - 8.0, 15.0));
-    ui.painter().rect_filled(vr, 1.0, t.counter_bg);
+    inset(ui.painter(), vr, t.counter_bg);
     let (_, entered) = editable_readout(
         ui,
         vr,
@@ -424,13 +426,7 @@ pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r:
     let info = ins.and_then(|i| plugin_info(&i.plugin));
     let resp = ui.interact(r, ui.id().with(("instrument", id.0)), Sense::click());
     let fill = if info.is_some() { t.insert_on } else { t.slot_bg };
-    ui.painter().rect(
-        r,
-        CornerRadius::same(2),
-        if resp.hovered() { fill.gamma_multiply(1.3) } else { fill },
-        Stroke::new(1.0, t.slot_border),
-        StrokeKind::Inside,
-    );
+    slot_face(ui, r, &resp, fill, info.is_some());
     ui.painter().with_clip_rect(r).text(r.center(), Align2::CENTER_CENTER, info.map_or("no instrument", |p| p.short_name), regular(10.5), t.text);
     let hosted = ins.is_some_and(|i| soundcraft_mix::is_third_party(&i.plugin));
     if resp.clicked() && hosted && !app.ui.plugin_windows.contains(&(id, slot)) {
@@ -439,6 +435,16 @@ pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r:
     let menu_resp = if hosted { resp.clone().on_hover_text("Click: open instrument · right-click: change") } else { resp.clone() };
     let popup = if hosted { egui::Popup::context_menu(&menu_resp) } else { egui::Popup::menu(&menu_resp) };
     popup.show(|ui| instrument_menu(app, ui, id));
+}
+
+/// A filled slot is a key; it doesn't brighten on hover, which would cost its label contrast.
+fn slot_face(ui: &Ui, r: Rect, resp: &egui::Response, fill: Color32, occupied: bool) {
+    if occupied {
+        key(ui.painter(), r, resp, fill);
+    } else {
+        let fill = if resp.hovered() { fill.gamma_multiply(1.3) } else { fill };
+        ui.painter().rect(r, CornerRadius::same(2), fill, Stroke::new(1.0, Tokens::current().slot_border), StrokeKind::Inside);
+    }
 }
 
 pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: usize, r: Rect) {
@@ -451,13 +457,7 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
         Some(_) => t.insert_on,
         None => t.slot_bg,
     };
-    ui.painter().rect(
-        r,
-        CornerRadius::same(2),
-        if resp.hovered() { fill.gamma_multiply(1.3) } else { fill },
-        Stroke::new(1.0, t.slot_border),
-        StrokeKind::Inside,
-    );
+    slot_face(ui, r, &resp, fill, ins.is_some());
     match &ins {
         None => {
             ui.painter().circle_filled(pos2(r.min.x + 6.0, r.center().y), 1.5, t.text_dim);
@@ -632,11 +632,10 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
     let t = Tokens::current();
     let id = track.id;
     let snd = track.mixer.sends.get(slot).cloned().flatten();
-    let fill = if snd.is_some() { t.send_on } else { t.slot_bg };
-    ui.painter().rect(r, CornerRadius::same(2), fill, Stroke::new(1.0, t.slot_border), StrokeKind::Inside);
     let level_r = Rect::from_min_max(pos2((r.max.x - 42.0).max(r.min.x), r.min.y), r.max);
     let route_r = Rect::from_min_max(r.min, pos2((level_r.min.x - 1.0).max(r.min.x), r.max.y));
     let route_resp = ui.interact(if snd.is_some() { route_r } else { r }, ui.id().with(("snd-route", id.0, slot)), Sense::click());
+    slot_face(ui, r, &route_resp, if snd.is_some() { t.send_on } else { t.slot_bg }, snd.is_some());
     match &snd {
         Some(s) => {
             let name = route_name(app, &s.target);
