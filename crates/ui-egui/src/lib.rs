@@ -568,6 +568,9 @@ impl SoundApp {
         let at = self.position();
         if let Some(p) = &self.player {
             p.stop();
+            // The old player's plugin instances go away with it; their editor windows must be
+            // closed here, on the main thread, or they would stay on screen orphaned.
+            p.close_editors();
         }
         // The input reopens on the next record or monitor with the new choice.
         self.recorder = None;
