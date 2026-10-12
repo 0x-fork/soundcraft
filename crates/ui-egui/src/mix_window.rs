@@ -417,7 +417,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
 
 /// An instrument track's INSTRUMENT row: click opens a hosted instrument's plugin window,
 /// right-click (or click, when none is set) picks another instrument.
-fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
+pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
     let t = Tokens::current();
     let (id, slot) = (track.id, soundcraft_mix::INSTRUMENT_SLOT);
     let ins = track.instrument.as_ref();
@@ -441,7 +441,7 @@ fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
     popup.show(|ui| instrument_menu(app, ui, id));
 }
 
-fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: usize, r: Rect) {
+pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: usize, r: Rect) {
     let t = Tokens::current();
     let id = track.id;
     let ins = track.mixer.inserts.get(slot).cloned().flatten();
@@ -458,16 +458,28 @@ fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: usize, r: R
         Stroke::new(1.0, t.slot_border),
         StrokeKind::Inside,
     );
-    let label = ins.as_ref().and_then(|i| plugin_info(&i.plugin)).map_or("", |p| p.short_name);
-    if label.is_empty() {
-        ui.painter().circle_filled(pos2(r.min.x + 6.0, r.center().y), 1.5, t.text_dim);
-    } else {
-        ui.painter().with_clip_rect(r).text(r.center(), Align2::CENTER_CENTER, label, regular(10.5), t.text);
+    match &ins {
+        None => {
+            ui.painter().circle_filled(pos2(r.min.x + 6.0, r.center().y), 1.5, t.text_dim);
+        }
+        Some(i) => {
+            let led = if i.bypass { t.text_dim.gamma_multiply(0.45) } else { t.meter_green };
+            ui.painter().circle_filled(pos2(r.min.x + 7.0, r.center().y), 2.5, led);
+            let name = plugin_info(&i.plugin).map_or(i.plugin.as_str(), |p| p.short_name);
+            let color = if i.bypass { t.text_dim } else { t.text };
+            ui.painter().with_clip_rect(r.shrink(1.0)).text(pos2(r.min.x + 14.0, r.center().y), Align2::LEFT_CENTER, name, regular(10.5), color);
+        }
     }
-    if resp.clicked() && ins.is_some() && !app.ui.plugin_windows.contains(&(id, slot)) {
-        app.ui.plugin_windows.push((id, slot));
+    if resp.clicked() && ins.is_some() {
+        if ui.input(|i| i.modifiers.command) {
+            let _ = app.run("mix.insert_bypass", json!({"track": id.0, "slot": slot}));
+        } else if !app.ui.plugin_windows.contains(&(id, slot)) {
+            app.ui.plugin_windows.push((id, slot));
+        }
     }
-    let menu_resp = if ins.is_none() { resp.clone() } else { resp.clone().on_hover_text("Click: open plugin · right-click: change") };
+    let cmd = if ui.ctx().os().is_mac() { "⌘" } else { "Ctrl+" };
+    let tip = format!("Click: open plugin · {cmd}click: bypass · right-click: change");
+    let menu_resp = if ins.is_none() { resp.clone() } else { resp.clone().on_hover_text(tip) };
     let popup = if ins.is_none() { egui::Popup::menu(&menu_resp) } else { egui::Popup::context_menu(&menu_resp) };
     popup.show(|ui| plugin_menu(app, ui, id, slot, ins.is_some()));
 }
@@ -616,7 +628,7 @@ pub fn plugin_info(id: &str) -> Option<&'static soundcraft_dsp::PluginInfo> {
         .or_else(|| soundcraft_au_host::plugin_info(id))
 }
 
-fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: usize, r: Rect) {
+pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: usize, r: Rect) {
     let t = Tokens::current();
     let id = track.id;
     let snd = track.mixer.sends.get(slot).cloned().flatten();
