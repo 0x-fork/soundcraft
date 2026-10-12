@@ -570,6 +570,7 @@ pub fn save_session_copy(e: &Engine, path: &str) -> Result<usize> {
 /// Write `session` to `path`; returns the session with updated media paths, the number of audio
 /// files written and the final path.
 fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Session, usize, PathBuf)> {
+    use std::collections::{HashMap, HashSet};
     let p = session_file(path);
     let dir = p.parent().map(Path::to_path_buf).unwrap_or_default();
     let audio_dir = dir.join("Audio Files");
@@ -577,8 +578,16 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
     let from = s.folder.clone();
     let same_dir = from.as_deref().is_some_and(|f| same_path(f, &dir));
     let mut written = 0;
-    let shared_paths: Vec<bool> =
-        s.sources.iter().enumerate().map(|(i, src)| s.sources.iter().enumerate().any(|(j, other)| j != i && other.path == src.path)).collect();
+    // A file can stay put for all the sources that name it, unless their audio differs.
+    let shared_paths: Vec<bool> = {
+        let mut audio_by_path: HashMap<&str, HashSet<Option<*const SourceAudio>>> = HashMap::new();
+        for src in &s.sources {
+            audio_by_path.entry(&src.path).or_default().insert(s.pool.get(src.id).map(Arc::as_ptr));
+        }
+        s.sources.iter().map(|src| audio_by_path.get(src.path.as_str()).is_some_and(|a| a.len() > 1)).collect()
+    };
+    // Files written for audio during this save: sources playing the same audio share one.
+    let mut files: HashMap<*const SourceAudio, String> = HashMap::new();
     for (i, src) in s.sources.iter_mut().enumerate() {
         if !same_dir
             && s.pool.get(src.id).is_none()
@@ -598,6 +607,12 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
             continue;
         }
         let Some(audio) = s.pool.get(src.id) else { continue };
+        if let Some(path) = files.get(&Arc::as_ptr(audio)) {
+            src.path.clone_from(path);
+            src.unsaved = false;
+            src.format = FileFormat::Wav;
+            continue;
+        }
         std::fs::create_dir_all(&audio_dir).map_err(|err| EngineError::Io(format!("{}: {err}", audio_dir.display())))?;
         let mut stem = sanitize_name(&src.name);
         if overwrite {
@@ -606,6 +621,7 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
             if audio_dir.join(format!("{stem}.wav")).exists() {
                 src.path = format!("Audio Files/{stem}.wav");
                 src.unsaved = false;
+                files.insert(Arc::as_ptr(audio), src.path.clone());
                 continue;
             }
         }
@@ -615,6 +631,7 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
         src.path = format!("Audio Files/{name}");
         src.unsaved = false;
         src.format = FileFormat::Wav;
+        files.insert(Arc::as_ptr(audio), src.path.clone());
         written += usize::from(new);
     }
     if written > 0 {
@@ -759,15 +776,12 @@ pub fn open_session(e: &mut Engine, path: &str) -> Result<Vec<String>> {
     let mut s = Session::from_json(&text).map_err(|err| EngineError::Io(err.to_string()))?;
     let dir = Path::new(path).parent().map(Path::to_path_buf).unwrap_or_default();
     let mut missing = Vec::new();
-    for src in s.sources.clone() {
+    let mut files = DecodedFiles::new();
+    for src in &s.sources {
         let p = if Path::new(&src.path).is_absolute() { PathBuf::from(&src.path) } else { dir.join(&src.path) };
-        match read_file(&p) {
-            Ok(bytes) => {
-                if let Err(err) = load_source_audio(&mut s, src.id, &bytes, p.extension().and_then(|x| x.to_str())) {
-                    missing.push(format!("{}: {err}", p.display()));
-                }
-            }
-            Err(_) => missing.push(p.display().to_string()),
+        match decode_file(&mut files, &p, s.sample_rate.hz()) {
+            Ok(audio) => s.pool.insert(src.id, audio),
+            Err(err) => missing.push(err),
         }
     }
     missing.extend(relink_videos(&mut s, &dir));
@@ -780,12 +794,26 @@ pub fn open_session(e: &mut Engine, path: &str) -> Result<Vec<String>> {
     Ok(missing)
 }
 
-/// Decode one source's audio file into the session pool, at the session rate.
-fn load_source_audio(s: &mut Session, id: SourceId, bytes: &[u8], ext: Option<&str>) -> std::result::Result<(), String> {
+/// Decode one source's audio file at the session rate.
+fn decode_source(bytes: &[u8], ext: Option<&str>, rate: u32) -> std::result::Result<Arc<SourceAudio>, String> {
     let (_, buf) = soundcraft_audio_io::decode(bytes, ext).map_err(|err| err.to_string())?;
-    let buf = at_rate(buf, s.sample_rate.hz(), MAX_IMPORT_SAMPLES).ok_or("too large to load")?;
-    s.pool.insert(id, Arc::new(SourceAudio::new(buf)));
-    Ok(())
+    let buf = at_rate(buf, rate, MAX_IMPORT_SAMPLES).ok_or("too large to load")?;
+    Ok(Arc::new(SourceAudio::new(buf)))
+}
+
+/// Audio files decoded so far, by path: a session may name one file thousands of times.
+pub(crate) type DecodedFiles = std::collections::HashMap<PathBuf, std::result::Result<Arc<SourceAudio>, String>>;
+
+/// The audio of the file at `p` at `rate`, decoded the first time it is asked for. The error
+/// names the file.
+pub(crate) fn decode_file(files: &mut DecodedFiles, p: &Path, rate: u32) -> std::result::Result<Arc<SourceAudio>, String> {
+    files
+        .entry(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+        .or_insert_with(|| {
+            let bytes = read_file(p).map_err(|_| p.display().to_string())?;
+            decode_source(&bytes, p.extension().and_then(|x| x.to_str()), rate).map_err(|err| format!("{}: {err}", p.display()))
+        })
+        .clone()
 }
 
 // ─── Hosts without a filesystem (the browser) ─────────────────────────────────────────────────
@@ -888,14 +916,12 @@ pub fn open_session_bytes(e: &mut Engine, name: &str, bytes: &[u8]) -> Result<Ve
     };
     let mut s = Session::from_json(&text).map_err(|err| EngineError::Io(format!("{name}: {err}")))?;
     let mut missing = Vec::new();
-    for src in s.sources.clone() {
+    for src in &s.sources {
         match files.remove(&src.path) {
-            Some(audio) => {
-                let ext = Path::new(&src.path).extension().and_then(|x| x.to_str()).map(str::to_string);
-                if let Err(err) = load_source_audio(&mut s, src.id, &audio, ext.as_deref()) {
-                    missing.push(format!("{}: {err}", src.path));
-                }
-            }
+            Some(audio) => match decode_source(&audio, Path::new(&src.path).extension().and_then(|x| x.to_str()), s.sample_rate.hz()) {
+                Ok(audio) => s.pool.insert(src.id, audio),
+                Err(err) => missing.push(format!("{}: {err}", src.path)),
+            },
             None => missing.push(src.path.clone()),
         }
     }
@@ -1269,6 +1295,55 @@ mod rate_tests {
         assert!(at_rate(buf(1), 48_000, 1_000_000).is_none());
         let ok = at_rate(buf(8_000), 48_000, 1_000_000).unwrap();
         assert_eq!((ok.sample_rate, ok.frames()), (48_000, 600));
+    }
+}
+
+#[cfg(test)]
+mod open_tests {
+    use super::*;
+
+    #[test]
+    fn a_file_named_by_many_sources_is_decoded_once() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.25; 480]] };
+        std::fs::write(dir.join("k.wav"), soundcraft_audio_io::encode(&audio, &EncodeOptions::default()).unwrap()).unwrap();
+        let mut s = Session::default();
+        for _ in 0..3 {
+            add_source(&mut s, "k", audio.clone(), Some("k.wav"), FileFormat::Wav);
+        }
+        let path = dir.join("Song.scraft").to_string_lossy().into_owned();
+        std::fs::write(&path, s.to_json().unwrap()).unwrap();
+        let mut e = Engine::default();
+        assert!(open_session(&mut e, &path).unwrap().is_empty());
+        let (sources, pool) = (&e.session().sources, &e.session().pool);
+        let first = pool.get(sources[0].id).unwrap();
+        assert!(sources.iter().all(|src| pool.get(src.id).is_some_and(|a| Arc::ptr_eq(a, first))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sources_playing_one_file_share_it_when_saved() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-shared-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Audio Files")).unwrap();
+        let audio = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.25; 480]] };
+        std::fs::write(dir.join("Audio Files/k.wav"), soundcraft_audio_io::encode(&audio, &EncodeOptions::default()).unwrap()).unwrap();
+        let mut s = Session::default();
+        for _ in 0..3 {
+            add_source(&mut s, "k", audio.clone(), Some("Audio Files/k.wav"), FileFormat::Wav);
+        }
+        s.sources.iter_mut().for_each(|src| src.unsaved = false);
+        let path = dir.join("Song.scraft").to_string_lossy().into_owned();
+        std::fs::write(&path, s.to_json().unwrap()).unwrap();
+        let mut e = Engine::default();
+        open_session(&mut e, &path).unwrap();
+        assert_eq!(save_session(&mut e, &path).unwrap(), 0);
+        assert!(e.session().sources.iter().all(|src| src.path == "Audio Files/k.wav"));
+        assert_eq!(save_copy(&e, &dir.join("copy/Song.scraft").to_string_lossy()).unwrap(), 1);
+        assert_eq!(std::fs::read_dir(dir.join("copy/Audio Files")).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
