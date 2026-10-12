@@ -8,15 +8,23 @@
 //! soundcraft-cli commands [FILTER]               list commands
 //! soundcraft-cli describe ID                     one command's details
 //! soundcraft-cli app [--port P] METHOD [JSON]     call a running app's control channel
-//! soundcraft-cli mcp [--connect PORT] [--demo]    MCP server on stdio
+//! soundcraft-cli mcp [--connect PORT] [--demo] [--automation-read-root DIR] [--automation-write-root DIR]
+//!                                                 MCP server on stdio. The two roots confine every file the
+//!                                                 agent's commands read (open, import, presets) and write
+//!                                                 (save, bounce, export) to those folders, links followed;
+//!                                                 a root left out grants none of its access. They run the
+//!                                                 in-process server, so they conflict with --connect.
 //! soundcraft-cli parity [--write PATH]            parity report (markdown)
 //! soundcraft-cli plugins                          list built-in plugins
 //! ```
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod automation_args;
+
 use serde_json::{Value, json};
 use soundcraft_automation::{Backend, Headless, Remote, mcp::Server};
 use soundcraft_engine::Engine;
+use soundcraft_engine::file_access::{self, AutomationRoots};
 use std::io::Write;
 use std::process::ExitCode;
 
@@ -356,15 +364,62 @@ fn app(args: &[String]) -> ExitCode {
     }
 }
 
+/// What `mcp` was asked for.
+struct McpArgs {
+    connect: Option<String>,
+    demo: bool,
+    roots: Option<std::sync::Arc<AutomationRoots>>,
+}
+
+/// Parse the `mcp` options up front: a malformed or misspelled root flag must not leave the
+/// server running unconfined.
+fn parse_mcp_args(args: &[String]) -> Result<McpArgs, String> {
+    let mut connect = None;
+    let mut demo = false;
+    let mut roots_args = automation_args::AutomationArgs::new(None, None);
+    let mut it = args.iter().cloned();
+    while let Some(a) = it.next() {
+        if roots_args.consume(&a, &mut it)? {
+            continue;
+        }
+        match a.as_str() {
+            "--connect" => connect = Some(it.next().ok_or("--connect needs a port or host:port")?),
+            "--demo" => demo = true,
+            other if other.starts_with("--automation-") => return Err(format!("unknown mcp option `{other}`")),
+            _ => {}
+        }
+    }
+    let roots = AutomationRoots::new(roots_args.read_root.as_deref(), roots_args.write_root.as_deref())?;
+    if roots.is_some() && connect.is_some() {
+        return Err("--automation-read-root and --automation-write-root confine the in-process server; a running app is not confined by them, \
+so drop --connect (or use --connect without the roots)"
+            .into());
+    }
+    Ok(McpArgs { connect, demo, roots })
+}
+
 fn mcp(args: &[String]) -> ExitCode {
+    let McpArgs { connect, demo, roots } = match parse_mcp_args(args) {
+        Ok(a) => a,
+        Err(err) => return fail(err),
+    };
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    let r = if let Some(port) = arg_value(args, "--connect") {
+    let r = if let Some(port) = connect {
         let mut s = Server::new(Remote::new(&port));
         s.serve(stdin.lock(), stdout.lock())
     } else {
-        let e = if args.iter().any(|a| a == "--demo") { soundcraft_engine::demo::demo_engine() } else { Engine::default() };
-        let mut s = Server::new(Headless::new(e));
+        // `--demo` is the operator's own choice, made before the roots come into force.
+        let e = if demo { soundcraft_engine::demo::demo_engine() } else { Engine::default() };
+        let mut h = Headless::new(e);
+        if let Some(roots) = roots {
+            // Every thread of this process, not only the server's: nothing reaches past the roots.
+            file_access::confine_process(roots.clone());
+            let show = |root: Option<&std::path::Path>| root.map_or_else(|| "none".to_string(), |r| r.display().to_string());
+            eprintln!("soundcraft-cli: files confined: read root {}, write root {}", show(roots.read_root()), show(roots.write_root()));
+            h = h.with_automation_roots(Some(roots));
+        }
+        let mut s = Server::new(h);
         s.serve(stdin.lock(), stdout.lock())
     };
     match r {
@@ -446,6 +501,7 @@ mod tests {
         let help = help_text();
         assert!(help.starts_with("soundcraft-cli info FILE"));
         assert!(help.ends_with("soundcraft-cli plugins                          list built-in plugins"));
+        assert!(help.contains("--automation-read-root DIR") && help.contains("--automation-write-root DIR"));
         assert!(!help.contains("```"));
         assert!(!help.contains("#![") && !help.contains("use serde_json"));
     }
