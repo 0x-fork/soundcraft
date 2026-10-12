@@ -259,6 +259,8 @@ pub struct SoundApp {
     pub(crate) docking_context: Option<egui::Context>,
     /// Transport simulation when there is no player (tests, offscreen renders).
     sim: Option<(Samples, Option<Samples>, Option<Range>)>,
+    /// When Record last found nothing to record on, and why: the Record buttons show it for a moment.
+    record_hint: Option<(f64, &'static str)>,
     pub quit_requested: bool,
     /// Reset floating-window positions next frame (Window › Arrange).
     pub arrange_request: bool,
@@ -318,6 +320,7 @@ impl SoundApp {
             theme_applied: None,
             docking_context: None,
             sim: None,
+            record_hint: None,
             quit_requested: false,
             arrange_request: false,
             touched: std::collections::HashSet::new(),
@@ -367,6 +370,13 @@ impl SoundApp {
 
     pub fn is_playing(&self) -> bool {
         self.engine.transport.playing
+    }
+
+    /// Why the last Record press did nothing, for a few seconds and while it still holds.
+    pub(crate) fn record_hint(&self) -> Option<&'static str> {
+        let (at, why) = self.record_hint?;
+        let fresh = self.last_frame.unwrap_or_default() - at < 4.0;
+        (fresh && !self.engine.session().tracks.iter().any(|t| t.mixer.record_arm)).then_some(why)
     }
 
     /// Current transport position (playhead while playing, else the edit insertion).
@@ -435,7 +445,13 @@ impl SoundApp {
     fn start_recording(&mut self) {
         let armed = self.engine.session().tracks.iter().any(|t| t.mixer.record_arm);
         if !armed {
-            self.ui.status = "Record-enable a track first (the red button in its header).".into();
+            let why = if self.engine.session().tracks.is_empty() {
+                "Nothing to record on yet: add a track with Track › New…, then click its R button."
+            } else {
+                "No track is record-enabled: click the R button on the track to record."
+            };
+            self.ui.status = why.into();
+            self.record_hint = Some((self.last_frame.unwrap_or_default(), why));
             return;
         }
         self.ensure_input();
@@ -996,6 +1012,29 @@ mod tests {
         app.handle_transport(0.25);
         assert!(!app.is_playing());
         assert_eq!(app.engine.transport.position, 0);
+    }
+
+    #[test]
+    fn record_with_nothing_armed_says_what_to_do() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        app.run("transport.record", json!({})).unwrap();
+        app.handle_transport(0.25);
+        assert!(!app.is_playing() && !app.engine.transport.recording);
+        assert!(app.record_hint().is_some_and(|why| why.contains("Track › New")), "{:?}", app.record_hint());
+
+        app.run("track.new", json!({"count": 1, "format": "mono"})).unwrap();
+        app.run("transport.record", json!({})).unwrap();
+        app.handle_transport(0.25);
+        assert!(app.record_hint().is_some_and(|why| why.contains("R button")), "{:?}", app.record_hint());
+        assert_eq!(Some(app.ui.status.as_str()), app.record_hint());
+        app.last_frame = Some(5.0);
+        assert_eq!(app.record_hint(), None, "the hint shows for a few seconds");
+
+        app.last_frame = None;
+        app.run("transport.record", json!({})).unwrap();
+        app.handle_transport(0.25);
+        app.run("mix.record_arm", json!({})).unwrap();
+        assert_eq!(app.record_hint(), None, "arming a track answers the hint");
     }
 
     #[test]
