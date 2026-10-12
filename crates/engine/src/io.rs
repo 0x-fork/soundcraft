@@ -598,7 +598,7 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
     std::fs::create_dir_all(&dir).map_err(|err| EngineError::Io(format!("{}: {err}", dir.display())))?;
     // Atomic-ish write: temp file then rename.
     let tmp = p.with_extension("scraft.tmp");
-    if !overwrite && std::fs::read(&p).is_ok_and(|old| old != text.as_bytes()) {
+    if !overwrite && read_file(&p).is_ok_and(|old| old != text.as_bytes()) {
         back_up(&p);
     }
     replace_file(&tmp, &p, text.as_bytes())?;
@@ -706,15 +706,32 @@ fn store_wav(dir: &Path, stem: &str, bytes: &[u8]) -> Result<(String, bool)> {
     Err(EngineError::Io(format!("{}: no free file name for {stem}", dir.display())))
 }
 
+/// Read a whole file. Only a regular file qualifies: a device or a pipe named by a session or a
+/// command would never end or never answer. Errors name the file.
+pub fn read_file(path: impl AsRef<Path>) -> Result<Vec<u8>> {
+    let path = path.as_ref();
+    let err = |err: std::io::Error| EngineError::Io(format!("{}: {err}", path.display()));
+    if !std::fs::metadata(path).map_err(err)?.is_file() {
+        return Err(EngineError::Io(format!("{}: not a regular file", path.display())));
+    }
+    std::fs::read(path).map_err(err)
+}
+
+/// [`read_file`] as UTF-8 text.
+pub fn read_text(path: impl AsRef<Path>) -> Result<String> {
+    let path = path.as_ref();
+    String::from_utf8(read_file(path)?).map_err(|err| EngineError::Io(format!("{}: {err}", path.display())))
+}
+
 /// Open a `.scraft` session and decode its audio files (missing files are reported, not fatal).
 pub fn open_session(e: &mut Engine, path: &str) -> Result<Vec<String>> {
-    let text = std::fs::read_to_string(path).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+    let text = read_text(path)?;
     let mut s = Session::from_json(&text).map_err(|err| EngineError::Io(err.to_string()))?;
     let dir = Path::new(path).parent().map(Path::to_path_buf).unwrap_or_default();
     let mut missing = Vec::new();
     for src in s.sources.clone() {
         let p = if Path::new(&src.path).is_absolute() { PathBuf::from(&src.path) } else { dir.join(&src.path) };
-        match std::fs::read(&p) {
+        match read_file(&p) {
             Ok(bytes) => {
                 if let Err(err) = load_source_audio(&mut s, src.id, &bytes, p.extension().and_then(|x| x.to_str())) {
                     missing.push(format!("{}: {err}", p.display()));
@@ -932,8 +949,9 @@ pub fn add_recording(e: &mut Engine, start: Samples, takes: Vec<(TrackId, PathBu
     let before = e.session_arc();
     let mut out = Vec::new();
     for (tid, path) in takes {
-        let read = std::fs::read(&path).map_err(|x| x.to_string()).and_then(|b| soundcraft_audio_io::decode(&b, None).map_err(|x| x.to_string()));
-        let Ok((_, buf)) = read.inspect_err(|err| e.message(format!("{}: {err}", path.display()))) else { continue };
+        let read =
+            read_file(&path).and_then(|b| soundcraft_audio_io::decode(&b, None).map_err(|err| EngineError::Io(format!("{}: {err}", path.display()))));
+        let Ok((_, buf)) = read.inspect_err(|err| e.message(err.to_string())) else { continue };
         let s = e.session_mut();
         if s.track(tid).is_none() {
             continue;
@@ -1210,6 +1228,36 @@ mod save_tests {
         let a = std::fs::read(dir.join(&paths[0])).unwrap();
         let b = std::fs::read(dir.join(&paths[1])).unwrap();
         assert_ne!(a, b);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod pipe_tests {
+    use super::*;
+
+    #[test]
+    fn a_pipe_named_as_media_is_refused_not_waited_on() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-pipe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("pipe.wav");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        let mut s = Session::default();
+        let audio = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.0; 10]] };
+        add_source(&mut s, "pipe", audio, Some(&fifo.to_string_lossy()), FileFormat::Wav);
+        let path = dir.join("Song.scraft").to_string_lossy().into_owned();
+        std::fs::write(&path, s.to_json().unwrap()).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let pipe = fifo.to_string_lossy().into_owned();
+        std::thread::spawn(move || {
+            let mut e = Engine::default();
+            let imported = e.execute("file.import_audio", &json!({"path": pipe})).is_ok();
+            let _ = tx.send((imported, open_session(&mut e, &path).map_err(|err| err.to_string())));
+        });
+        let (imported, opened) = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(!imported);
+        assert_eq!(opened.unwrap(), [fifo.display().to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

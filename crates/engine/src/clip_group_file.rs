@@ -82,7 +82,7 @@ pub fn export(e: &Engine, ids: &[ClipId], path: &str) -> Result<usize> {
 /// are made when the session runs out). Returns the ids of the placed clips.
 pub fn import(e: &mut Engine, path: &str, first: Option<TrackId>, at: Samples) -> Result<Vec<ClipId>> {
     let id = "file.import_clip_groups";
-    let text = std::fs::read_to_string(path).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+    let text = crate::io::read_text(path)?;
     let file: GroupFile = serde_json::from_str(&text).map_err(|err| EngineError::BadParams(id.into(), format!("not a clip group file: {err}")))?;
     if file.format != FORMAT {
         return Err(EngineError::BadParams(id.into(), "not a SoundCraft clip group file".into()));
@@ -98,7 +98,7 @@ pub fn import(e: &mut Engine, path: &str, first: Option<TrackId>, at: Samples) -
         if !full.starts_with(&dir) || rel.contains("..") {
             return Err(EngineError::BadParams(id.into(), format!("audio path escapes the group folder: {rel}")));
         }
-        let bytes = std::fs::read(&full).map_err(|err| EngineError::Io(format!("{}: {err}", full.display())))?;
+        let bytes = crate::io::read_file(&full).map_err(|err| EngineError::Io(format!("{}: {err}", full.display())))?;
         let (_, buf) = soundcraft_audio_io::decode(&bytes, Some("wav")).map_err(|err| EngineError::Io(format!("{rel}: {err}")))?;
         decoded.insert(*old, (rel.clone(), buf));
     }
