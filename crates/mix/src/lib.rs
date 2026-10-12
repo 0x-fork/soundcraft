@@ -214,6 +214,10 @@ struct Strip {
     outbuf: Vec<Vec<f32>>,
 }
 
+/// Most latency delay compensation handles: 2^20 samples, about 22 s at 48 kHz. A strip reports
+/// at most this, whatever its plugins claim, so a bogus value can't stall offline renders.
+const MAX_LATENCY: usize = 1 << 20;
+
 /// A multichannel delay line (samples), resized only when the delay changes.
 #[derive(Default)]
 struct DelayLine {
@@ -224,7 +228,7 @@ struct DelayLine {
 
 impl DelayLine {
     fn set(&mut self, len: usize, ch: usize) {
-        let len = len.min(1 << 20);
+        let len = len.min(MAX_LATENCY);
         if len != self.len || self.bufs.len() != ch {
             self.len = len;
             self.idx = 0;
@@ -933,7 +937,7 @@ fn process_strip(
         }
     }
     strip.gr = gr;
-    strip.latency = latency;
+    strip.latency = latency.min(MAX_LATENCY);
     let auto_mute = t.mixer.automation_mode.reads() && t.lane(&AutoParam::Mute).is_some_and(|l| l.value_at(pos, 0.0) >= 0.5);
     let soloed_out = any_solo && !t.mixer.solo && !t.mixer.solo_safe && !receives_solo(s, t);
     strip.muted = t.mixer.mute || auto_mute || soloed_out;
@@ -1400,7 +1404,7 @@ fn note_insert_latency(t: &Track, strip: &mut Strip, pos: Samples) {
         apply_params(slot, ins, t, i, pos);
         latency = latency.saturating_add(slot.plugin.latency());
     }
-    strip.latency = latency;
+    strip.latency = latency.min(MAX_LATENCY);
 }
 
 fn apply_params(slot: &mut PluginSlot, ins: &soundcraft_model::Insert, t: &Track, i: usize, pos: Samples) {
@@ -1805,29 +1809,28 @@ impl RangeRender {
         }
     }
 
-    /// The next stretch of the mix of `s` (the session given to [`RangeRender::new`]) as
-    /// `(channels, n)`: the first `n` samples of each channel. `None` once the range is done.
+    /// Renders one more block of the mix of `s` (the session given to [`RangeRender::new`]) and
+    /// returns it as `(channels, n)`: the next `n` samples of the range lead each channel (none
+    /// while the mix's latency is still being skipped). `None` once the range is done.
     pub fn next_block(&mut self, s: &Session) -> Option<(&[Vec<f32>], usize)> {
-        while self.done < self.total {
-            let n = (self.total - self.done).min(self.eng.max_block());
-            self.render(s, self.start + self.done as i64, n);
-            if self.done == 0 {
-                // The first block tells the mix's latency: render that much more and drop the head.
-                self.latency = if self.bus.is_some() { self.eng.track_latency } else { self.eng.latency };
-                self.total = self.total.saturating_add(self.latency);
-            }
-            let skip = self.latency.saturating_sub(self.done).min(n);
-            self.done += n;
-            if skip < n {
-                if skip > 0 {
-                    for c in &mut self.tmp {
-                        c.copy_within(skip..n, 0);
-                    }
-                }
-                return Some((&self.tmp, n - skip));
+        if self.done >= self.total {
+            return None;
+        }
+        let n = (self.total - self.done).min(self.eng.max_block());
+        self.render(s, self.start + self.done as i64, n);
+        if self.done == 0 {
+            // The first block tells the mix's latency: render that much more and drop the head.
+            self.latency = if self.bus.is_some() { self.eng.track_latency } else { self.eng.latency };
+            self.total = self.total.saturating_add(self.latency);
+        }
+        let skip = self.latency.saturating_sub(self.done).min(n);
+        self.done += n;
+        if skip > 0 && skip < n {
+            for c in &mut self.tmp {
+                c.copy_within(skip..n, 0);
             }
         }
-        None
+        Some((&self.tmp, n - skip))
     }
 }
 
@@ -2364,20 +2367,64 @@ mod tests {
         let mut send = soundcraft_model::SendSlot::new(Route::Bus(bus));
         send.level_db = 0.0;
         tr.mixer.sends[0] = Some(send);
-        assert!(soundcraft_dsp::create("maximizer").unwrap().latency() > 16);
+        let latency = soundcraft_dsp::create("maximizer").unwrap().latency();
+        assert!(latency > 16);
         for source in [None, Some(bus)] {
             for block in [16, 100, 512] {
                 let mut got = Vec::new();
+                let mut skipped = 0;
                 let mut render = RangeRender::new(&s, source, Range::new(900, 2900), block);
                 while let Some((chunk, n)) = render.next_block(&s) {
                     assert!(n <= block);
+                    skipped += usize::from(n == 0);
                     got.extend_from_slice(&chunk[0][..n]);
                 }
                 assert_eq!(got.len(), 2000, "{source:?} block {block}");
+                assert_eq!(skipped, latency / block, "{source:?} block {block}");
                 let peak = got.iter().enumerate().max_by(|a, b| a.1.abs().total_cmp(&b.1.abs())).map(|(i, _)| i);
                 assert_eq!(peak, Some(100), "{source:?} block {block}");
             }
         }
+    }
+
+    #[test]
+    fn a_plugins_bogus_latency_is_capped() {
+        struct Latent(Box<dyn Plugin>);
+        impl Plugin for Latent {
+            fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+                self.0.info()
+            }
+            fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+                self.0.prepare(sr, mb, ch);
+            }
+            fn reset(&mut self) {
+                self.0.reset();
+            }
+            fn set_param(&mut self, id: &str, v: f32) -> bool {
+                self.0.set_param(id, v)
+            }
+            fn param(&self, id: &str) -> Option<f32> {
+                self.0.param(id)
+            }
+            fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+                self.0.process(io, frames);
+            }
+            fn latency(&self) -> usize {
+                u32::MAX as usize
+            }
+        }
+        let (mut s, t) = session_with_dc(0.5, 48_000);
+        let aux = s.add_track(TrackKind::Aux, ChannelFormat::Mono, None);
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        for track in [t, aux] {
+            s.track_mut(track).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.latent"));
+            let mut gain = soundcraft_dsp::create("gain").unwrap();
+            gain.prepare(48_000.0, 512, 1);
+            eng.adopt(vec![PreparedInstance { track, slot: 0, id: "clap:test.latent".into(), ch: 1, plugin: Box::new(Latent(gain)) }]);
+        }
+        render_block(&mut eng, &s, 0);
+        assert_eq!((eng.track_latency, eng.latency), (MAX_LATENCY, 2 * MAX_LATENCY));
     }
 
     #[test]
