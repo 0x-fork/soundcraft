@@ -893,7 +893,9 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
             let resp = ui
                 .interact(kr.expand(3.0), ui.id().with(("instrument", id.0)), Sense::click())
                 .on_hover_text(format!("Instrument: {name} (click to change or open its editor)"));
-            egui::Popup::menu(&resp).show(|ui| crate::mix_window::instrument_menu(app, ui, id));
+            egui::Popup::menu(&resp)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| crate::mix_window::instrument_menu(app, ui, id));
         }
     }
     if h < 30.0 {
