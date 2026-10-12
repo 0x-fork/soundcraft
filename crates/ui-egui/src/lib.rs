@@ -264,6 +264,7 @@ pub struct SoundApp {
     pub arrange_request: bool,
     /// Tracks whose automation was touched during this pass (Touch/Latch writing).
     touched: std::collections::HashSet<TrackId>,
+    /// The pass's last point; `i64::MIN` after a stop or a jump, so the next point erases nothing it skipped.
     last_write_at: Samples,
     pub frame_ms: f32,
     last_frame: Option<f64>,
@@ -383,6 +384,7 @@ impl SoundApp {
         }
         self.engine.transport.playing = true;
         self.engine.transport.position = from;
+        self.last_write_at = i64::MIN;
         // A fresh start resumes the playhead follow: clear a manual hold and
         // re-sync the follow tracker so the current view is not mistaken for
         // an outside move on the first frame.
@@ -603,23 +605,21 @@ impl SoundApp {
     }
 
     /// While playing, record volume automation from fader positions for tracks in Write mode, and
-    /// for Touch/Latch tracks whose fader is (or, for Latch, was) being moved. One undo step per pass.
+    /// for Touch/Latch tracks whose fader is (or, for Latch, was) being moved. Each point replaces the
+    /// automation since the previous one, and Stop writes a last point. One undo step per pass.
     fn write_automation(&mut self, ctx: &egui::Context) {
         use soundcraft_model::AutomationMode as M;
-        if !self.is_playing() {
-            if !self.touched.is_empty() {
-                self.touched.clear();
-                self.engine.end_merge();
-            }
+        let playing = self.is_playing();
+        if !playing && self.touched.is_empty() {
             self.last_write_at = i64::MIN;
             return;
         }
-        let pos = self.position();
+        let pos = self.engine.transport.position;
         let step = self.engine.session().sample_rate.samples(0.02);
-        if !automation_step_due(pos, self.last_write_at, step) {
+        if playing && !automation_step_due(pos, self.last_write_at, step) {
             return;
         }
-        self.last_write_at = pos;
+        let from = std::mem::replace(&mut self.last_write_at, if playing { pos } else { i64::MIN });
         let dragging = ctx.input(|i| i.pointer.any_down());
         let fader_track = match &self.gesture {
             Some(Gesture::Fader { track, .. }) => Some(*track),
@@ -644,11 +644,15 @@ impl SoundApp {
             .collect();
         for (t, v) in writes {
             self.touched.insert(t);
-            let _ = self.engine.execute_merged(
-                "automation.set_point",
-                &serde_json::json!({"track": t.0, "param": "volume", "at": pos, "value": v}),
-                "automation_pass",
-            );
+            let mut point = serde_json::json!({"track": t.0, "param": "volume", "at": pos, "value": v});
+            if from != i64::MIN {
+                point["from"] = from.into();
+            }
+            let _ = self.engine.execute_merged("automation.set_point", &point, "automation_pass");
+        }
+        if !playing {
+            self.touched.clear();
+            self.engine.end_merge();
         }
     }
 
@@ -718,6 +722,7 @@ impl SoundApp {
                         if let Some(sim) = &mut self.sim {
                             sim.0 = at;
                         }
+                        self.last_write_at = i64::MIN;
                     }
                     self.engine.transport.position = at;
                 }
@@ -1058,6 +1063,46 @@ mod tests {
     #[test]
     fn automation_write_fires_after_loop_wrap() {
         assert!(automation_step_due(0, 1_000_000, 960));
+    }
+
+    #[test]
+    fn a_write_pass_replaces_the_automation_it_plays_over() {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let fader = app.engine.session().track_by_name("Kick").unwrap().mixer.volume_db;
+        let q = i64::from(app.engine.session().sample_rate.hz()) / 4;
+        // The old ride: a point every 10 ms for 3 s.
+        for at in (0..12 * q).step_by(usize::try_from(q / 25).unwrap()) {
+            app.run("automation.set_point", json!({"track": "Kick", "at": at, "value": -30.0})).unwrap();
+        }
+        app.run("mix.automation_mode", json!({"tracks": ["Kick"], "mode": "write"})).unwrap();
+        app.run("transport.locate", json!({"at": 0})).unwrap();
+        app.run("transport.play", json!({})).unwrap();
+        // Passes a quarter second apart, sparse like a covered window's.
+        let ctx = egui::Context::default();
+        let pass = |app: &mut SoundApp| {
+            app.handle_transport(0.25);
+            app.write_automation(&ctx);
+        };
+        pass(&mut app);
+        pass(&mut app);
+        // Two jumps: the stretches they skip keep the old ride.
+        app.run("transport.locate", json!({"at": 4 * q})).unwrap();
+        pass(&mut app);
+        app.run("edit.select", json!({"tracks": ["Kick"], "start": 7 * q, "end": 11 * q})).unwrap();
+        app.run("transport.play_selection", json!({})).unwrap();
+        pass(&mut app);
+        app.handle_transport(0.25);
+        app.run("transport.stop", json!({})).unwrap();
+        app.handle_transport(0.0);
+        app.write_automation(&ctx);
+        let lane = app.engine.session().track_by_name("Kick").unwrap().lane(&soundcraft_model::AutoParam::Volume).unwrap();
+        let values = |from, to| lane.points.iter().filter(|p| (from..=to).contains(&p.at)).map(|p| p.value).collect::<Vec<_>>();
+        assert_eq!(values(q, 2 * q), [fader; 2]);
+        assert_eq!(lane.value_at(3 * q, 0.0), -30.0);
+        assert_eq!(lane.value_at(6 * q, 0.0), -30.0);
+        // Stop writes the last point, at 9q.
+        assert_eq!(values(8 * q, 9 * q), [fader; 2]);
+        assert_eq!(lane.value_at(10 * q, 0.0), -30.0);
     }
 
     #[test]
