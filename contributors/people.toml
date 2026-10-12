@@ -40,3 +40,7 @@ sync_github_name = true
 real_name = "Vikram Bhaskaran"
 display_name = "Vikram Bhaskaran"
 sync_github_name = false
+
+[people.Silvertree2010]
+display_name = "Netter"
+sync_github_name = false
