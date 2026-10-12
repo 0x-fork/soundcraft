@@ -153,6 +153,14 @@ pub fn draw(painter: &Painter, r: Rect, name: &str, c: Color32) {
                 .collect();
             painter.add(Shape::line(pts, s));
         }
+        "tab_transient" => {
+            painter.line_segment([p(r, 0.08, 0.5), p(r, 0.3, 0.5)], s);
+            painter.add(Shape::convex_polygon(vec![p(r, 0.42, 0.5), p(r, 0.28, 0.36), p(r, 0.28, 0.64)], c, Stroke::NONE));
+            painter.line_segment([p(r, 0.5, 0.16), p(r, 0.5, 0.84)], s);
+            for (x, h) in [(0.64, 0.32), (0.78, 0.2), (0.92, 0.1)] {
+                painter.line_segment([p(r, x, 0.5 - h), p(r, x, 0.5 + h)], s);
+            }
+        }
         _ => {
             painter.rect_stroke(r.shrink(r.width() * 0.25), 1.0, s, egui::StrokeKind::Middle);
         }

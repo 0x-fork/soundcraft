@@ -150,7 +150,7 @@ fn tools(app: &mut SoundApp, ui: &mut Ui) {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let e = app.engine.session().edit.clone();
                 let toggles: [(&str, &str, bool, &str); 5] = [
-                    ("options.tab_to_transient", "selector", e.tab_to_transient, "Tab to Transient"),
+                    ("options.tab_to_transient", "tab_transient", e.tab_to_transient, "Tab to Transient"),
                     ("options.link_timeline_edit", "link", e.link_timeline_edit, "Link Timeline and Edit Selection"),
                     ("options.link_track_edit", "link", e.link_track_edit, "Link Track and Edit Selection"),
                     ("options.mirrored_midi", "note", e.mirrored_midi, "Mirrored MIDI Editing"),
