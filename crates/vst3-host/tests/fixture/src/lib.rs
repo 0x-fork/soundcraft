@@ -52,7 +52,7 @@ fn audio_bus(bus: *mut BusInfo, dir: BusDirection, name: &str) {
     b.channelCount = 2;
     copy_c16(name, &mut b.name);
     b.busType = BusTypes_::kMain as BusType;
-    b.flags = BusInfo_::BusFlags_::kDefaultActive;
+    b.flags = BusInfo_::BusFlags_::kDefaultActive as _;
 }
 
 unsafe fn channels<'a>(bus: &AudioBusBuffers, frames: usize) -> Vec<&'a mut [f32]> {
@@ -461,7 +461,7 @@ impl IComponentTrait for Synth {
             b.channelCount = 16;
             copy_c16("Notes", &mut b.name);
             b.busType = BusTypes_::kMain as BusType;
-            b.flags = BusInfo_::BusFlags_::kDefaultActive;
+            b.flags = BusInfo_::BusFlags_::kDefaultActive as _;
             return kResultOk;
         }
         kInvalidArgument
