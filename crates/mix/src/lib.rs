@@ -155,6 +155,24 @@ pub struct StripMeter {
     pub peaks: Vec<f32>,
     /// Gain reduction of the first dynamics insert, dB.
     pub gain_reduction_db: f32,
+    pub plugin_failures: PluginFailures,
+}
+
+/// How often a strip's plugins were taken out of the signal path for putting out NaN or infinity.
+/// Each stays out until the engine is next reset (playback starts or stops).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PluginFailures {
+    /// It only grows.
+    pub count: u32,
+    /// The slot of the latest: an insert index or [`INSTRUMENT_SLOT`].
+    pub last: usize,
+}
+
+impl PluginFailures {
+    fn record(&mut self, slot: usize) {
+        self.count = self.count.wrapping_add(1);
+        self.last = slot;
+    }
 }
 
 impl StripMeter {
@@ -163,6 +181,7 @@ impl StripMeter {
         self.peak = o.peak;
         self.peaks.clone_from(&o.peaks);
         self.gain_reduction_db = o.gain_reduction_db;
+        self.plugin_failures = o.plugin_failures;
     }
 
     fn measure(&mut self, bufs: &[Vec<f32>], frames: usize, gr: f32) {
@@ -191,6 +210,7 @@ struct PluginSlot {
     plugin: Box<dyn Plugin>,
     /// Last values pushed to the plugin, in the insert's parameter-map order.
     applied: Vec<f32>,
+    failed: bool,
 }
 
 struct Strip {
@@ -217,6 +237,7 @@ struct Strip {
     align_pre: DelayLine,
     out_extra: DelayLine,
     outbuf: Vec<Vec<f32>>,
+    failures: PluginFailures,
 }
 
 /// A multichannel delay line (samples), resized only when the delay changes.
@@ -287,6 +308,7 @@ impl Strip {
             align_pre: DelayLine::default(),
             out_extra: DelayLine::default(),
             outbuf: Vec::new(),
+            failures: PluginFailures::default(),
         }
     }
 }
@@ -365,7 +387,7 @@ impl SlotCtx<'_> {
             let state = if third { ins.state_bytes() } else { None };
             create_instance(&ins.plugin, state.as_deref(), self.sr, self.mb, ch).map(|n| n.plugin)
         }?;
-        Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new() })
+        Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new(), failed: false })
     }
 }
 
@@ -455,10 +477,12 @@ impl MixEngine {
         for s in self.strips.values_mut() {
             for p in s.plugins.iter_mut().flatten() {
                 p.plugin.reset();
+                p.failed = false;
             }
             if let Some(i) = &mut s.instrument {
                 i.plugin.all_notes_off();
                 i.plugin.reset();
+                i.failed = false;
             }
             s.held.clear();
         }
@@ -668,9 +692,13 @@ impl MixEngine {
                     if let (Some(ins), Some(Some(slot))) = (ins, strip.plugins.get_mut(i))
                         && ins.active
                         && !ins.bypass
+                        && !slot.failed
                     {
                         apply_params(slot, ins, t, i, pos);
                         slot.plugin.process(&mut strip.buf, frames);
+                        if contain_failure(slot, &mut strip.buf, frames) {
+                            strip.failures.record(i);
+                        }
                     }
                 }
                 let v0 = volume_db_at(t, pos);
@@ -685,7 +713,9 @@ impl MixEngine {
                         }
                     }
                 }
-                self.meters.entry(t.id).or_default().measure(&self.main, frames, 0.0);
+                let m = self.meters.entry(t.id).or_default();
+                m.measure(&self.main, frames, 0.0);
+                m.plugin_failures = strip.failures;
             }
         }
         // Metronome: summed after the master fader, so it reaches the speakers without passing
@@ -728,7 +758,9 @@ impl MixEngine {
 
     /// Send, meter and pan a processed strip into the busses / main mix.
     fn route_strip(&mut self, t: &Track, strip: &mut Strip, pos: Samples, frames: usize) {
-        self.meters.entry(t.id).or_default().measure(&strip.buf, frames, strip.gr);
+        let m = self.meters.entry(t.id).or_default();
+        m.measure(&strip.buf, frames, strip.gr);
+        m.plugin_failures = strip.failures;
         let src_fmt = strip_format(t, strip.buf.len());
         let law = self.pan_law;
         for (i, snd) in t.mixer.sends.iter().enumerate() {
@@ -872,7 +904,7 @@ fn process_strip(
             }
         }
         TrackKind::Instrument | TrackKind::Midi => {
-            if let Some(inst) = &mut strip.instrument {
+            if let Some(inst) = strip.instrument.as_mut().filter(|i| !i.failed) {
                 // #152: push the instrument's stored parameter values into the live plugin
                 // before processing, the same way inserts do below. Without this, the values
                 // loaded from a session (or set via `mix.insert_state`) never reach the plugin
@@ -895,6 +927,9 @@ fn process_strip(
                         *x = 0.5 * (*x + *y);
                     }
                 }
+                if contain_failure(inst, &mut strip.buf, frames) {
+                    strip.failures.record(INSTRUMENT_SLOT);
+                }
             }
         }
         _ => {}
@@ -909,11 +944,15 @@ fn process_strip(
     let mut latency = 0usize;
     for (i, ins) in t.mixer.inserts.iter().enumerate() {
         let (Some(ins), Some(Some(slot))) = (ins, strip.plugins.get_mut(i)) else { continue };
-        if !ins.active || ins.bypass {
+        if !ins.active || ins.bypass || slot.failed {
             continue;
         }
         apply_params(slot, ins, t, i, pos);
         slot.plugin.process(&mut strip.buf, frames);
+        if contain_failure(slot, &mut strip.buf, frames) {
+            strip.failures.record(i);
+            continue;
+        }
         latency = latency.saturating_add(slot.plugin.latency());
         if gr == 0.0 {
             gr = slot.plugin.gain_reduction_db();
@@ -964,6 +1003,20 @@ fn process_strip(
             }
         }
     }
+}
+
+/// Silences a block the plugin filled with NaN or infinity and takes the plugin out until the
+/// next [`MixEngine::reset`]. True then.
+fn contain_failure(slot: &mut PluginSlot, buf: &mut [Vec<f32>], frames: usize) -> bool {
+    // A branch-free fold vectorizes; `all` runs about 8 times slower here.
+    if buf.iter().all(|c| c.get(..frames).unwrap_or(c).iter().fold(true, |ok, x| ok & x.is_finite())) {
+        return false;
+    }
+    for c in buf.iter_mut() {
+        c.iter_mut().take(frames).for_each(|x| *x = 0.0);
+    }
+    slot.failed = true;
+    true
 }
 
 /// Clip-effect parameters of a clip, or None when it has none or they are bypassed.
@@ -2005,6 +2058,11 @@ mod tests {
 
     fn session_with_dc(level: f32, frames: usize) -> (Session, TrackId) {
         let mut s = Session::default();
+        let t = add_dc_track(&mut s, level, frames);
+        (s, t)
+    }
+
+    fn add_dc_track(s: &mut Session, level: f32, frames: usize) -> TrackId {
         let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
         let buf = AudioBuffer { sample_rate: 48_000, channels: vec![vec![level; frames]] };
         s.pool.insert(SourceId(900), Arc::new(SourceAudio::new(buf)));
@@ -2012,7 +2070,7 @@ mod tests {
         if let Some(pl) = s.track_mut(t).and_then(|t| t.playlist_mut()) {
             pl.clips.push(Clip::audio(id, "dc", SourceId(900), 0, 0, frames as i64));
         }
-        (s, t)
+        t
     }
 
     #[test]
@@ -2197,6 +2255,73 @@ mod tests {
         render_block(&mut eng, &s, 21 * 512);
         assert_eq!(eng.take_retired().len(), 1);
         assert!(eng.drain_plugins().is_empty());
+    }
+
+    struct Nan(Box<dyn Plugin>);
+
+    impl Plugin for Nan {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.0.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.0.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.0.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.0.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.0.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            io.iter_mut().for_each(|c| c.iter_mut().take(frames).for_each(|x| *x = f32::NAN));
+        }
+    }
+
+    fn nan(track: TrackId, slot: usize, ch: usize) -> Vec<PreparedInstance> {
+        vec![PreparedInstance { track, slot, id: "clap:test.nan".into(), ch, plugin: Box::new(Nan(soundcraft_dsp::create("gain").unwrap())) }]
+    }
+
+    #[test]
+    fn an_insert_that_puts_out_nan_is_taken_out_until_the_next_reset() {
+        let (mut s, a) = session_with_dc(0.5, 48_000);
+        let b = add_dc_track(&mut s, 0.5, 48_000);
+        s.track_mut(a).unwrap().mixer.inserts[2] = Some(Insert::new("clap:test.nan"));
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        let both = render_block(&mut eng, &s, 0);
+        eng.adopt(nan(a, 2, 1));
+        let only_b = render_block(&mut eng, &s, 512);
+        assert!(only_b > 0.3 && (only_b - both / 2.0).abs() < 1e-6, "{only_b} vs {both}");
+        assert_eq!(eng.meters[&a].plugin_failures, PluginFailures { count: 1, last: 2 });
+        assert_eq!(eng.meters[&b].plugin_failures, PluginFailures::default());
+        assert_eq!(render_block(&mut eng, &s, 1024), both);
+        eng.reset();
+        assert_eq!(render_block(&mut eng, &s, 1536), only_b);
+        assert_eq!(eng.meters[&a].plugin_failures.count, 2);
+    }
+
+    #[test]
+    fn nan_from_an_instrument_or_a_master_insert_is_contained() {
+        let mut s = synth_session(-6.0);
+        let synth = s.tracks[0].id;
+        s.track_mut(synth).unwrap().instrument = Some(Insert::new("clap:test.nan"));
+        let b = add_dc_track(&mut s, 0.5, 48_000);
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        eng.adopt(nan(synth, INSTRUMENT_SLOT, 2));
+        let only_b = render_block(&mut eng, &s, 0);
+        assert!(only_b > 0.3, "{only_b}");
+        assert_eq!(eng.meters[&synth].plugin_failures, PluginFailures { count: 1, last: INSTRUMENT_SLOT });
+        assert_eq!(eng.meters[&b].plugin_failures, PluginFailures::default());
+        let m = s.add_track(TrackKind::Master, ChannelFormat::Stereo, None);
+        s.track_mut(m).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.nan"));
+        eng.adopt(nan(m, 0, 2));
+        assert_eq!(render_block(&mut eng, &s, 512), 0.0);
+        assert_eq!(eng.meters[&m].plugin_failures, PluginFailures { count: 1, last: 0 });
+        assert_eq!(render_block(&mut eng, &s, 1024), only_b);
     }
 
     #[test]

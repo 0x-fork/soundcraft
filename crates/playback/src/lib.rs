@@ -760,7 +760,7 @@ mod tests {
         let keep = TrackId(1);
         let stale = TrackId(2);
         let mut source = MeterSnapshot::default();
-        source.tracks.insert(keep, StripMeter { peak: [0.5, 0.25], peaks: vec![0.5, 0.25], gain_reduction_db: 3.0 });
+        source.tracks.insert(keep, StripMeter { peak: [0.5, 0.25], peaks: vec![0.5, 0.25], gain_reduction_db: 3.0, ..StripMeter::default() });
         source.main.peaks = vec![0.75, 0.5];
         let mut out = MeterSnapshot::default();
         out.tracks.insert(stale, StripMeter::default());

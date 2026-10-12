@@ -170,13 +170,12 @@ impl Plugin for AuPlugin {
                         if ch == 1 && au_ch >= 2 {
                             if let (Some(l), Some(r)) = (self.inst.output(0, n), self.inst.output(1, n)) {
                                 for ((d, a), b) in dst.iter_mut().zip(l).zip(r) {
-                                    let v = 0.5 * (a + b);
-                                    *d = if v.is_finite() { v } else { 0.0 };
+                                    *d = 0.5 * (a + b);
                                 }
                             }
                         } else if let Some(src) = self.inst.output(c.min(au_ch.saturating_sub(1)), n) {
                             for (d, &s) in dst.iter_mut().zip(src) {
-                                *d = if s.is_finite() { s } else { 0.0 };
+                                *d = s;
                             }
                         }
                     }
