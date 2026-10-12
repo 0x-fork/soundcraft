@@ -179,9 +179,12 @@ fn write_takes(shared: &Shared, mut takes: Vec<TakeWriter>, channels: usize) -> 
     let (mut block, mut header_written) = (Vec::new(), Instant::now());
     loop {
         let stopping = !shared.armed.load(Ordering::Acquire);
-        block.clear();
+        // The ring holds interleaved samples and a pop can end mid-frame: write whole frames and
+        // keep the remainder for the next pop, so channels never shift.
         shared.ring.pop_all(&mut block);
-        takes.iter_mut().for_each(|t| t.write(&block, channels));
+        let whole = block.len() - block.len() % channels.max(1);
+        takes.iter_mut().for_each(|t| t.write(&block[..whole], channels));
+        block.drain(..whole);
         if stopping {
             break;
         }
