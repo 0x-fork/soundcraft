@@ -606,10 +606,15 @@ impl SoundApp {
 
     /// While playing, record volume automation from fader positions for tracks in Write mode, and
     /// for Touch/Latch tracks whose fader is (or, for Latch, was) being moved. Each point replaces the
-    /// automation since the previous one, and Stop writes a last point. One undo step per pass.
+    /// automation since the previous one, and Stop writes a last point. A pass and whatever is
+    /// dragged during it, its fader included, are one undo step.
     fn write_automation(&mut self, ctx: &egui::Context) {
         use soundcraft_model::AutomationMode as M;
+        const PASS: &str = "automation_pass";
         let playing = self.is_playing();
+        let may_write =
+            playing && self.engine.session().tracks.iter().any(|t| matches!(t.mixer.automation_mode, M::Write | M::Touch | M::Latch | M::TouchLatch));
+        self.engine.hold_merge(may_write.then_some(PASS));
         if !playing && self.touched.is_empty() {
             self.last_write_at = i64::MIN;
             return;
@@ -648,7 +653,7 @@ impl SoundApp {
             if from != i64::MIN {
                 point["from"] = from.into();
             }
-            let _ = self.engine.execute_merged("automation.set_point", &point, "automation_pass");
+            let _ = self.engine.execute_merged("automation.set_point", &point, PASS);
         }
         if !playing {
             self.touched.clear();
@@ -1103,6 +1108,27 @@ mod tests {
         // Stop writes the last point, at 9q.
         assert_eq!(values(8 * q, 9 * q), [fader; 2]);
         assert_eq!(lane.value_at(10 * q, 0.0), -30.0);
+    }
+
+    #[test]
+    fn a_pass_and_the_fader_ride_driving_it_are_one_undo_step() {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let kick = app.engine.session().track_by_name("Kick").unwrap().id;
+        app.run("mix.automation_mode", json!({"tracks": ["Kick"], "mode": "write"})).unwrap();
+        app.run("transport.play", json!({})).unwrap();
+        let steps = app.engine.undo_history().len();
+        let ctx = egui::Context::default();
+        for frame in 0..60 {
+            app.handle_transport(1.0 / 60.0);
+            app.write_automation(&ctx);
+            // What the Mix window's fader sends while it is dragged.
+            let db = -10.0 + frame as f32 / 10.0;
+            app.engine.execute_merged("mix.volume", &json!({"track": kick.0, "db": db}), &format!("fader:{}", kick.0)).unwrap();
+        }
+        app.run("transport.stop", json!({})).unwrap();
+        app.handle_transport(0.0);
+        app.write_automation(&ctx);
+        assert_eq!(app.engine.undo_history().len(), steps + 1);
     }
 
     #[test]
