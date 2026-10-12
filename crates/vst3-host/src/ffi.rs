@@ -1780,10 +1780,10 @@ mod window {
             let mtm = MainThreadMarker::new().ok_or_else(|| "not on the main thread".to_string())?;
             let _app = NSApplication::sharedApplication(mtm);
             let rect = NSRect::new(NSPoint::new(200.0, 200.0), NSSize::new(w, h));
-            // Plugin editors are transient utility windows. In particular they must not be
+            // Plugin editors are transient windows. In particular they must not be
             // minimizable: minimized NSWindows become persistent thumbnails in the macOS Dock,
             // which made every editor visited in a session look like another running app.
-            let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::UtilityWindow;
+            let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
             // SAFETY: a freshly allocated window on the main thread; valid rect and style.
             let window = unsafe {
                 NSWindow::initWithContentRect_styleMask_backing_defer(NSWindow::alloc(mtm), rect, style, NSBackingStoreType::Buffered, false)
