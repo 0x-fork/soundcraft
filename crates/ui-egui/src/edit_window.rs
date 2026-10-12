@@ -10,14 +10,26 @@ use soundcraft_time::{GridValue, NoteValue, Range, Samples, TimeFormat, format_p
 
 pub const HEADER_W: f32 = 236.0;
 pub const COLUMN_W: f32 = 112.0;
+/// The row under the rulers that holds the column titles, when any column is shown.
+const COLUMN_TITLES_H: f32 = 16.0;
 
-/// Optional Edit-window columns (View › Edit Window Views) that are switched on.
-pub fn edit_columns(s: &Session) -> Vec<&'static str> {
+/// An optional Edit-window column: view id, menu label and title.
+type Column = (&'static str, &'static str, &'static str);
+
+const COLUMNS: [Column; 7] = [
+    ("instruments", "Instruments", "INSTRUMENT"),
+    ("inserts_ae", "Inserts A-E", "INSERTS A-E"),
+    ("inserts_fj", "Inserts F-J", "INSERTS F-J"),
+    ("sends_ae", "Sends A-E", "SENDS A-E"),
+    ("sends_fj", "Sends F-J", "SENDS F-J"),
+    ("io", "I/O", "I/O"),
+    ("comments", "Comments", "COMMENTS"),
+];
+
+/// Optional Edit-window columns (View › Edit Window Views) that are switched on, left to right.
+pub fn edit_columns(s: &Session) -> Vec<Column> {
     let all = s.edit.flag("edit_view.all");
-    ["io", "inserts_ae", "inserts_fj", "sends_ae", "sends_fj", "comments"]
-        .into_iter()
-        .filter(|c| all || s.edit.flag(&format!("edit_view.{c}")))
-        .collect()
+    COLUMNS.into_iter().filter(|c| all || s.edit.flag(&format!("edit_view.{}", c.0))).collect()
 }
 
 pub fn header_width(s: &Session) -> f32 {
@@ -200,7 +212,9 @@ fn main_area_content(app: &mut SoundApp, ui: &mut Ui) {
     {
         rulers.insert(i + 1, "tempo_editor".into());
     }
-    let rulers_h = rulers.iter().map(|r| ruler_height(r)).sum::<f32>() + 6.0;
+    let cols = edit_columns(app.engine.session());
+    let titles_h = if cols.is_empty() { 0.0 } else { COLUMN_TITLES_H };
+    let rulers_h = rulers.iter().map(|r| ruler_height(r)).sum::<f32>() + 6.0 + titles_h;
     let hscroll_h = 14.0;
     let hw = header_width(app.engine.session());
     let header = Rect::from_min_max(full.min, pos2(full.min.x + hw, full.max.y - hscroll_h));
@@ -210,6 +224,8 @@ fn main_area_content(app: &mut SoundApp, ui: &mut Ui) {
     ui.painter().rect_filled(full, 0.0, t.window_bg);
     scroll_and_zoom(app, ui, full, tl);
     draw_rulers(app, ui, rulers_rect, tl, &rulers);
+    views_button(app, ui, rulers_rect);
+    column_titles(ui, rulers_rect, &cols);
     // Tracks.
     let mut y = tl.min.y - app.edit_layout.scroll_y;
     app.edit_layout.rows.clear();
@@ -425,7 +441,7 @@ fn draw_rulers(app: &mut SoundApp, ui: &mut Ui, area: Rect, tl: Rect, rulers: &[
     for (i, id) in rulers.iter().enumerate() {
         let h = ruler_height(id);
         let row = Rect::from_min_max(pos2(tl.min.x, y0), pos2(tl.max.x, y0 + h));
-        let lab = Rect::from_min_max(pos2(area.min.x, y0), pos2(tl.min.x, y0 + h));
+        let lab = Rect::from_min_max(pos2(area.min.x, y0), pos2(area.min.x + HEADER_W, y0 + h));
         y0 += h;
         let painter = ui.painter().with_clip_rect(row);
         ui.painter().text(pos2(lab.max.x - 12.0, lab.center().y), Align2::RIGHT_CENTER, ruler_label(id), bold(11.0), t.ruler_text);
@@ -673,6 +689,51 @@ fn timebase_ruler(_ui: &Ui, painter: &egui::Painter, s: &Session, tl: Rect, row:
     }
 }
 
+/// Captions over the header columns, boxed in their own row under the rulers.
+fn column_titles(ui: &Ui, rulers: Rect, cols: &[Column]) {
+    if cols.is_empty() {
+        return;
+    }
+    let t = Tokens::current();
+    let line = Stroke::new(1.0, t.border);
+    let mut x = rulers.min.x + HEADER_W;
+    let end = x + cols.len() as f32 * COLUMN_W;
+    let row = Rect::from_min_max(pos2(x, rulers.max.y - COLUMN_TITLES_H - 3.0), pos2(end, rulers.max.y));
+    ui.painter().rect_filled(row, 0.0, t.panel_bg2);
+    ui.painter().hline(rulers.min.x..=end, row.min.y + 0.5, line);
+    ui.painter().hline(rulers.min.x..=end, row.max.y - 0.5, line);
+    ui.painter().vline(end - 0.5, row.y_range(), line);
+    for &(_, _, title) in cols {
+        ui.painter().vline(x + 0.5, row.y_range(), line);
+        ui.painter().text(pos2(x + COLUMN_W / 2.0, row.center().y), Align2::CENTER_CENTER, title, bold(10.0), t.section_label);
+        x += COLUMN_W;
+    }
+}
+
+/// The Edit window view selector: which columns sit beside the track headers.
+fn views_button(app: &mut SoundApp, ui: &mut Ui, rulers: Rect) {
+    let r = Rect::from_min_size(rulers.min + vec2(6.0, 5.0), vec2(50.0, 18.0));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
+    let resp = selector_box(&mut child, r.width(), r.height(), "Views", Tokens::current().text);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, child.is_enabled(), "Views"));
+    let resp = resp.on_hover_text("Columns beside the track headers: inserts, sends, I/O…");
+    egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        let shown = edit_columns(app.engine.session());
+        for (id, label, _) in COLUMNS {
+            if ui.add(egui::Button::new(label).selected(shown.iter().any(|c| c.0 == id))).clicked() {
+                let _ = app.run(&format!("view.edit_{id}"), json!({}));
+            }
+        }
+        ui.separator();
+        if ui.button("All").clicked() {
+            let _ = app.run("view.edit_all", json!({}));
+        }
+        if ui.button("Minimal").clicked() {
+            let _ = app.run("view.edit_minimal", json!({}));
+        }
+    });
+}
+
 // ---- track rows ------------------------------------------------------------------------------
 
 fn track_row(app: &mut SoundApp, ui: &mut Ui, id: TrackId, row: Rect, tl: Rect) {
@@ -684,7 +745,7 @@ fn track_row(app: &mut SoundApp, ui: &mut Ui, id: TrackId, row: Rect, tl: Rect) 
     let cols = edit_columns(app.engine.session());
     for (i, c) in cols.iter().enumerate() {
         let cr = Rect::from_min_size(pos2(head.max.x + i as f32 * COLUMN_W, row.min.y), vec2(COLUMN_W, row.height()));
-        header_column(app, ui, &track, c, cr);
+        header_column(app, ui, &track, c.0, cr);
     }
     let main_h = track.height.points();
     let lane = lane_rect(&track, row, tl);
@@ -978,7 +1039,12 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
     }
 }
 
-/// One optional Edit-window column for a track (I/O, inserts, sends, comments).
+/// A header column's own Ui, so its slots' ids can't collide with the track header's.
+fn column_ui(ui: &mut Ui, col: &str, r: Rect) -> Ui {
+    ui.new_child(egui::UiBuilder::new().id_salt(("edit_column", col.to_string())).max_rect(r))
+}
+
+/// One optional Edit-window column for a track (instrument, inserts, sends, I/O, comments).
 fn header_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, col: &str, r: Rect) {
     let t = Tokens::current();
     ui.painter().rect_filled(r, 0.0, t.panel_bg);
@@ -1005,32 +1071,23 @@ fn header_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, col: &str, r: R
                 text(ui, item(1), &format!("out: {}", route(&track.mixer.output)), t.text);
             }
         }
+        "instruments" => {
+            if track.kind == TrackKind::Instrument {
+                crate::mix_window::instrument_slot(app, &mut column_ui(ui, col, r), track, item(0));
+            }
+        }
         "inserts_ae" | "inserts_fj" => {
             let off = if col == "inserts_ae" { 0 } else { 5 };
+            let mut ui = column_ui(ui, col, r);
             for i in 0..5.min(rows) {
-                let name = track
-                    .mixer
-                    .inserts
-                    .get(off + i)
-                    .cloned()
-                    .flatten()
-                    .and_then(|x| soundcraft_dsp::plugin_info(&x.plugin).map(|p| p.name))
-                    .unwrap_or("");
-                text(ui, item(i), name, t.text);
+                crate::mix_window::insert_slot(app, &mut ui, track, off + i, item(i));
             }
         }
         "sends_ae" | "sends_fj" => {
             let off = if col == "sends_ae" { 0 } else { 5 };
+            let mut ui = column_ui(ui, col, r);
             for i in 0..5.min(rows) {
-                let s = track
-                    .mixer
-                    .sends
-                    .get(off + i)
-                    .cloned()
-                    .flatten()
-                    .map(|x| format!("{} {:.0}", route(&x.target), x.level_db.max(-99.0)))
-                    .unwrap_or_default();
-                text(ui, item(i), &s, t.text);
+                crate::mix_window::send_slot(app, &mut ui, track, off + i, item(i));
             }
         }
         _ => {
