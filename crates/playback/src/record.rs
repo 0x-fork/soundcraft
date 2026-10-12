@@ -70,6 +70,11 @@ impl CaptureRing {
     }
 }
 
+/// An input sample, or silence for NaN and infinities, which would poison the take and the mix.
+fn finite(x: f32) -> f32 {
+    if x.is_finite() { x } else { 0.0 }
+}
+
 struct Shared {
     armed: AtomicBool,
     ring: CaptureRing,
@@ -102,7 +107,7 @@ impl Shared {
     /// as silence before the next block, so the take keeps its timing.
     fn capture(&self, data: &[f32], owed: &mut usize) {
         *owed -= self.ring.push(*owed, |_| 0.0);
-        let kept = if *owed == 0 { self.ring.push(data.len(), |i| data.get(i).copied().unwrap_or(0.0)) } else { 0 };
+        let kept = if *owed == 0 { self.ring.push(data.len(), |i| data.get(i).copied().map_or(0.0, finite)) } else { 0 };
         *owed = owed.saturating_add(data.len() - kept);
         self.dropped.fetch_add(data.len() - kept, Ordering::Relaxed);
     }
@@ -351,6 +356,15 @@ mod tests {
         assert_eq!((owed, shared.dropped.load(Ordering::Relaxed)), (0, 2));
     }
 
+    #[test]
+    fn nan_and_infinite_input_records_as_silence() {
+        let shared = Shared::new(CaptureRing::new(8));
+        let (mut owed, mut out) = (0, Vec::new());
+        shared.capture(&[0.5, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.5], &mut owed);
+        shared.ring.pop_all(&mut out);
+        assert_eq!(out, [0.5, 0.0, 0.0, 0.0, -0.5]);
+    }
+
     fn recorder(shared: &Arc<Shared>) -> Recorder {
         Recorder {
             shared: Arc::clone(shared),
@@ -474,7 +488,7 @@ impl InputRing {
 
     pub fn push(&self, samples: &[f32]) {
         if let Ok(mut s) = self.state.try_lock() {
-            s.data.extend(samples.iter().copied());
+            s.data.extend(samples.iter().copied().map(finite));
             while s.data.len() > self.cap {
                 s.data.pop_front();
             }
@@ -568,5 +582,15 @@ mod ring_tests {
         let mut out = vec![vec![1.0f32; 16]];
         ring.pop_into(&mut out, 16, 48_000);
         assert!(out[0].iter().all(|v| *v == 0.0));
+    }
+
+    /// NaN and infinities from the device monitor as silence.
+    #[test]
+    fn monitor_silences_nan_and_infinite_input() {
+        let ring = InputRing::new(1, 48_000);
+        ring.push(&[0.5, f32::NAN, f32::INFINITY, -0.5, 0.0, 0.0, 0.0, 0.0]);
+        let mut out = vec![vec![1.0f32; 4]];
+        ring.pop_into(&mut out, 4, 48_000);
+        assert_eq!(out[0], [0.5, 0.0, 0.0, -0.5]);
     }
 }
