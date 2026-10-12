@@ -7,6 +7,7 @@
 pub mod control;
 pub mod credits;
 pub mod dialogs;
+pub mod docking;
 pub mod edit_window;
 pub mod extra_windows;
 pub mod fonts;
@@ -47,6 +48,9 @@ pub enum MainWindow {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct UiState {
+    pub docking: docking::Workspace,
+    #[serde(default = "docking::mix_default")]
+    pub mix_docking: docking::Workspace,
     pub window: MainWindow,
     pub show_tracks_list: bool,
     pub show_clip_list: bool,
@@ -102,6 +106,8 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         UiState {
+            docking: docking::Workspace::default(),
+            mix_docking: docking::mix_default(),
             window: MainWindow::Edit,
             show_tracks_list: true,
             show_clip_list: true,
@@ -214,6 +220,8 @@ pub struct SoundApp {
     pub dialogs: dialogs::Dialogs,
     pub meters: HashMap<TrackId, MeterDisplay>,
     pub main_meter: MeterDisplay,
+    /// Reused multichannel snapshot; populated at an adaptive rate by `logic`.
+    meter_snapshot: soundcraft_playback::MeterSnapshot,
     pub gesture: Option<Gesture>,
     pub edit_layout: edit_window::EditLayout,
     pub midi: midi_editor::MidiEditorState,
@@ -229,6 +237,8 @@ pub struct SoundApp {
     fonts_installed: bool,
     /// The palette last applied to the context (light?), so visuals are set only on a change.
     theme_applied: Option<bool>,
+    /// Last panel host context, used to cancel renderer-owned gestures on explicit replacement.
+    pub(crate) docking_context: Option<egui::Context>,
     /// Transport simulation when there is no player (tests, offscreen renders).
     sim: Option<(Samples, Option<Samples>, Option<Range>)>,
     pub quit_requested: bool,
@@ -239,6 +249,7 @@ pub struct SoundApp {
     last_write_at: Samples,
     pub frame_ms: f32,
     last_frame: Option<f64>,
+    last_meter_poll: f64,
     /// Movies for the Video window and Video track (decoded in the background).
     pub video: video_track::VideoPool,
 }
@@ -272,6 +283,7 @@ impl SoundApp {
             dialogs: dialogs::Dialogs::default(),
             meters: HashMap::new(),
             main_meter: MeterDisplay::default(),
+            meter_snapshot: soundcraft_playback::MeterSnapshot::default(),
             gesture: None,
             edit_layout: edit_window::EditLayout::default(),
             midi: midi_editor::MidiEditorState::default(),
@@ -286,6 +298,7 @@ impl SoundApp {
             fonts_ready: false,
             fonts_installed: false,
             theme_applied: None,
+            docking_context: None,
             sim: None,
             quit_requested: false,
             arrange_request: false,
@@ -293,6 +306,7 @@ impl SoundApp {
             last_write_at: i64::MIN,
             frame_ms: 0.0,
             last_frame: None,
+            last_meter_poll: f64::NEG_INFINITY,
             video: video_track::VideoPool::default(),
         }
     }
@@ -319,6 +333,9 @@ impl SoundApp {
                 if id == "options.scrolling" {
                     // Re-selecting a scrolling mode resumes the playhead follow.
                     self.edit_layout.follow_hold = false;
+                }
+                if id == "track.clear_clip_indicators" {
+                    self.meters.values_mut().chain([&mut self.main_meter]).for_each(|m| m.clip = false);
                 }
                 Ok(v)
             }
@@ -358,6 +375,8 @@ impl SoundApp {
 
     fn stop_play(&mut self) {
         if let Some(p) = &self.player {
+            // Half-speed is a separate command. Stop must not leave that rate for the next Play.
+            p.set_speed(1.0);
             p.stop();
         }
         if self.engine.transport.recording {
@@ -501,6 +520,12 @@ impl SoundApp {
             }
         }
         best.map(|(_, p)| p)
+    }
+
+    /// Whether the meters are live: while playing, and while armed or input-monitored tracks are heard.
+    fn meters_live(&self) -> bool {
+        self.engine.transport.playing
+            || (self.recorder.is_some() && self.engine.session().tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm))
     }
 
     /// Open the input device once (for recording and input monitoring) and feed the player.
@@ -716,7 +741,13 @@ impl SoundApp {
             if self.engine.transport.playing {
                 self.engine.transport.position = p.position();
             }
-            let snap = p.meters();
+            let now = self.last_frame.unwrap_or_default();
+            let meter_interval = if self.ui.window == MainWindow::Mix { 1.0 / 60.0 } else { 1.0 / 20.0 };
+            if now - self.last_meter_poll >= meter_interval {
+                p.copy_meters(&mut self.meter_snapshot);
+                self.last_meter_poll = now;
+            }
+            let snap = &self.meter_snapshot;
             for (id, m) in &snap.tracks {
                 let d = self.meters.entry(*id).or_default();
                 feed_meter(d, m.peak, m.gain_reduction_db, dt);
@@ -740,7 +771,7 @@ impl SoundApp {
                 self.stop_play();
             }
         }
-        if !self.engine.transport.playing {
+        if !self.meters_live() {
             for d in self.meters.values_mut() {
                 feed_meter(d, [0.0, 0.0], 0.0, dt);
             }
@@ -750,6 +781,9 @@ impl SoundApp {
 
     /// Per-frame logic: control channel, transport, document sync.
     pub fn logic(&mut self, ctx: &egui::Context) {
+        if ctx.current_pass_index() > 0 {
+            return;
+        }
         // Fonts set now take effect next frame, so draw only from the frame after.
         if !self.fonts_ready {
             if self.fonts_installed {
@@ -766,8 +800,7 @@ impl SoundApp {
             self.theme_applied = Some(light);
         }
         let now = ctx.input(|i| i.time);
-        let dt = self.last_frame.map_or(1.0 / 60.0, |t| (now - t) as f32).clamp(0.0, 0.25);
-        self.last_frame = Some(now);
+        let dt = self.last_frame.replace(now).map_or(1.0 / 60.0, |t| (now - t) as f32).clamp(0.0, 0.25);
         self.frame_ms = self.frame_ms * 0.9 + dt * 1000.0 * 0.1;
         control::drain(self, ctx);
         self.apply_editor_edits();
@@ -796,7 +829,12 @@ impl SoundApp {
         {
             self.ensure_input();
         }
-        if self.is_playing() || self.meters.values().any(|m| m.level[0] > 0.0001) || !self.pending_shots.is_empty() || !self.synthetic.is_empty() {
+        if self.meters_live() {
+            let hz = if self.ui.window == MainWindow::Mix { 60 } else { 30 };
+            ctx.request_repaint_after(std::time::Duration::from_millis(1000 / hz));
+        } else if self.meters.values().any(|m| m.level[0] > 0.0001) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(80));
+        } else if !self.pending_shots.is_empty() || !self.synthetic.is_empty() {
             ctx.request_repaint();
         }
         control::collect_screenshots(self, ctx);
@@ -971,6 +1009,16 @@ mod tests {
     }
 
     #[test]
+    fn clear_all_clip_indicators_clears_every_meter() {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let kick = app.engine.session().track_by_name("Kick").unwrap().id;
+        app.meters.entry(kick).or_default().clip = true;
+        app.main_meter.clip = true;
+        app.run("track.clear_clip_indicators", json!({})).unwrap();
+        assert!(!app.meters[&kick].clip && !app.main_meter.clip);
+    }
+
+    #[test]
     fn automation_first_pass_after_start_is_due_without_overflow() {
         // `last_write_at` starts (and resets) at `i64::MIN`: the previous
         // `(pos - last).abs()` panicked here in debug builds.
@@ -987,5 +1035,44 @@ mod tests {
     #[test]
     fn automation_write_fires_after_loop_wrap() {
         assert!(automation_step_due(0, 1_000_000, 960));
+    }
+
+    #[test]
+    fn ordinary_play_after_stop_is_full_speed() {
+        use serde_json::json;
+        let engine = soundcraft_engine::Engine::default();
+        let player = soundcraft_playback::Player::new(engine.session_arc());
+        let mut app = super::SoundApp::new(engine, Some(player), super::Services::default());
+        app.engine.execute("edit.select", &json!({"start": 0, "end": 48000})).unwrap();
+        app.engine.execute("options.loop_playback", &json!({"value": true})).unwrap();
+        app.engine.execute("options.pre_post_roll", &json!({"value": false})).unwrap();
+        let speed = |app: &super::SoundApp| app.player.as_ref().map(|p| p.speed()).unwrap_or(0.0);
+        assert!((speed(&app) - 1.0).abs() < 1e-3);
+
+        app.engine.execute("transport.half_speed", &json!({})).unwrap();
+        app.handle_transport(1.0 / 60.0);
+        assert!(app.is_playing());
+        assert!((speed(&app) - 0.5).abs() < 1e-3, "half-speed playback");
+
+        app.engine.execute("transport.stop", &json!({})).unwrap();
+        app.handle_transport(1.0 / 60.0);
+        assert!(!app.is_playing());
+        assert!((speed(&app) - 1.0).abs() < 1e-3, "stop restores full speed");
+
+        app.engine.execute("transport.play", &json!({})).unwrap();
+        app.handle_transport(1.0 / 60.0);
+        assert!(app.is_playing());
+        assert!((speed(&app) - 1.0).abs() < 1e-3, "ordinary play stays at full speed");
+
+        app.engine.execute("transport.stop", &json!({})).unwrap();
+        app.handle_transport(1.0 / 60.0);
+        app.engine.execute("options.loop_playback", &json!({"value": false})).unwrap();
+        app.engine.execute("transport.half_speed", &json!({})).unwrap();
+        app.handle_transport(1.0 / 60.0);
+        assert!((speed(&app) - 0.5).abs() < 1e-3);
+        app.player.as_ref().unwrap().stop();
+        app.handle_transport(1.0 / 60.0);
+        assert!(!app.is_playing());
+        assert!((speed(&app) - 1.0).abs() < 1e-3, "a half-speed pass that ends on its own restores full speed");
     }
 }
