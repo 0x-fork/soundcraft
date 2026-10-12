@@ -105,7 +105,7 @@ pub fn specs() -> Vec<CommandSpec> {
             insert_params
         ),
         cmd!("mix.insert_move", "Move Insert", [], None, "{track?, from, to}", has_selection, insert_move),
-        cmd!("mix.send", "Assign Send", [], None, "{track?, slot?: 0..9|a..j, bus: name, level_db?: 0, pre_fader?: false}", has_selection, send),
+        cmd!("mix.send", "Assign Send", [], None, "{track?, slot?: 0..9|a..j, bus: name, level_db?: 0 (kept when re-targeting), pre_fader?: false}", has_selection, send),
         cmd!("mix.send_remove", "Remove Send", [], None, "{track?, slot}", has_selection, |e, p| {
             let (t, slot) = track_slot(e, p, "mix.send_remove", SEND_SLOTS)?;
             if let Some(tr) = e.session_mut().track_mut(t)
@@ -390,15 +390,17 @@ fn send(e: &mut Engine, p: &Value) -> Result<Value> {
     let bus = str_param(p, "bus").ok_or_else(|| bad("mix.send", "`bus` required"))?.to_string();
     let t = tracks_required(e, "mix.send", p)?.first().copied().ok_or_else(|| bad("mix.send", "no track"))?;
     let explicit = slot_of(p, "slot", SEND_SLOTS);
-    let level = f32_or(p, "level_db", 0.0).clamp(-144.0, 12.0);
-    let pre = bool_or(p, "pre_fader", false);
     let s = e.session_mut();
     let bid = s.add_bus(&bus, soundcraft_model::ChannelFormat::Stereo);
     let tr = s.track_mut(t).ok_or_else(|| bad("mix.send", "no track"))?;
     let slot = explicit.or_else(|| tr.mixer.sends.iter().position(Option::is_none)).ok_or_else(|| bad("mix.send", "all send slots are in use"))?;
-    let mut sl = SendSlot::new(soundcraft_model::Route::Bus(bid));
-    sl.level_db = level;
-    sl.pre_fader = pre;
+    // Re-targeting an existing send keeps its level, pan, mute and pre/post setting.
+    let mut sl = match tr.mixer.sends.get(slot).cloned().flatten() {
+        Some(old) => SendSlot { target: soundcraft_model::Route::Bus(bid), ..old },
+        None => SendSlot::new(soundcraft_model::Route::Bus(bid)),
+    };
+    sl.level_db = f32_or(p, "level_db", sl.level_db).clamp(-144.0, 12.0);
+    sl.pre_fader = bool_or(p, "pre_fader", sl.pre_fader);
     if let Some(x) = tr.mixer.sends.get_mut(slot) {
         *x = Some(sl);
     }
@@ -790,5 +792,18 @@ mod tests {
             let delta = rms_db(&before[start..end], &after[start..end]);
             assert!(delta.abs() < 0.2, "{start}..{end} changed by {delta} dB");
         }
+    }
+
+    #[test]
+    fn retargeting_a_send_keeps_its_settings() {
+        let mut e = Engine::default();
+        e.execute("track.new", &json!({"count": 1, "name": "Gtr", "format": "mono"})).unwrap();
+        e.execute("mix.send", &json!({"track": "Gtr", "slot": 0, "bus": "Verb", "level_db": -9.0, "pre_fader": true})).unwrap();
+        e.execute("mix.send_level", &json!({"track": "Gtr", "slot": 0, "pan": 0.5, "mute": true})).unwrap();
+        e.execute("mix.send", &json!({"track": "Gtr", "slot": 0, "bus": "Delay"})).unwrap();
+        let sl = e.session().tracks[0].mixer.sends[0].clone().unwrap();
+        let delay = e.session().busses.iter().find(|b| b.name == "Delay").unwrap().id;
+        assert_eq!(sl.target, soundcraft_model::Route::Bus(delay));
+        assert_eq!((sl.level_db, sl.pan, sl.mute, sl.pre_fader), (-9.0, 0.5, true, true));
     }
 }
