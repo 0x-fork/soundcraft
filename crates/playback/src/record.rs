@@ -87,53 +87,113 @@ pub struct Recorder {
     writer: Option<std::thread::JoinHandle<Takes>>,
 }
 
+/// The input stream: device samples are converted to f32 in a scratch buffer allocated here (so
+/// the callback never allocates), then feed the monitor ring and, while armed, the capture.
+#[cfg(not(target_os = "freebsd"))]
+fn build_input<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    shared: &Arc<Shared>,
+    monitor: &Arc<InputRing>,
+) -> Result<cpal::Stream, cpal::BuildStreamError>
+where
+    T: cpal::SizedSample,
+    f32: cpal::FromSample<T>,
+{
+    use cpal::Sample;
+    use cpal::traits::DeviceTrait;
+    let sh = Arc::clone(shared);
+    let mon = Arc::clone(monitor);
+    let mut scratch = vec![0.0f32; 8192 * usize::from(config.channels).max(1)];
+    let chunk = scratch.len();
+    let mut owed = 0;
+    device.build_input_stream(
+        config,
+        move |data: &[T], _: &cpal::InputCallbackInfo| {
+            crate::mark_audio_thread();
+            for part in data.chunks(chunk) {
+                let Some(s) = scratch.get_mut(..part.len()) else { return };
+                for (o, x) in s.iter_mut().zip(part) {
+                    *o = f32::from_sample(*x);
+                }
+                mon.push(s);
+                if sh.armed.load(Ordering::Acquire) {
+                    sh.capture(s, &mut owed);
+                } else {
+                    owed = 0;
+                }
+            }
+        },
+        |e| {
+            // Possibly the audio thread (see `crate::mark_audio_thread`).
+            crate::mark_audio_thread();
+            log::warn!("input stream error: {e}");
+        },
+        None,
+    )
+}
+
 impl Recorder {
     /// Open the default input device. Errors when there is none (the caller shows a message).
-    #[cfg(not(target_os = "freebsd"))]
     pub fn open() -> Result<Recorder, String> {
-        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-        let host = cpal::default_host();
-        let device = host.default_input_device().ok_or("no audio input device")?;
+        Recorder::open_with(&crate::AudioConfig::default())
+    }
+
+    /// Open the input device `audio` chooses (else the default) at its chosen rate and buffer
+    /// size when the device offers them, else at the device's defaults. Integer devices (ASIO
+    /// drivers usually are) are converted to f32.
+    #[cfg(not(target_os = "freebsd"))]
+    pub fn open_with(audio: &crate::AudioConfig) -> Result<Recorder, String> {
+        use cpal::traits::{DeviceTrait, StreamTrait};
+        let host = crate::devices::host(audio);
+        let device = crate::devices::device(&host, audio.input.as_deref(), false).ok_or("no audio input device")?;
         #[allow(deprecated)]
         let name = device.name().unwrap_or_else(|_| "Input".into());
-        let cfg = device.default_input_config().map_err(|e| e.to_string())?;
-        if cfg.sample_format() != cpal::SampleFormat::F32 {
-            return Err(format!("unsupported input sample format {:?}", cfg.sample_format()));
+        // At the chosen rate when the device offers it, so input and output run together: the
+        // best format first, then the most channels.
+        let at_rate = audio.sample_rate.and_then(|r| {
+            device
+                .supported_input_configs()
+                .ok()?
+                .filter(|c| crate::devices::format_rank(c.sample_format()).is_some() && c.min_sample_rate().0 <= r && c.max_sample_rate().0 >= r)
+                .min_by_key(|c| (crate::devices::format_rank(c.sample_format()), std::cmp::Reverse(c.channels())))
+                .map(|c| c.with_sample_rate(cpal::SampleRate(r)))
+        });
+        let cfg = match at_rate {
+            Some(c) => c,
+            None => device.default_input_config().map_err(|e| e.to_string())?,
+        };
+        let format = cfg.sample_format();
+        if crate::devices::format_rank(format).is_none() {
+            return Err(format!("unsupported input sample format {format:?}"));
         }
-        let config = cfg.config();
+        let mut config = cfg.config();
+        config.buffer_size = crate::devices::buffer_size(audio.buffer_size, cfg.buffer_size());
         let channels = usize::from(config.channels).max(1);
         let ring = CaptureRing::new((config.sample_rate.0 as usize).saturating_mul(channels * RING_SECONDS).min(1 << 25));
         let shared = Arc::new(Shared { armed: AtomicBool::new(false), ring, dropped: AtomicUsize::new(0) });
-        let sh = Arc::clone(&shared);
         let monitor = InputRing::new(usize::from(config.channels), config.sample_rate.0);
-        let mon = Arc::clone(&monitor);
-        let mut owed = 0;
-        let stream = device
-            .build_input_stream(
-                &config,
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    crate::mark_audio_thread();
-                    mon.push(data);
-                    if sh.armed.load(Ordering::Acquire) {
-                        sh.capture(data, &mut owed);
-                    } else {
-                        owed = 0;
-                    }
-                },
-                |e| {
-                    // Possibly the audio thread (see `crate::mark_audio_thread`).
-                    crate::mark_audio_thread();
-                    log::warn!("input stream error: {e}");
-                },
-                None,
-            )
-            .map_err(|e| e.to_string())?;
+        let build = |config: &cpal::StreamConfig| match format {
+            cpal::SampleFormat::I32 => build_input::<i32>(&device, config, &shared, &monitor),
+            cpal::SampleFormat::I16 => build_input::<i16>(&device, config, &shared, &monitor),
+            _ => build_input::<f32>(&device, config, &shared, &monitor),
+        };
+        // The chosen buffer size first; if the device refuses it, its default.
+        let stream = match build(&config) {
+            Ok(s) => s,
+            Err(e) if config.buffer_size != cpal::BufferSize::Default => {
+                log::warn!("cannot open the input with buffer {:?}: {e}; using the device default", config.buffer_size);
+                config.buffer_size = cpal::BufferSize::Default;
+                build(&config).map_err(|e| e.to_string())?
+            }
+            Err(e) => return Err(e.to_string()),
+        };
         stream.play().map_err(|e| e.to_string())?;
         Ok(Recorder { monitor, shared, _stream: Some(stream), device_name: name, sample_rate: config.sample_rate.0, channels, writer: None })
     }
 
     #[cfg(target_os = "freebsd")]
-    pub fn open() -> Result<Recorder, String> {
+    pub fn open_with(_audio: &crate::AudioConfig) -> Result<Recorder, String> {
         Err("recording is not supported on this platform yet".into())
     }
 

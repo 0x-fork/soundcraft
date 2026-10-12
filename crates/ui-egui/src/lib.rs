@@ -83,6 +83,8 @@ pub struct UiState {
     pub show_workspace: bool,
     pub show_configurations: bool,
     pub show_playback_engine: bool,
+    /// The audio device choice (Setup › Playback Engine), kept with the preferences: per machine.
+    pub audio: soundcraft_playback::AudioConfig,
     pub show_io_setup: bool,
     pub show_shortcuts: bool,
     pub show_clip_effects: bool,
@@ -142,6 +144,7 @@ impl Default for UiState {
             show_workspace: false,
             show_configurations: false,
             show_playback_engine: false,
+            audio: soundcraft_playback::AudioConfig::default(),
             show_io_setup: false,
             show_shortcuts: false,
             show_clip_effects: false,
@@ -555,12 +558,32 @@ impl SoundApp {
             || (self.recorder.is_some() && self.engine.session().tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm))
     }
 
+    /// Reopens the audio devices with `ui.audio` (Setup › Playback Engine › Apply), keeping the
+    /// transport position. Plugin instances and their editors are recreated with the new player.
+    /// Refused while recording, which would lose the take.
+    pub fn apply_audio_config(&mut self) -> Result<(), String> {
+        if self.engine.transport.recording {
+            return Err("stop recording before changing the audio device".into());
+        }
+        let at = self.position();
+        if let Some(p) = &self.player {
+            p.stop();
+        }
+        // The input reopens on the next record or monitor with the new choice.
+        self.recorder = None;
+        self.recorder_failed = false;
+        let player = soundcraft_playback::Player::with_config(self.engine.session_arc(), &self.ui.audio);
+        player.locate(at);
+        self.player = Some(player);
+        Ok(())
+    }
+
     /// Open the input device once (for recording and input monitoring) and feed the player.
     fn ensure_input(&mut self) {
         if self.recorder.is_some() || self.recorder_failed || self.player.is_none() {
             return;
         }
-        match soundcraft_playback::record::Recorder::open() {
+        match soundcraft_playback::record::Recorder::open_with(&self.ui.audio) {
             Ok(r) => {
                 if let Some(p) = &self.player {
                     p.set_input(std::sync::Arc::clone(&r.monitor));
