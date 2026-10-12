@@ -644,19 +644,23 @@ fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: usize, r: Rec
                 regular(9.0),
                 if s.mute { t.mute } else { t.text },
             );
-            let (level_resp, entered) = editable_readout(
-                ui,
-                level_r,
-                ui.id().with(("send-value", id.0, slot)),
-                &format!("{} dB", db_text(s.level_db)),
-                &format!("{:.1}", s.level_db),
-                parse_db,
-                0.0,
-            );
-            if let Some(db) = entered {
-                let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "db": db}));
+            let letter = (b'A' + slot as u8) as char;
+            let shown = app.ui.send_window == Some((id, slot));
+            let level_resp = ui.interact(level_r, ui.id().with(("send-value", id.0, slot)), Sense::click_and_drag());
+            level_resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Send {letter} level")));
+            if shown {
+                ui.painter().rect_stroke(level_r.shrink(0.5), 1.0, Stroke::new(1.5, t.accent), StrokeKind::Inside);
             }
-            if level_resp.as_ref().is_some_and(egui::Response::dragged) {
+            let level = format!("{} dB", db_text(s.level_db));
+            ui.painter().with_clip_rect(level_r).text(level_r.center(), Align2::CENTER_CENTER, level, regular(9.0), t.counter_text);
+            if level_resp.clicked() {
+                if ui.input(|i| i.modifiers.alt) {
+                    let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "db": 0.0}));
+                } else {
+                    app.ui.send_window = (!shown).then_some((id, slot));
+                }
+            }
+            if level_resp.dragged() {
                 // Use this frame's pointer movement. `Response::drag_delta()` is cumulative, so
                 // applying it to the already-updated value made trackpad adjustment accelerate.
                 let (dy, fine) = ui.input(|i| (i.pointer.delta().y, i.modifiers.shift));
@@ -664,14 +668,11 @@ fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: usize, r: Rec
                 let _ =
                     app.engine.execute_merged("mix.send_level", &json!({"track": id.0, "slot": slot, "db": db}), &format!("send:{}:{slot}", id.0));
             }
-            if let Some(resp) = level_resp {
-                let _ = resp.clone().on_hover_text(format!(
-                    "Send {}: {} dB\nClick to type · drag vertically to adjust · Shift-drag for fine control · Alt-click for 0 dB · right-click for options",
-                    (b'A' + slot as u8) as char,
-                    db_text(s.level_db)
-                ));
-                resp.context_menu(|ui| send_options_menu(app, ui, id, slot, s));
-            }
+            let _ = level_resp.clone().on_hover_text(format!(
+                "Send {letter}: {} dB\nClick for the send fader · drag vertically to adjust · Shift-drag for fine control · Alt-click for 0 dB · right-click for options",
+                db_text(s.level_db)
+            ));
+            level_resp.context_menu(|ui| send_options_menu(app, ui, id, slot, s));
         }
         None => {
             ui.painter().circle_filled(pos2(r.min.x + 6.0, r.center().y), 1.5, t.text_dim);
@@ -700,6 +701,82 @@ fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: usize, r: Rec
             ui.strong(format!("Send {} · Choose destination", (b'A' + slot as u8) as char));
             send_route_menu(app, ui, id, slot, None);
         });
+    }
+}
+
+/// The Send window, as in Pro Tools: one send's fader, level, pan, Mute and Pre-fader. Clicking a
+/// send's level opens it, moves it to that send, or closes it, and so does Escape.
+pub(crate) fn send_window(app: &mut SoundApp, ctx: &egui::Context) {
+    // egui closes menus and drops text focus on Escape before this runs, so whether this Escape
+    // was theirs comes from the last frame. A dialog or the search on top takes it too.
+    let busy_id = egui::Id::new("send_window_escape");
+    let busy = ctx.data(|d| d.get_temp(busy_id)).unwrap_or(false) || app.dialogs.open.is_some() || app.ui.show_search;
+    if !busy && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.ui.send_window = None;
+    }
+    send_window_contents(app, ctx);
+    let busy = egui::Popup::is_any_open(ctx) || ctx.text_edit_focused();
+    ctx.data_mut(|d| d.insert_temp(busy_id, busy));
+}
+
+fn send_window_contents(app: &mut SoundApp, ctx: &egui::Context) {
+    let Some((id, slot)) = app.ui.send_window else { return };
+    let Some((name, send)) = app.engine.session().track(id).and_then(|t| Some((t.name.clone(), t.mixer.sends.get(slot).cloned().flatten()?))) else {
+        app.ui.send_window = None;
+        return;
+    };
+    let t = Tokens::current();
+    let mut open = true;
+    egui::Window::new(format!("{name} · Send {}", (b'A' + slot as u8) as char))
+        .id(egui::Id::new("send_window"))
+        .open(&mut open)
+        .auto_sized()
+        .collapsible(false)
+        .default_pos(ctx.pointer_latest_pos().map_or(pos2(200.0, 200.0), |p| p + vec2(24.0, -160.0)))
+        .show(ctx, |ui| {
+            ui.set_width(150.0);
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new(route_name(app, &send.target)).color(t.counter_text));
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.add_space(((ui.available_width() - 62.0) / 2.0).max(0.0));
+                    if text_toggle(ui, vec2(36.0, 18.0), "PRE", send.pre_fader, t.accent, "Pre-fader").clicked() {
+                        let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "pre_fader": !send.pre_fader}));
+                    }
+                    if text_toggle(ui, vec2(22.0, 18.0), "M", send.mute, t.mute, "Mute send").clicked() {
+                        let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "mute": !send.mute}));
+                    }
+                });
+                let mut pan = send.pan;
+                pan_knob(ui, 32.0, &mut pan, "Send pan (drag; double-click centres)");
+                if (pan - send.pan).abs() > f32::EPSILON {
+                    let _ = app.engine.execute_merged(
+                        "mix.send_level",
+                        &json!({"track": id.0, "slot": slot, "pan": pan}),
+                        &format!("send-pan:{}:{slot}", id.0),
+                    );
+                }
+                ui.label(egui::RichText::new(pan_text(send.pan)).color(t.counter_text).small());
+                let (fr, fresp) = ui.allocate_exact_size(vec2(56.0, 220.0), Sense::hover());
+                fresp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, "Send level"));
+                if let Some(db) = fader(ui, fr, send.level_db, ui.id().with("send_fader")) {
+                    let _ = app.engine.execute_merged(
+                        "mix.send_level",
+                        &json!({"track": id.0, "slot": slot, "db": db}),
+                        &format!("send:{}:{slot}", id.0),
+                    );
+                }
+                let (rr, _) = ui.allocate_exact_size(vec2(64.0, 15.0), Sense::hover());
+                ui.painter().rect_filled(rr, 1.0, t.counter_bg);
+                let shown = db_text(send.level_db);
+                let (_, typed) = editable_readout(ui, rr, ui.id().with("send_level_value"), &shown, &format!("{:.1}", send.level_db), parse_db, 0.0);
+                if let Some(db) = typed {
+                    let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "db": db}));
+                }
+            });
+        });
+    if !open {
+        app.ui.send_window = None;
     }
 }
 

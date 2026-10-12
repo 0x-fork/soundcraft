@@ -70,6 +70,9 @@ pub struct UiState {
     pub edit_views: Vec<String>,
     /// Open plugin windows (track, slot).
     pub plugin_windows: Vec<(TrackId, usize)>,
+    /// The send in the Send window (track, slot).
+    #[serde(skip)]
+    pub send_window: Option<(TrackId, usize)>,
     pub audiosuite: Option<String>,
     pub status: String,
     pub show_automation: bool,
@@ -129,6 +132,7 @@ impl Default for UiState {
             mix_views: vec!["inserts_ae".into(), "sends_ae".into(), "io".into(), "color".into()],
             edit_views: vec!["color".into()],
             plugin_windows: Vec::new(),
+            send_window: None,
             audiosuite: None,
             status: String::new(),
             show_automation: false,
