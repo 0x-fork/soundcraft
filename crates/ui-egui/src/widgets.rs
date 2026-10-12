@@ -204,8 +204,10 @@ pub fn fader(ui: &mut Ui, r: Rect, db: f32, id: egui::Id) -> Option<f32> {
     // Scale marks.
     for mark in [12.0f32, 6.0, 0.0, -5.0, -10.0, -15.0, -20.0, -30.0, -40.0, -60.0] {
         let y = slot.max.y - slot.height() * soundcraft_model::fader_db_to_pos(mark);
-        ui.painter().line_segment([pos2(r.min.x + 2.0, y), pos2(slot.min.x - 3.0, y)], Stroke::new(1.0, Color32::from_rgb(110, 110, 110)));
-        ui.painter().text(pos2(r.min.x, y), Align2::LEFT_CENTER, format!("{}", mark.abs()), regular(8.0), Color32::from_rgb(150, 150, 150));
+        let x = ui.painter().text(pos2(r.min.x, y), Align2::LEFT_CENTER, format!("{}", mark.abs()), regular(8.0), t.text_dim).max.x + 2.0;
+        if x < slot.min.x - 3.0 {
+            ui.painter().hline(x..=slot.min.x - 3.0, y, Stroke::new(1.0, t.text_dim.gamma_multiply(0.7)));
+        }
     }
     let pos = soundcraft_model::fader_db_to_pos(db);
     let y = slot.max.y - slot.height() * pos;
