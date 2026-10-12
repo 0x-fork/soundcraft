@@ -128,7 +128,10 @@ pub fn specs() -> Vec<CommandSpec> {
         }),
         cmd!("track.vca", "Assign to VCA", [], None, "{tracks?, vca: VCA track id|name | null}", has_selection, |e, p| {
             let tracks = tracks_required(e, "track.vca", p)?;
-            let vca = track_param(e, "track.vca", p, "vca")?;
+            let vca = match p.get("vca") {
+                Some(Value::Null) => None,
+                _ => track_param(e, "track.vca", p, "vca")?,
+            };
             if let Some(v) = vca
                 && e.session().track(v).is_none_or(|t| t.kind != TrackKind::Vca)
             {
@@ -679,5 +682,25 @@ mod tests {
         let kick = s.track_by_name("Kick").unwrap();
         assert!(matches!(kick.mixer.output, Route::Bus(_)));
         assert!(s.tracks.iter().any(|t| t.kind == TrackKind::Folder && t.mixer.input == kick.mixer.output));
+    }
+
+    #[test]
+    fn vca_null_clears_the_assignment() {
+        let mut e = Engine::default();
+        e.execute("track.new", &json!({"name": "Member"})).unwrap();
+        e.execute("track.new", &json!({"kind": "vca", "name": "Master"})).unwrap();
+        let (member, master) = (e.session().tracks[0].id, e.session().tracks[1].id);
+        let vca = |e: &Engine| e.session().track(member).unwrap().mixer.vca;
+        e.execute("track.vca", &json!({"tracks": [member.0], "vca": master.0})).unwrap();
+        assert_eq!(vca(&e), Some(master.0));
+        // #237: null is documented as "no VCA"; anything else that is not a VCA is still an error.
+        for invalid in [json!(true), json!(999), json!("Missing"), json!(member.0)] {
+            assert!(e.execute("track.vca", &json!({"tracks": [member.0], "vca": invalid})).is_err());
+            assert_eq!(vca(&e), Some(master.0));
+        }
+        e.execute("track.vca", &json!({"tracks": [member.0], "vca": null})).unwrap();
+        assert_eq!(vca(&e), None);
+        assert!(e.undo());
+        assert_eq!(vca(&e), Some(master.0));
     }
 }
