@@ -38,6 +38,8 @@ proptest = "1"
 # audio
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "vorbis", "ogg", "wav", "pcm", "aiff", "isomp4", "aac", "alac", "adpcm", "caf", "mkv"] }
 rustfft = "6"
+# Session bundles (one file holding a session and its audio, for the browser): stored entries only.
+zip = { version = "9", default-features = false }
 cpal = "0.16"
 
 # ui
