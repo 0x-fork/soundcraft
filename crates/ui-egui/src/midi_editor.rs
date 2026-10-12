@@ -300,12 +300,13 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     // Keyboard: Cmd+A select all; arrows transpose (Shift = octave) and move by the grid.
     if ui.rect_contains_pointer(roll) && !ui.ctx().egui_wants_keyboard_input() {
         let (all, up, down, left, right, shift) = ui.input(|i| {
+            let arrows = !i.modifiers.alt && !i.modifiers.command && !i.modifiers.ctrl;
             (
                 i.modifiers.command && i.key_pressed(egui::Key::A),
-                i.key_pressed(egui::Key::ArrowUp),
-                i.key_pressed(egui::Key::ArrowDown),
-                i.key_pressed(egui::Key::ArrowLeft),
-                i.key_pressed(egui::Key::ArrowRight),
+                arrows && i.key_pressed(egui::Key::ArrowUp),
+                arrows && i.key_pressed(egui::Key::ArrowDown),
+                arrows && !i.modifiers.shift && i.key_pressed(egui::Key::ArrowLeft),
+                arrows && !i.modifiers.shift && i.key_pressed(egui::Key::ArrowRight),
                 i.modifiers.shift,
             )
         });
