@@ -575,6 +575,39 @@ impl Session {
             self.sample_rate = SampleRate::default();
         }
         self.tempo.sanitize();
+        truncate_chars(&mut self.name, MAX_NAME_CHARS);
+        truncate_chars(&mut self.comments, MAX_COMMENT_CHARS);
+        for t in &mut self.tracks {
+            truncate_chars(&mut t.name, MAX_NAME_CHARS);
+            truncate_chars(&mut t.comments, MAX_COMMENT_CHARS);
+            for p in &mut t.playlists {
+                truncate_chars(&mut p.name, MAX_NAME_CHARS);
+                p.clips.iter_mut().for_each(|c| truncate_chars(&mut c.name, MAX_NAME_CHARS));
+            }
+        }
+        for m in &mut self.markers {
+            truncate_chars(&mut m.name, MAX_NAME_CHARS);
+            truncate_chars(&mut m.comments, MAX_COMMENT_CHARS);
+        }
+        self.key_signatures.iter_mut().for_each(|(_, k)| truncate_chars(k, MAX_NAME_CHARS));
+        self.busses.iter_mut().for_each(|b| truncate_chars(&mut b.name, MAX_NAME_CHARS));
+        self.outputs.iter_mut().for_each(|o| truncate_chars(&mut o.name, MAX_NAME_CHARS));
+        self.groups.iter_mut().for_each(|g| truncate_chars(&mut g.name, MAX_NAME_CHARS));
+        self.sources.iter_mut().for_each(|s| truncate_chars(&mut s.name, MAX_NAME_CHARS));
+        self.videos.iter_mut().for_each(|v| truncate_chars(&mut v.name, MAX_NAME_CHARS));
+    }
+}
+
+/// The most characters kept of a name read from a file: longer ones can't be shown, and drawing
+/// a name of a million characters overflows the renderer's buffers.
+pub const MAX_NAME_CHARS: usize = 256;
+/// The most characters kept of a comment read from a file.
+pub const MAX_COMMENT_CHARS: usize = 4096;
+
+/// Cut `s` to at most `max` characters.
+pub fn truncate_chars(s: &mut String, max: usize) {
+    if let Some((end, _)) = s.char_indices().nth(max) {
+        s.truncate(end);
     }
 }
 
@@ -655,6 +688,19 @@ mod tests {
         assert_eq!(s.unique_track_name("Piano"), "Piano 2");
         assert_eq!(s.unique_track_name("Organ"), "Organ");
         assert_eq!(s.unique_track_name("Audio"), "Audio 1");
+    }
+
+    #[test]
+    fn names_from_a_file_are_cut_to_a_length_that_can_be_drawn() {
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        if let Some(tr) = s.track_mut(t) {
+            tr.name = "é".repeat(1_000);
+        }
+        s.comments = "c".repeat(10_000);
+        let back = Session::from_json(&s.to_json().unwrap()).unwrap();
+        assert_eq!(back.track(t).map(|tr| tr.name.chars().count()), Some(MAX_NAME_CHARS));
+        assert_eq!(back.comments.len(), MAX_COMMENT_CHARS);
     }
 
     #[test]

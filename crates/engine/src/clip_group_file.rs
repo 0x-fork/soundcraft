@@ -144,6 +144,7 @@ pub fn import(e: &mut Engine, path: &str, first: Option<TrackId>, at: Samples) -
                 continue;
             }
             c.id = s.new_clip_id();
+            soundcraft_model::truncate_chars(&mut c.name, soundcraft_model::MAX_NAME_CHARS);
             c.start = at.saturating_add(scale(c.start.max(0)));
             c.length = scale(c.length).max(1);
             c.group = Some(group_id);
