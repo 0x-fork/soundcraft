@@ -485,8 +485,8 @@ impl SoundApp {
         r.arm(plan)
     }
 
-    /// Reads every live third-party plugin's state from the audio engine and stores it on its
-    /// insert (`mix.insert_state`), so saves and bounces include it.
+    /// Reads every live third-party plugin's state and stores it on its insert
+    /// (`mix.insert_state`), so saves and bounces include it.
     pub fn capture_plugin_states(&mut self) {
         let Some(p) = &self.player else { return };
         for (t, slot, data) in p.capture_states() {

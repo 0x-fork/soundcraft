@@ -237,15 +237,16 @@ impl Plugin for AuPlugin {
         self.push_event(MidiEvent { time: 0, status: 0xB0, data1: 123, data2: 0 });
     }
 
-    fn save_state(&mut self) -> Option<Vec<u8>> {
-        self.inst.save_state()
-    }
-
     fn load_state(&mut self, data: &[u8]) -> bool {
         let ok = self.inst.load_state(data);
         if ok {
             self.refresh_values();
         }
         ok
+    }
+
+    fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
+        let link = self.inst.state_link();
+        Some(Box::new(move || link.save_state()))
     }
 }

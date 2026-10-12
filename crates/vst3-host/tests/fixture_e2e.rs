@@ -209,6 +209,30 @@ fn state_saves_component_and_controller_and_restores_them() {
 }
 
 #[test]
+fn state_reader_reads_while_another_thread_processes() {
+    let id = id_of("Fixture Gain");
+    let mut p = soundcraft_vst3_host::create(&id).unwrap();
+    p.prepare(48_000.0, 64, 2);
+    assert!(p.set_param("7", 1.5));
+    p.process(&mut vec![vec![0.5f32; 64]; 2], 64);
+    let mut reader = p.state_reader().expect("every VST3 component has a state");
+    let blob = p.save_state().unwrap();
+    let audio = std::thread::spawn(move || {
+        for _ in 0..2_000 {
+            p.process(&mut vec![vec![0.5f32; 64]; 2], 64);
+        }
+        p
+    });
+    while !audio.is_finished() {
+        assert_eq!(reader.save_state().as_ref(), Some(&blob));
+    }
+    let p = audio.join().unwrap();
+    assert_eq!(reader.save_state(), Some(blob));
+    drop(p);
+    assert_eq!(reader.save_state(), None);
+}
+
+#[test]
 fn editor_view_is_probed_and_edits_come_back_as_plain_values() {
     let id = id_of("Fixture Gain");
     let mut p = soundcraft_vst3_host::instantiate_plugin(&id).unwrap();

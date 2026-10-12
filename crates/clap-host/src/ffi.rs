@@ -275,7 +275,7 @@ impl Bundle {
         inst.state_ext = inst.extension::<clap_plugin_state>(CLAP_EXT_STATE);
         let gui = inst.extension::<clap_plugin_gui>(CLAP_EXT_GUI);
         inst.gui = Arc::new(GuiLink {
-            inner: Mutex::new(GuiInner { plugin, gui, alive: !gui.is_null(), created: false, visible: false }),
+            inner: Mutex::new(GuiInner { plugin, gui, state: inst.state_ext, alive: true, created: false, visible: false }),
             host: Arc::clone(&inst.state),
         });
         Ok(inst)
@@ -696,17 +696,19 @@ fn window_api() -> Option<&'static CStr> {
 struct GuiInner {
     plugin: *const clap_plugin,
     gui: *const clap_plugin_gui,
+    state: *const clap_plugin_state,
     /// The plugin instance exists (cleared by `Instance::drop` before it destroys the plugin).
     alive: bool,
     created: bool,
     visible: bool,
 }
 
-/// The link between an instance and its editor handles. The instance may process on the audio
-/// thread while the editor is driven from the main thread: CLAP allows `clap.gui` (main-thread)
-/// calls concurrently with audio-thread calls. Every GUI call happens under this lock, and the
-/// instance clears `alive` (destroying any GUI) under the same lock before it destroys the
-/// plugin, so a handle can never call into a destroyed plugin.
+/// The link between an instance and its editor and state handles. The instance may process on
+/// the audio thread while the editor is driven and the state saved from the main thread: CLAP
+/// allows `clap.gui` and `clap.state` (main-thread) calls concurrently with audio-thread calls.
+/// Every such call happens under this lock, and the instance clears `alive` (destroying any GUI)
+/// under the same lock before it destroys the plugin, so a handle can never call into a destroyed
+/// plugin.
 pub(crate) struct GuiLink {
     inner: Mutex<GuiInner>,
     host: Arc<HostState>,
@@ -715,7 +717,14 @@ pub(crate) struct GuiLink {
 impl Default for GuiLink {
     fn default() -> Self {
         GuiLink {
-            inner: Mutex::new(GuiInner { plugin: std::ptr::null(), gui: std::ptr::null(), alive: false, created: false, visible: false }),
+            inner: Mutex::new(GuiInner {
+                plugin: std::ptr::null(),
+                gui: std::ptr::null(),
+                state: std::ptr::null(),
+                alive: false,
+                created: false,
+                visible: false,
+            }),
             host: Arc::new(HostState::default()),
         }
     }
@@ -731,7 +740,8 @@ impl GuiLink {
     }
 
     pub fn available(&self) -> bool {
-        self.lock().alive
+        let g = self.lock();
+        g.alive && !g.gui.is_null()
     }
 
     pub fn host(&self) -> &HostState {
@@ -803,6 +813,22 @@ impl GuiLink {
         }
         g.created = false;
         g.visible = false;
+    }
+
+    /// `clap_plugin_state.save` into memory (`None` without the extension, on failure, or once the
+    /// plugin is gone).
+    pub fn save_state(&self) -> Option<Vec<u8>> {
+        let g = self.lock();
+        if !g.alive {
+            return None;
+        }
+        // SAFETY: `state` is null or the plugin's static extension vtable, valid while `alive`.
+        let save = unsafe { g.state.as_ref() }?.save?;
+        let mut out: Vec<u8> = Vec::new();
+        let stream = clap_ostream { ctx: (&mut out as *mut Vec<u8>).cast::<c_void>(), write: Some(ostream_write) };
+        // SAFETY: live plugin (`alive`, under the lock); the stream and its context live on this
+        // frame for the call.
+        unsafe { save(g.plugin, &stream) }.then_some(out)
     }
 
     /// Closes (destroys) the editor.
@@ -1012,19 +1038,14 @@ impl Instance {
         self.gui.available().then(|| Arc::clone(&self.gui))
     }
 
-    /// `clap_plugin_state.save` into memory (`None` without the extension or on failure).
-    pub fn save_state(&self) -> Option<Vec<u8>> {
-        // SAFETY: the extension pointer, when non-null, points to a static vtable in the plugin.
-        let save = unsafe { self.state_ext.as_ref() }?.save?;
-        let mut out: Vec<u8> = Vec::new();
-        let stream = clap_ostream { ctx: (&mut out as *mut Vec<u8>).cast::<c_void>(), write: Some(ostream_write) };
-        // SAFETY: valid instance; the stream and its context live on this frame for the call.
-        unsafe { save(self.plugin, &stream) }.then_some(out)
+    /// The same link, for state handles (`None` when the plugin has no `clap.state`).
+    pub fn state_link(&self) -> Option<Arc<GuiLink>> {
+        (!self.state_ext.is_null()).then(|| Arc::clone(&self.gui))
     }
 
     /// `clap_plugin_state.load` from memory. `false` without the extension or when refused.
     pub fn load_state(&self, data: &[u8]) -> bool {
-        // SAFETY: see `save_state`.
+        // SAFETY: the extension pointer, when non-null, points to a static vtable in the plugin.
         let Some(load) = (unsafe { self.state_ext.as_ref() }).and_then(|s| s.load) else { return false };
         let mut cursor = ReadCursor { data, pos: 0 };
         let stream = clap_istream { ctx: (&mut cursor as *mut ReadCursor<'_>).cast::<c_void>(), read: Some(istream_read) };

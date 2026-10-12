@@ -16,15 +16,14 @@
 //! state and prepared on the thread that calls [`Player::update_session`] (the UI thread), and
 //! travel to the audio thread together with the session snapshot that needs them; the mix
 //! engine adopts them (see `soundcraft_mix`'s crate docs). Instances the engine retires come back
-//! on a return channel and are dropped on the UI thread ([`Player::idle`]). Plugin states for
-//! saving are read on request ([`Player::capture_states`]: a command with a reply; the audio
-//! thread answers between two blocks, never blocking). Plugin editors are driven on the UI thread
+//! on a return channel and are dropped on the UI thread ([`Player::idle`]). Plugin editors are
+//! driven, and plugin states for saving read ([`Player::capture_states`]), on the UI thread
 //! through handles taken from each instance before it leaves ([`Player::open_editor`]).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod record;
 
-use soundcraft_dsp::{Plugin, PluginEditor};
+use soundcraft_dsp::{Plugin, PluginEditor, PluginStateReader};
 use soundcraft_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_stereo_fold, main_channels};
 use soundcraft_model::{Session, TrackId};
 use soundcraft_time::{Range, Samples};
@@ -55,8 +54,6 @@ pub type EditorEdit = (TrackId, usize, String, f32);
 enum Cmd {
     /// A new snapshot plus the third-party instances it needs (created on the UI thread).
     Session(Arc<Session>, Vec<PreparedInstance>),
-    /// Read every plugin state and reply.
-    CaptureStates(Sender<PluginStates>),
     Input(Arc<record::InputRing>),
     Recording(bool),
     Play {
@@ -136,10 +133,6 @@ impl AudioState {
             match c {
                 Cmd::Input(r) => self.input = Some(r),
                 Cmd::Recording(r) => self.recording = r,
-                Cmd::CaptureStates(reply) => {
-                    self.mix.ensure_synced(&self.session);
-                    let _ = reply.send(self.mix.capture_states());
-                }
                 Cmd::Session(s, instances) => {
                     changed = true;
                     if (s.sample_rate.as_f64() - self.session.sample_rate.as_f64()).abs() > 0.5 {
@@ -180,8 +173,8 @@ impl AudioState {
             }
         }
         if changed {
-            // Place adopted instances now (not only once playback starts), so state captures and
-            // editors see them; `sync` creates no third-party plugins here.
+            // Place adopted instances now (not only once playback starts), so editors see them;
+            // `sync` creates no third-party plugins here.
             self.mix.ensure_synced(&self.session);
         }
         self.send_garbage();
@@ -325,10 +318,16 @@ struct Side {
     rate: f32,
     /// Editor handles of the live instances.
     editors: HashMap<(TrackId, usize), Box<dyn PluginEditor>>,
+    /// State readers of the live instances.
+    states: HashMap<(TrackId, usize), Box<dyn PluginStateReader>>,
     garbage: Receiver<Vec<Box<dyn Plugin>>>,
 }
 
 impl Side {
+    fn new(rate: f32, garbage: Receiver<Vec<Box<dyn Plugin>>>) -> Side {
+        Side { shadow: HashMap::new(), rate, editors: HashMap::new(), states: HashMap::new(), garbage }
+    }
+
     /// Drops retired instances (closing their editors first, inside the plugin's drop).
     fn collect_garbage(&mut self) {
         while let Ok(g) = self.garbage.try_recv() {
@@ -338,6 +337,7 @@ impl Side {
 
     fn forget(&mut self, key: (TrackId, usize)) {
         self.shadow.remove(&key);
+        self.states.remove(&key);
         if let Some(mut e) = self.editors.remove(&key) {
             e.close();
         }
@@ -376,7 +376,7 @@ impl Player {
 
     fn open(session: Arc<Session>) -> Player {
         let (gtx, grx) = channel();
-        let side = Mutex::new(Side { shadow: HashMap::new(), rate: session.sample_rate.as_f64() as f32, editors: HashMap::new(), garbage: grx });
+        let side = Mutex::new(Side::new(session.sample_rate.as_f64() as f32, grx));
         let shared = Arc::new(Shared {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
@@ -525,22 +525,9 @@ impl Player {
         let _ = self.tx.send(Cmd::Session(s, instances));
     }
 
-    /// Reads the state of every live third-party plugin (for saving the session). Waits briefly
-    /// for the audio thread to answer between two blocks; empty when it does not answer.
+    /// Reads the state of every live third-party plugin, for saving the session.
     pub fn capture_states(&self) -> PluginStates {
-        self.side().collect_garbage();
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let (tx, rx) = channel();
-            if self.tx.send(Cmd::CaptureStates(tx)).is_err() {
-                return Vec::new();
-            }
-            rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap_or_default()
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            Vec::new()
-        }
+        self.side().capture_states()
     }
 
     /// Per-UI-frame housekeeping: drops retired instances and services plugin editors. Returns
@@ -656,6 +643,12 @@ fn copy_meter_snapshot(source: &MeterSnapshot, out: &mut MeterSnapshot) {
 }
 
 impl Side {
+    fn capture_states(&mut self) -> PluginStates {
+        let mut out: PluginStates = self.states.iter_mut().filter_map(|(&(t, slot), r)| Some((t, slot, r.save_state()?))).collect();
+        out.sort_by_key(|(t, slot, _)| (*t, *slot));
+        out
+    }
+
     /// Creates the third-party instances `s` needs that the audio thread does not have yet.
     fn prepare(&mut self, s: &Session) -> Vec<PreparedInstance> {
         self.collect_garbage();
@@ -685,6 +678,9 @@ impl Side {
             if let Some(mut plugin) = made {
                 if let Some(e) = plugin.editor() {
                     self.editors.insert(key, e);
+                }
+                if let Some(r) = plugin.state_reader() {
+                    self.states.insert(key, r);
                 }
                 out.push(PreparedInstance { track: spec.track, slot: spec.slot, id: spec.id, ch: spec.ch, plugin });
             }
@@ -881,12 +877,8 @@ mod tests {
         let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(soundcraft_model::Session::default()), 48_000.0, gtx);
         let plugin: Box<dyn Plugin> = Box::new(Stateful(soundcraft_dsp::create("gain").unwrap()));
         tx.send(Cmd::Session(Arc::clone(&s), vec![PreparedInstance { track: t, slot: 1, id: "clap:test.fake".into(), ch: 2, plugin }])).unwrap();
-        let (rtx, rrx) = channel();
-        tx.send(Cmd::CaptureStates(rtx)).unwrap();
-        // Stopped: the callback only drains commands (adopting the instance) and answers.
         let mut out = vec![0.0f32; 256];
         st.fill(&mut out, 2);
-        assert_eq!(rrx.try_recv().unwrap(), vec![(t, 1, b"blob".to_vec())]);
         assert!(grx.try_recv().is_err(), "nothing retired yet");
         // A session without the insert retires the instance to the return channel.
         tx.send(Cmd::Session(Arc::new(soundcraft_model::Session::default()), Vec::new())).unwrap();
@@ -912,11 +904,32 @@ mod tests {
         assert_eq!(grx.try_recv().unwrap().len(), 1);
     }
 
+    struct Reads(Option<&'static [u8]>);
+
+    impl PluginStateReader for Reads {
+        fn save_state(&mut self) -> Option<Vec<u8>> {
+            self.0.map(<[u8]>::to_vec)
+        }
+    }
+
+    #[test]
+    fn plugin_states_are_read_without_the_audio_thread() {
+        let mut side = Side::new(48_000.0, channel().1);
+        let (a, b) = (TrackId(1), TrackId(2));
+        side.states.insert((b, 0), Box::new(Reads(Some(b"b0"))));
+        side.states.insert((a, soundcraft_mix::INSTRUMENT_SLOT), Box::new(Reads(Some(b"synth"))));
+        side.states.insert((a, 3), Box::new(Reads(Some(b"a3"))));
+        side.states.insert((a, 4), Box::new(Reads(None)));
+        let want = vec![(a, 3, b"a3".to_vec()), (a, soundcraft_mix::INSTRUMENT_SLOT, b"synth".to_vec()), (b, 0, b"b0".to_vec())];
+        assert_eq!(side.capture_states(), want);
+        side.forget((a, 3));
+        assert_eq!(side.capture_states(), want[1..]);
+    }
+
     #[test]
     fn side_creates_each_missing_instance_once() {
         use soundcraft_model::{ChannelFormat, Insert, TrackKind};
-        let (_gtx, grx) = channel();
-        let mut side = Side { shadow: HashMap::new(), rate: 48_000.0, editors: HashMap::new(), garbage: grx };
+        let mut side = Side::new(48_000.0, channel().1);
         let mut s = soundcraft_model::Session::default();
         let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
         s.track_mut(t).unwrap().mixer.inserts[0] = Some(Insert::new("clap:does.not.exist"));

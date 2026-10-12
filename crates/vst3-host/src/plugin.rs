@@ -318,10 +318,6 @@ impl Plugin for Vst3Plugin {
         }
     }
 
-    fn save_state(&mut self) -> Option<Vec<u8>> {
-        self.inst.save_state()
-    }
-
     fn load_state(&mut self, data: &[u8]) -> bool {
         let ok = self.inst.load_state(data);
         if ok {
@@ -343,6 +339,11 @@ impl Plugin for Vst3Plugin {
     fn editor(&mut self) -> Option<Box<dyn PluginEditor>> {
         let link = self.inst.editor()?;
         Some(Box::new(Vst3Editor { link, host: self.inst.host_ref(), info: self.info, ids: self.ids.clone(), maps: self.maps.clone() }))
+    }
+
+    fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
+        let link = self.inst.state_link();
+        Some(Box::new(move || link.save_state()))
     }
 }
 

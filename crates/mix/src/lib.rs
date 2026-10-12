@@ -39,9 +39,8 @@
 //!
 //! An instance starts from its stored state; the insert's parameter values are then applied on
 //! top before the first block (the session's values are kept in step with the plugin, including
-//! edits made in its own editor, so both agree; the state carries everything else).
-//! [`MixEngine::capture_states`] reads every live instance's state back (for saving the session);
-//! it calls into the plugins and allocates, so a realtime host runs it only on request.
+//! edits made in its own editor, so both agree; the state carries everything else). A host reads
+//! states back for saving through each instance's [`Plugin::state_reader`], on its UI thread.
 //!
 //! A built-in instrument's parameter values are applied the same way. A sample-playing
 //! instrument (the Sampler) is handed the decoded audio of its insert's
@@ -71,8 +70,8 @@ pub fn main_channels(s: &Session) -> usize {
     s.main_format().channels().clamp(MAIN_CHANNELS, MAX_CHANNELS)
 }
 
-/// Slot index used for a track's instrument plugin in [`InstanceSpec`], [`PreparedInstance`] and
-/// [`MixEngine::capture_states`] (insert slots use their index).
+/// Slot index used for a track's instrument plugin in [`InstanceSpec`] and [`PreparedInstance`]
+/// (insert slots use their index).
 pub const INSTRUMENT_SLOT: usize = usize::MAX;
 
 /// Hosted third-party plugin ids (CLAP or VST3): created off the audio thread in realtime use.
@@ -428,24 +427,6 @@ impl MixEngine {
         }
         out.extend(self.adopt.drain().map(|(_, p)| p.plugin));
         self.synced = (usize::MAX, usize::MAX, usize::MAX);
-        out
-    }
-
-    /// The state of every live plugin that has one (third-party plugins), as
-    /// `(track, slot or INSTRUMENT_SLOT, state)`. Calls into the plugins and allocates.
-    pub fn capture_states(&mut self) -> Vec<(TrackId, usize, Vec<u8>)> {
-        let mut out = Vec::new();
-        for (tid, st) in self.strips.iter_mut() {
-            for (i, slot) in st.plugins.iter_mut().enumerate() {
-                if let Some(data) = slot.as_mut().and_then(|s| s.plugin.save_state()) {
-                    out.push((*tid, i, data));
-                }
-            }
-            if let Some(data) = st.instrument.as_mut().and_then(|s| s.plugin.save_state()) {
-                out.push((*tid, INSTRUMENT_SLOT, data));
-            }
-        }
-        out.sort_by_key(|(t, s, _)| (*t, *s));
         out
     }
 
@@ -2136,10 +2117,9 @@ mod tests {
         let _ = render_range(&s, Range::new(0, 4800), 512);
     }
 
-    /// A built-in gain behind a third-party id, with a state blob and a log of parameter sets.
+    /// A built-in gain behind a third-party id, with a log of parameter sets.
     struct Stateful {
         inner: Box<dyn Plugin>,
-        blob: Vec<u8>,
         sets: Arc<std::sync::atomic::AtomicUsize>,
     }
 
@@ -2163,9 +2143,6 @@ mod tests {
         fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
             self.inner.process(io, frames);
         }
-        fn save_state(&mut self) -> Option<Vec<u8>> {
-            Some(self.blob.clone())
-        }
     }
 
     fn render_block(eng: &mut MixEngine, s: &Session, pos: i64) -> f32 {
@@ -2175,7 +2152,7 @@ mod tests {
     }
 
     #[test]
-    fn external_instances_are_adopted_retired_and_captured() {
+    fn external_instances_are_adopted_and_retired() {
         let (mut s, t) = session_with_dc(0.5, 48_000);
         let mut ins = Insert::new("clap:test.fake");
         ins.params.insert("gain".into(), -6.0);
@@ -2191,9 +2168,9 @@ mod tests {
         let sets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut gain = soundcraft_dsp::create("gain").unwrap();
         gain.prepare(48_000.0, 512, 1);
-        let fake = Stateful { inner: gain, blob: b"live state".to_vec(), sets: Arc::clone(&sets) };
+        let fake = Stateful { inner: gain, sets: Arc::clone(&sets) };
         // An instance for the wrong channel count is retired, not used.
-        let wrong = Stateful { inner: soundcraft_dsp::create("gain").unwrap(), blob: Vec::new(), sets: Arc::clone(&sets) };
+        let wrong = Stateful { inner: soundcraft_dsp::create("gain").unwrap(), sets: Arc::clone(&sets) };
         eng.adopt(vec![PreparedInstance { track: t, slot: 0, id: "clap:test.fake".into(), ch: 2, plugin: Box::new(wrong) }]);
         assert!(render_block(&mut eng, &s, 512) > 0.3);
         assert_eq!(eng.take_retired().len(), 1);
@@ -2204,13 +2181,11 @@ mod tests {
         }
         assert!((wet / dry - 0.501).abs() < 0.01, "{wet} vs {dry}");
         assert!(sets.load(std::sync::atomic::Ordering::Relaxed) > 0, "no stored state: session params are pushed");
-        assert_eq!(eng.capture_states(), vec![(t, 0, b"live state".to_vec())]);
         assert!(eng.take_retired().is_empty());
         // Removing the insert retires the instance instead of dropping it here.
         s.track_mut(t).unwrap().mixer.inserts[0] = None;
         render_block(&mut eng, &s, 20 * 512);
         assert_eq!(eng.take_retired().len(), 1);
-        assert!(eng.capture_states().is_empty());
         // Instances nobody claims are retired too; drain_plugins empties the engine.
         eng.adopt(vec![PreparedInstance { track: t, slot: 3, id: "clap:x".into(), ch: 1, plugin: soundcraft_dsp::create("gain").unwrap() }]);
         render_block(&mut eng, &s, 21 * 512);
@@ -2229,7 +2204,7 @@ mod tests {
         let mut eng = MixEngine::new(48_000.0, 512);
         eng.set_external_instances(true);
         let sets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let fake = Stateful { inner: soundcraft_dsp::create("gain").unwrap(), blob: Vec::new(), sets: Arc::clone(&sets) };
+        let fake = Stateful { inner: soundcraft_dsp::create("gain").unwrap(), sets: Arc::clone(&sets) };
         eng.adopt(vec![PreparedInstance { track: t, slot: 0, id: "vst3:00000000000000000000000000000001".into(), ch: 1, plugin: Box::new(fake) }]);
         render_block(&mut eng, &s, 0);
         assert_eq!(sets.load(std::sync::atomic::Ordering::Relaxed), 1, "session params apply once");

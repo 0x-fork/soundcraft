@@ -206,11 +206,12 @@ pub trait Plugin: Send {
     fn set_sample(&mut self, _sample: Option<Arc<dyn SampleSource>>) -> bool {
         false
     }
-    /// The plugin's complete internal state as an opaque blob (third-party plugins), for saving
-    /// in the session. `None` when the plugin has no state beyond its parameters (built-ins) or
-    /// the plugin refused. May allocate: never call it in steady-state audio processing.
+    /// The plugin's complete internal state as an opaque blob (third-party plugins), as its
+    /// [`Plugin::state_reader`] reads it. `None` when the plugin has no state beyond its
+    /// parameters (built-ins) or the plugin refused. May allocate: never call it in steady-state
+    /// audio processing.
     fn save_state(&mut self) -> Option<Vec<u8>> {
-        None
+        self.state_reader()?.save_state()
     }
     /// Restores a blob from [`Plugin::save_state`]. `false` if unsupported or the plugin rejected
     /// it (the plugin keeps working with its previous state). The data is hostile input.
@@ -227,6 +228,10 @@ pub trait Plugin: Send {
     /// itself is processing on the audio thread (`None` when the plugin has no editor). The
     /// handle stays valid after the instance is dropped (its calls then do nothing).
     fn editor(&mut self) -> Option<Box<dyn PluginEditor>> {
+        None
+    }
+    /// Reads this instance's state from the UI thread (`None` when it has no state of its own).
+    fn state_reader(&mut self) -> Option<Box<dyn PluginStateReader>> {
         None
     }
 }
@@ -247,6 +252,19 @@ pub trait PluginEditor: Send {
     /// Tells the editor that a parameter changed elsewhere (generic editor, automation), so the
     /// GUI shows it. Values are in SoundCraft units.
     fn set_param(&mut self, _id: &str, _value: f32) {}
+}
+
+/// Reads a plugin's state on the main (UI) thread while the instance processes on the audio
+/// thread, as plugin formats allow. Obtained from [`Plugin::state_reader`]; closures are readers.
+pub trait PluginStateReader: Send {
+    /// What [`Plugin::save_state`] would return; `None` once the instance is gone.
+    fn save_state(&mut self) -> Option<Vec<u8>>;
+}
+
+impl<F: FnMut() -> Option<Vec<u8>> + Send> PluginStateReader for F {
+    fn save_state(&mut self) -> Option<Vec<u8>> {
+        self()
+    }
 }
 
 /// Recorded audio a sample-playing instrument reads: planar `f32` at its own sample rate (the
