@@ -414,12 +414,12 @@ fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
     let ins = track.instrument.as_ref();
     let info = ins.and_then(|i| plugin_info(&i.plugin));
     let resp = ui.interact(r, ui.id().with(("instrument", id.0)), Sense::click());
-    let fill = if info.is_some() { Color32::from_rgb(52, 62, 80) } else { t.slot_bg };
+    let fill = if info.is_some() { t.insert_on } else { t.slot_bg };
     ui.painter().rect(
         r,
         CornerRadius::same(2),
         if resp.hovered() { fill.gamma_multiply(1.3) } else { fill },
-        Stroke::new(1.0, Color32::from_rgb(16, 16, 16)),
+        Stroke::new(1.0, t.slot_border),
         StrokeKind::Inside,
     );
     ui.painter().with_clip_rect(r).text(r.center(), Align2::CENTER_CENTER, info.map_or("no instrument", |p| p.short_name), regular(10.5), t.text);
