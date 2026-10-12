@@ -1837,10 +1837,15 @@ mod tests {
     #[test]
     fn stored_instrument_params_reach_the_plugin() {
         // #152: a saved instrument level of -12 dB must render quieter than -6 dB.
-        let peak = |db: f32| render_range(&synth_session(db), Range::new(0, 12_000), 512)[0].iter().fold(0.0f32, |m, x| m.max(x.abs()));
-        let (loud, quiet) = (peak(-6.0), peak(-12.0));
+        // RMS over the held part of the note, past any parameter smoothing.
+        let rms = |db: f32| {
+            let out = render_range(&synth_session(db), Range::new(0, 12_000), 512);
+            let tail = out[0].get(6_000..).unwrap_or_default();
+            (tail.iter().map(|x| x * x).sum::<f32>() / tail.len().max(1) as f32).sqrt()
+        };
+        let (loud, quiet) = (rms(-6.0), rms(-12.0));
         assert!(loud > 0.0, "the synth should sound");
-        assert!((quiet / loud - 0.5).abs() < 0.05, "-12 dB vs -6 dB should halve the peak: {quiet} / {loud}");
+        assert!((quiet / loud - 0.5).abs() < 0.05, "-12 dB vs -6 dB should halve the level: {quiet} / {loud}");
     }
 
     #[test]
