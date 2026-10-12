@@ -665,7 +665,7 @@ fn strip_silence(e: &mut Engine, p: &Value) -> Result<Value> {
     let s = e.session_mut();
     let mut kept = 0;
     for t in &tracks {
-        kept += crate::io::strip_silence(s, *t, r, thr, min_len, pre, post);
+        kept += crate::io::strip_silence(s, *t, r, thr, min_len, pre, post)?;
     }
     Ok(json!({"clips": kept}))
 }

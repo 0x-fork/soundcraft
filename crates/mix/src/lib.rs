@@ -1852,10 +1852,7 @@ pub fn render_clips(s: &Session, track: TrackId, range: Range) -> Vec<Vec<f32>> 
     let len = usize::try_from(range.len().max(0)).unwrap_or(0).min(MAX_RENDER_SAMPLES / t.channels().max(1));
     let mut out = vec![vec![0.0f32; len]; t.channels().max(1)];
     let mut scratch = Vec::new();
-    for c in t.clips() {
-        if c.muted {
-            continue;
-        }
+    for c in t.clips().iter().filter(|c| !c.muted && c.range().overlaps(&range)) {
         match clip_fx_params(s, c.id.0) {
             None => render_clip(s, c, range.start, len, &mut out, &mut scratch),
             Some(params) => {

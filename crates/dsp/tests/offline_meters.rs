@@ -201,6 +201,26 @@ fn non_silent_ranges_finds_bursts() {
 }
 
 #[test]
+fn silence_scan_in_blocks_finds_what_one_pass_finds() {
+    let mut x = vec![0.0f32; 48_000];
+    for (i, v) in sine(500.0, 0.5, 48_000.0, 4800).into_iter().enumerate() {
+        x[10_000 + i] = v;
+        x[30_000 + i] = v;
+    }
+    let whole: Vec<(u64, u64)> =
+        offline::non_silent_ranges(std::slice::from_ref(&x), -40.0, 480, 100, 200).into_iter().map(|(a, b)| (a as u64, b as u64)).collect();
+    let mut blocks = offline::SilenceScan::new(-40.0, 480);
+    x.chunks(1000).for_each(|b| blocks.push(&[b.to_vec()]));
+    assert_eq!(blocks.finish(100, 200), whole);
+    // Skipping the silence between the bursts counts its length like scanning it.
+    let mut skipped = offline::SilenceScan::new(-40.0, 480);
+    skipped.push(&[x[..20_000].to_vec()]);
+    skipped.skip(10_000);
+    skipped.push(&[x[30_000..].to_vec()]);
+    assert_eq!(skipped.finish(100, 200), whole);
+}
+
+#[test]
 fn transients_detected_near_onsets() {
     let sr = 48_000.0;
     let mut x = vec![0.0f32; 48_000 * 2];
