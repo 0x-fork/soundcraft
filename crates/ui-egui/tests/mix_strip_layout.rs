@@ -75,3 +75,13 @@ fn fader_scale_numbers_are_readable_and_clear_of_their_ticks() {
         }
     }
 }
+
+#[test]
+fn stereo_strips_line_up_with_mono_strips() {
+    let _palette = PALETTE.lock().unwrap_or_else(|e| e.into_inner());
+    let harness = mix(ThemeMode::Dark);
+    let solo_keys: Vec<f32> = texts(harness.output(), |t| t.galley.job.text == "S").map(|t| t.visual_bounding_rect().center().y).collect();
+    assert!(solo_keys.len() >= 6, "found {} solo keys", solo_keys.len());
+    let (top, bottom) = solo_keys.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &y| (lo.min(y), hi.max(y)));
+    assert!(bottom - top < 0.5, "solo keys span {top}..{bottom}");
+}

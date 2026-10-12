@@ -292,7 +292,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         let ks = if n == 2 { (inner_w / 2.0 - 6.0).min(32.0) } else { 34.0 };
         for i in 0..n {
             let cx = if n == 2 { x0 + inner_w * (0.25 + 0.5 * i as f32) } else { x0 + inner_w * 0.5 };
-            let kr = Rect::from_center_size(pos2(cx, y + ks * 0.5), vec2(ks, ks));
+            let kr = Rect::from_center_size(pos2(cx, y + 17.0), vec2(ks, ks));
             let mut c = ui.new_child(egui::UiBuilder::new().max_rect(kr));
             let mut v = track.mixer.pan.get(i).copied().unwrap_or(0.0);
             let before = v;
@@ -301,14 +301,14 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
                 let _ = app.engine.execute_merged("mix.pan", &json!({"track": id.0, "pan": v, "index": i}), &format!("pan:{}:{i}", id.0));
             }
             let _ = resp;
-            let pr = Rect::from_center_size(pos2(cx, y + ks + 8.0), vec2(ks + 8.0, 13.0));
+            let pr = Rect::from_center_size(pos2(cx, y + 42.0), vec2(ks + 8.0, 13.0));
             ui.painter().rect_filled(pr, 1.0, t.counter_bg);
             let (_, entered) = editable_readout(ui, pr, ui.id().with(("pan-value", id.0, i)), &pan_text(v), &format!("{:.0}", v * 100.0), parse_pan);
             if let Some(v) = entered {
                 let _ = app.engine.execute_merged("mix.pan", &json!({"track": id.0, "pan": v, "index": i}), &format!("pan:{}:{i}", id.0));
             }
         }
-        y += ks + 20.0;
+        y += 54.0;
     }
     // Rec / Input / Solo / Mute.
     let bw = (inner_w - 6.0) / 2.0;
