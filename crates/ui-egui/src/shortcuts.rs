@@ -55,6 +55,8 @@ fn search_chord(m: Modifiers, mac: bool) -> bool {
 }
 
 pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
+    // Cmd+= and Cmd+0 are Mix/Edit and Quantize to Grid, not egui's built-in interface zoom.
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
     if ctx.egui_wants_keyboard_input() || app.dialogs.open.is_some() {
         return;
     }
@@ -73,16 +75,20 @@ pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
         if fixed(app, key, mods, mac) {
             continue;
         }
-        let hit =
-            soundcraft_engine::command_specs().iter().find(|c| c.shortcut.and_then(parse).is_some_and(|(m, k)| k == key && mods_match(m, mods, mac)));
-        if let Some(c) = hit {
-            let id = c.id;
+        if let Some(id) = command_for(key, mods, mac) {
             if crate::menus::invoke_shortcut_dialog(app, id) {
                 continue;
             }
             let _ = app.run(id, json!({}));
         }
     }
+}
+
+fn command_for(key: Key, mods: Modifiers, mac: bool) -> Option<&'static str> {
+    soundcraft_engine::command_specs()
+        .iter()
+        .find(|c| c.shortcut.and_then(parse).is_some_and(|(m, k)| k == key && mods_match(m, mods, mac)))
+        .map(|c| c.id)
 }
 
 /// Keys with context-dependent meaning. Returns true when handled.
@@ -167,6 +173,12 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
         }
         Key::ArrowUp | Key::ArrowDown if m.ctrl && !m.shift => {
             let id = if key == Key::ArrowUp { "edit.extend_selection_up" } else { "edit.extend_selection_down" };
+            let _ = app.run(id, json!({}));
+            true
+        }
+        // Ctrl+Shift+Up/Down nudge clip gain off macOS too (the registry's Ctrl is the Mac Control key).
+        Key::ArrowUp | Key::ArrowDown if !mac && m.ctrl && m.shift && !m.alt => {
+            let id = if key == Key::ArrowUp { "clip.gain_nudge_up" } else { "clip.gain_nudge_down" };
             let _ = app.run(id, json!({}));
             true
         }
@@ -276,8 +288,8 @@ mod label_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{mods_match, parse, search_chord};
-    use egui::Modifiers;
+    use super::{command_for, mods_match, parse, search_chord};
+    use egui::{Key, Modifiers};
 
     /// Ctrl held on Windows or Linux, as egui reports it.
     const PC_CTRL: Modifiers = Modifiers { ctrl: true, command: true, ..Modifiers::NONE };
@@ -306,5 +318,12 @@ mod tests {
         assert!(!mods_match(want("Cmd+X"), Modifiers { ctrl: true, ..MAC_CMD }, true), "Cmd+Ctrl+X is not Cut");
         assert!(!search_chord(MAC_CMD, true));
         assert!(search_chord(Modifiers { ctrl: true, ..MAC_CMD }, true));
+    }
+
+    #[test]
+    fn shift_cmd_k_prompts_for_a_folder_to_export_clips() {
+        assert_eq!(command_for(Key::K, Modifiers { shift: true, ..MAC_CMD }, true), Some("file.export_clips"));
+        assert_eq!(command_for(Key::K, Modifiers { shift: true, ..PC_CTRL }, false), Some("file.export_clips"));
+        assert!(crate::dialogs::takes_path("file.export_clips"));
     }
 }
