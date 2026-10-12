@@ -759,7 +759,7 @@ fn consolidate(e: &mut Engine, p: &Value) -> Result<Value> {
     }
     let mut n = 0;
     for t in tracks {
-        if crate::io::consolidate(e, t, r)? {
+        if crate::io::consolidate(e, "edit.consolidate", t, r)? {
             n += 1;
         }
     }

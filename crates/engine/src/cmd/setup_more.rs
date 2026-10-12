@@ -147,7 +147,9 @@ fn prepare_dpe(e: &mut Engine, p: &Value) -> Result<Value> {
     let r = soundcraft_time::Range::new(0, end);
     let mut n = 0;
     for t in tracks {
-        if crate::io::consolidate(e, t, r)? {
+        // Each track keeps its own length (its material plus a second), as before.
+        let tr = crate::io::bounded_to_track(e.session(), t, r);
+        if crate::io::consolidate(e, id, t, tr)? {
             n += 1;
         }
     }
