@@ -490,7 +490,11 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
             toggle(&mut app.ui.show_audio_health)
         }
         "window.about" => toggle(&mut app.ui.show_about),
-        "window.midi_editor" | "window.midi_front" => toggle(&mut app.ui.show_midi_editor),
+        "window.midi_editor" => toggle(&mut app.ui.show_midi_editor),
+        "window.midi_front" => {
+            app.ui.show_midi_editor = true;
+            json!({"value": true})
+        }
         "window.midi_back" => {
             app.ui.show_midi_editor = false;
             json!({})
