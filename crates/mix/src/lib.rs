@@ -344,6 +344,13 @@ impl SlotCtx<'_> {
         }
     }
 
+    /// True when the host handed over an instance for this slot. It replaces whatever the slot
+    /// holds, even an instance of the same plugin: the host made it because it no longer tracks
+    /// the old one (it was removed and re-added between two renders), and drives its editor.
+    fn waiting(&self, t: TrackId, idx: usize) -> bool {
+        self.external && self.adopt.contains_key(&(t, idx))
+    }
+
     /// A new instance for `ins` on track `t`, slot `idx`, prepared for `ch` channels.
     fn make(&mut self, t: TrackId, idx: usize, ins: &soundcraft_model::Insert, ch: usize) -> Option<PluginSlot> {
         let third = is_third_party(&ins.plugin);
@@ -511,7 +518,7 @@ impl MixEngine {
             strip.plugins.resize_with(t.mixer.inserts.len(), || None);
             for (idx, (slot, ins)) in strip.plugins.iter_mut().zip(t.mixer.inserts.iter()).enumerate() {
                 match ins {
-                    Some(i) if slot.as_ref().is_none_or(|p| p.id != i.plugin || p.ch != ch) => {
+                    Some(i) if slot.as_ref().is_none_or(|p| p.id != i.plugin || p.ch != ch) || cx.waiting(t.id, idx) => {
                         let old = slot.take();
                         cx.retire(old);
                         *slot = cx.make(t.id, idx, i, ch);
@@ -525,7 +532,9 @@ impl MixEngine {
             }
             let want = t.instrument.as_ref();
             let ich = ch.max(2);
-            if strip.instrument.as_ref().map(|p| (p.id.as_str(), p.ch)) != want.map(|i| (i.plugin.as_str(), ich)) {
+            if strip.instrument.as_ref().map(|p| (p.id.as_str(), p.ch)) != want.map(|i| (i.plugin.as_str(), ich))
+                || (want.is_some() && cx.waiting(t.id, INSTRUMENT_SLOT))
+            {
                 let old = strip.instrument.take();
                 cx.retire(old);
                 strip.instrument = want.and_then(|i| cx.make(t.id, INSTRUMENT_SLOT, i, ich));
@@ -2216,6 +2225,31 @@ mod tests {
         render_block(&mut eng, &s, 21 * 512);
         assert_eq!(eng.take_retired().len(), 1);
         assert!(eng.drain_plugins().is_empty());
+    }
+
+    #[test]
+    fn a_new_instance_replaces_a_matching_one_in_its_slot() {
+        // The host removed and re-added the plugin, and both session updates reached the audio
+        // thread in one go: the slot still holds the old instance (same id, same channels), but
+        // the host made a new one and drives its editor. The new one must win, or the editor
+        // talks to an instance that was retired ("the plugin is gone").
+        let (mut s, t) = session_with_dc(0.5, 48_000);
+        s.track_mut(t).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.fake"));
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        let sets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let make = |blob: &[u8]| {
+            let mut gain = soundcraft_dsp::create("gain").unwrap();
+            gain.prepare(48_000.0, 512, 1);
+            Box::new(Stateful { inner: gain, blob: blob.to_vec(), sets: Arc::clone(&sets) })
+        };
+        eng.adopt(vec![PreparedInstance { track: t, slot: 0, id: "clap:test.fake".into(), ch: 1, plugin: make(b"old") }]);
+        render_block(&mut eng, &s, 0);
+        assert_eq!(eng.capture_states(), vec![(t, 0, b"old".to_vec())]);
+        eng.adopt(vec![PreparedInstance { track: t, slot: 0, id: "clap:test.fake".into(), ch: 1, plugin: make(b"new") }]);
+        render_block(&mut eng, &s, 512);
+        assert_eq!(eng.capture_states(), vec![(t, 0, b"new".to_vec())]);
+        assert_eq!(eng.take_retired().len(), 1, "the old instance is retired");
     }
 
     #[test]
