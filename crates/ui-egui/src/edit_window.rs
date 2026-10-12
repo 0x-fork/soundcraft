@@ -1684,7 +1684,7 @@ fn drive_drag(app: &mut SoundApp, ctx: &egui::Context) {
         Some(Gesture::MoveClips { grab_at, delta, from_track, to_track: tt, .. }) => {
             let raw = at - *grab_at;
             *delta = if s.edit.edit_mode.is_grid() {
-                let base = s.track(*from_track).and_then(|t| clip_at(t, at)).map_or(*grab_at, |c| c.start);
+                let base = s.track(*from_track).and_then(|t| clip_at(t, *grab_at)).map_or(*grab_at, |c| c.start);
                 snap(&s, base + raw) - base
             } else {
                 raw
