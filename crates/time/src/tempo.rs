@@ -200,7 +200,7 @@ impl TempoMap {
         let mut cur_tick = 0i64;
         let first = self.meter_at_tick(0);
         if bar < 1 {
-            return (bar - 1).saturating_mul(first.ticks_per_bar());
+            return bar.saturating_sub(1).saturating_mul(first.ticks_per_bar());
         }
         for (i, m) in self.meters.iter().enumerate() {
             let next_tick = self.meters.get(i + 1).map(|n| n.tick);
@@ -286,6 +286,13 @@ mod tests {
         assert_eq!(m.samples_at_bar_beat(BarBeat { bar: 2, beat: 1, tick: 0 }, sr), 96_000);
         assert_eq!(m.bar_beat_at(96_000, sr), BarBeat { bar: 2, beat: 1, tick: 0 });
         assert_eq!(m.bar_beat_at(24_000, sr), BarBeat { bar: 1, beat: 2, tick: 0 });
+    }
+
+    #[test]
+    fn minimum_bar_saturates_instead_of_overflowing() {
+        let m = TempoMap::default();
+        assert_eq!(m.bar_start_tick(i64::MIN), i64::MIN);
+        assert_eq!(m.bar_start_tick(0), -TICKS_PER_QUARTER * 4);
     }
 
     #[test]

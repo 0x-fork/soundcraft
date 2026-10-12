@@ -144,6 +144,15 @@ mod tests {
     }
 
     #[test]
+    fn minimum_bar_parses_without_overflow() {
+        let (sr, map, rate) = ctx();
+        let p = |t: &str| parse_position(t, TimeFormat::BarsBeats, sr, &map, rate, 0);
+        assert!(p("-9223372036854775808|01|000").is_ok_and(|s| s < 0));
+        assert_eq!(p("2|3|000").ok(), Some(144_000));
+        assert_eq!(p("0|1|000").ok(), Some(-96_000));
+    }
+
+    #[test]
     fn parse_round_trips() {
         let (sr, map, rate) = ctx();
         for fmt in TimeFormat::ALL {
