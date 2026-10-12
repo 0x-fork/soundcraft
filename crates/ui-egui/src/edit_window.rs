@@ -816,6 +816,7 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
     } else if nresp.clicked() {
         click_track(app, id, ui.input(|i| i.modifiers), in_edit_window);
     }
+    nresp.context_menu(|ui| track_context_menu(app, ui, id));
     // Drag the name plate to reorder tracks.
     if nresp.dragged()
         && let Some(p) = ui.ctx().pointer_latest_pos()
@@ -1079,7 +1080,7 @@ fn view_menu(app: &mut SoundApp, ui: &mut Ui, track: &Track) {
     }
 }
 
-fn track_context_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
+pub(crate) fn track_context_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
     let tid = id.0;
     let items: [(&str, &str); 10] = [
         ("Rename...", "ui.rename_track"),
