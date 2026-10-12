@@ -19,6 +19,25 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     crate::docking::show(app, ui, crate::MainWindow::Mix);
 }
 
+/// The Mix window in its own native window (Window › Mix in Separate Window), so Edit and Mix can
+/// be seen at once, e.g. one per monitor. Closing that window brings Mix back into the main one.
+/// Backends without multiple windows show it as a floating egui window instead.
+pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
+    let title = format!("{}  —  Mix", app.engine.session().name);
+    let builder = egui::ViewportBuilder::default().with_title(title).with_inner_size([1100.0, 720.0]).with_min_inner_size([480.0, 320.0]);
+    ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("soundcraft.mix"), builder, |ui, _class| {
+        ui.set_style(ui.ctx().global_style());
+        if std::mem::take(&mut app.focus_mix) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        show(app, ui);
+        if ui.ctx().input(|i| i.viewport().close_requested()) {
+            app.ui.mix_separate = false;
+            app.ui.window = crate::MainWindow::Mix;
+        }
+    });
+}
+
 pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
     let ids: Vec<TrackId> = app.engine.session().tracks.iter().filter(|x| !x.hidden && x.kind != TrackKind::Video).map(|x| x.id).collect();
     // Per-channel peaks for multichannel meters (read once per frame).
