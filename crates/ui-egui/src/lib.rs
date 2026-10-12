@@ -18,6 +18,7 @@ pub mod mix_window;
 pub mod ops_windows;
 pub mod palette;
 pub mod panels;
+mod recent;
 pub mod score_editor;
 pub mod shortcuts;
 pub mod theme;
@@ -48,6 +49,8 @@ pub enum MainWindow {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct UiState {
+    /// File › Open Recent, newest first (see `recent`).
+    pub recent_sessions: Vec<String>,
     pub docking: docking::Workspace,
     #[serde(default = "docking::mix_default")]
     pub mix_docking: docking::Workspace,
@@ -111,6 +114,7 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         UiState {
+            recent_sessions: Vec::new(),
             docking: docking::Workspace::default(),
             mix_docking: docking::mix_default(),
             window: MainWindow::Edit,
@@ -218,6 +222,12 @@ pub enum Gesture {
 
 pub struct SoundApp {
     pub engine: Engine,
+    /// The session path as of the last frame, and whether the recent list changed since the host
+    /// last saved it (see `recent`).
+    recent_seen: Option<String>,
+    recent_changed: bool,
+    /// When the recent sessions were last checked for existence, which list, and the result.
+    recent_checked: Option<(f64, Vec<String>, Vec<bool>)>,
     pub player: Option<Player>,
     /// Input capture, opened on first record.
     pub recorder: Option<soundcraft_playback::record::Recorder>,
@@ -285,6 +295,9 @@ fn automation_step_due(pos: Samples, last: Samples, step: Samples) -> bool {
 impl SoundApp {
     pub fn new(engine: Engine, player: Option<Player>, services: Services) -> Self {
         SoundApp {
+            recent_seen: engine.path.clone(),
+            recent_changed: false,
+            recent_checked: None,
             engine,
             player,
             recorder: None,
@@ -807,6 +820,7 @@ impl SoundApp {
         let dt = self.last_frame.replace(now).map_or(1.0 / 60.0, |t| (now - t) as f32).clamp(0.0, 0.25);
         self.frame_ms = self.frame_ms * 0.9 + dt * 1000.0 * 0.1;
         control::drain(self, ctx);
+        self.note_recent_session();
         self.apply_editor_edits();
         if !ctx.input(|i| i.pointer.any_down()) {
             if matches!(self.gesture, Some(Gesture::Fader { .. })) {
