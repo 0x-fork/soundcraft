@@ -275,6 +275,21 @@ fn fold_down_param(p: &Value, id: &str) -> Result<bool> {
 }
 
 fn bounce(e: &mut Engine, p: &Value) -> Result<Value> {
+    let job = bounce_job(e, p)?;
+    let (path, seconds) = (job.path().to_string_lossy().into_owned(), e.session().sample_rate.seconds(job.range().len()));
+    let done = job.run()?;
+    Ok(json!({
+        "path": path,
+        "bytes": done.bytes,
+        "seconds": seconds,
+        "peak_db": done.peak_db,
+        "lufs": done.lufs,
+        "true_peak_db": done.true_peak_db,
+    }))
+}
+
+/// The bounce `file.bounce_mix` runs for `p`, not rendered yet.
+pub fn bounce_job(e: &Engine, p: &Value) -> Result<crate::io::Bounce> {
     let path = str_param(p, "path").ok_or_else(|| bad("file.bounce_mix", "`path` required"))?.to_string();
     let r = range_param(e, "file.bounce_mix", p)?;
     let r = if r.is_empty() { soundcraft_time::Range::new(0, e.session().content_end().max(1)) } else { r };
@@ -292,15 +307,7 @@ fn bounce(e: &mut Engine, p: &Value) -> Result<Value> {
     let normalize = bool_or(p, "normalize", false);
     let fold = fold_down_param(p, "file.bounce_mix")?;
     let bus = bounce_bus(e, p)?;
-    let done = crate::io::Bounce::new(e.session_arc(), std::path::Path::new(&path), r, &opts, bus, normalize, fold)?.run()?;
-    Ok(json!({
-        "path": path,
-        "bytes": done.bytes,
-        "seconds": e.session().sample_rate.seconds(r.len()),
-        "peak_db": done.peak_db,
-        "lufs": done.lufs,
-        "true_peak_db": done.true_peak_db,
-    }))
+    crate::io::Bounce::new(e.session_arc(), std::path::Path::new(&path), r, &opts, bus, normalize, fold)
 }
 
 /// Write the score of the chosen MIDI tracks as MusicXML (or SVG when `svg`).

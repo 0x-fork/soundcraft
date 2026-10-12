@@ -36,6 +36,8 @@ mod view;
 mod view_more;
 mod vst3;
 
+pub use file::bounce_job;
+
 pub type Run = fn(&mut Engine, &Value) -> Result<Value>;
 /// `Err(reason)` = disabled.
 pub type Enabled = fn(&Engine) -> std::result::Result<(), String>;

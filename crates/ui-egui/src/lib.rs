@@ -4,6 +4,7 @@
 //! executing commands. It can be replaced without touching anything below it.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod bounce;
 pub mod control;
 pub mod credits;
 pub mod dialogs;
@@ -270,6 +271,8 @@ pub struct SoundApp {
     last_meter_poll: f64,
     /// Movies for the Video window and Video track (decoded in the background).
     pub video: video_track::VideoPool,
+    /// The Bounce Mix in progress, rendered a slice per frame.
+    pub bounce: Option<soundcraft_engine::io::Bounce>,
 }
 
 /// Whether another automation-write pass is due: the transport moved at least
@@ -326,6 +329,7 @@ impl SoundApp {
             last_frame: None,
             last_meter_poll: f64::NEG_INFINITY,
             video: video_track::VideoPool::default(),
+            bounce: None,
         }
     }
 
@@ -808,6 +812,7 @@ impl SoundApp {
         self.frame_ms = self.frame_ms * 0.9 + dt * 1000.0 * 0.1;
         control::drain(self, ctx);
         self.apply_editor_edits();
+        bounce::step(self, ctx);
         if !ctx.input(|i| i.pointer.any_down()) {
             if matches!(self.gesture, Some(Gesture::Fader { .. })) {
                 self.gesture = None;

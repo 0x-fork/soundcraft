@@ -238,8 +238,9 @@ pub fn export_midi(e: &Engine, only: Option<&[TrackId]>) -> Result<Vec<u8>> {
 }
 
 /// A bounce of the main mix, or of one bus, over a range, written to its file block by block so no
-/// bounce has to fit in memory. The file appears at its path only once complete; a bounce that
-/// fails leaves any older file there alone.
+/// bounce has to fit in memory, and rendered a slice at a time ([`Bounce::step`]) so a UI can show
+/// progress. The file appears at its path only once complete; a bounce that fails, or is dropped
+/// unfinished, leaves any older file there alone.
 pub struct Bounce {
     session: Arc<Session>,
     path: PathBuf,
@@ -247,10 +248,12 @@ pub struct Bounce {
     range: Range,
     bus: Option<BusId>,
     fold: Option<ChannelFormat>,
+    normalize: bool,
     /// Measuring the peak to normalize to, the first of two passes.
     measuring: bool,
     render: soundcraft_mix::RangeRender,
     block: Vec<Vec<f32>>,
+    done: usize,
     gain: f32,
     peak: f32,
     meter: soundcraft_dsp::meter::LoudnessMeter,
@@ -303,9 +306,11 @@ impl Bounce {
             range: r,
             bus,
             fold,
+            normalize,
             measuring: normalize,
             render,
             block: Vec::new(),
+            done: 0,
             gain: 1.0,
             peak: 0.0,
             meter,
@@ -313,12 +318,32 @@ impl Bounce {
         })
     }
 
-    /// Renders the whole bounce and completes its file.
-    pub fn run(mut self) -> Result<Bounced> {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn range(&self) -> Range {
+        self.range
+    }
+
+    /// How far along the bounce is, from 0 to 1.
+    pub fn progress(&self) -> f32 {
+        let pass = (self.done as f64 / self.range.len().max(1) as f64).min(1.0) as f32;
+        match (self.normalize, self.measuring) {
+            (false, _) => pass,
+            (true, true) => pass / 2.0,
+            (true, false) => 0.5 + pass / 2.0,
+        }
+    }
+
+    /// Renders blocks until `more` returns false (at least one per call). Returns the finished
+    /// bounce once its file is complete.
+    pub fn step(&mut self, mut more: impl FnMut() -> bool) -> Result<Option<Bounced>> {
         loop {
             match self.render.next_block(&self.session) {
                 Some((chunk, n)) => {
                     fill(&mut self.block, chunk, n, self.fold, self.gain);
+                    self.done += n;
                     self.peak = self.peak.max(soundcraft_dsp::offline::peak(&self.block));
                     if !self.measuring {
                         self.meter.process(&self.block, n);
@@ -330,10 +355,23 @@ impl Bounce {
                 None if self.measuring => {
                     self.gain = if self.peak > 0.0 { soundcraft_dsp::db_to_gain(-0.1) / self.peak } else { 1.0 };
                     self.peak = 0.0;
+                    self.done = 0;
                     self.measuring = false;
                     self.render = soundcraft_mix::RangeRender::new(&self.session, self.bus, self.range, 1024);
                 }
-                None => return self.finish(),
+                None => return self.finish().map(Some),
+            }
+            if !more() {
+                return Ok(None);
+            }
+        }
+    }
+
+    /// Renders the whole bounce (see [`Bounce::step`]).
+    pub fn run(mut self) -> Result<Bounced> {
+        loop {
+            if let Some(done) = self.step(|| true)? {
+                return Ok(done);
             }
         }
     }

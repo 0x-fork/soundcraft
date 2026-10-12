@@ -178,11 +178,17 @@ fn system_usage(app: &mut SoundApp, ctx: &egui::Context) {
 fn task_manager(app: &mut SoundApp, ctx: &egui::Context) {
     let mut open = app.ui.show_task_manager;
     win(ctx, &mut open, "Task Manager", vec2(320.0, 120.0), |ui| {
-        ui.label("No background tasks are running.");
+        match &app.bounce {
+            Some(b) => {
+                ui.label(format!("Bouncing {} ({:.0}%)", b.path().display(), b.progress() * 100.0));
+                ui.add(egui::ProgressBar::new(b.progress()));
+            }
+            None => {
+                ui.label("No background tasks are running.");
+            }
+        }
         ui.label(
-            egui::RichText::new("Renders, bounces and AudioSuite processes run to completion before returning.")
-                .small()
-                .color(Tokens::current().text_dim),
+            egui::RichText::new("Renders and AudioSuite processes run to completion before returning.").small().color(Tokens::current().text_dim),
         );
     });
     app.ui.show_task_manager = open;
