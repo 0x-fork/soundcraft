@@ -127,17 +127,23 @@ pub fn instance_specs(s: &Session) -> Vec<InstanceSpec> {
     out
 }
 
+/// A plugin made by [`create_instance`].
+pub struct NewInstance {
+    pub plugin: Box<dyn Plugin>,
+    /// The plugin refused the stored state and starts from its defaults.
+    pub refused_state: bool,
+}
+
 /// Creates a plugin (built-in or hosted), restores `state` (if any) and prepares it. Expensive
 /// for third-party plugins: in realtime use, call it on the control thread.
-pub fn create_instance(id: &str, state: Option<&[u8]>, sample_rate: f32, max_block: usize, ch: usize) -> Option<Box<dyn Plugin>> {
-    let mut p = create_plugin(id)?;
-    if let Some(st) = state
-        && !p.load_state(st)
-    {
+pub fn create_instance(id: &str, state: Option<&[u8]>, sample_rate: f32, max_block: usize, ch: usize) -> Option<NewInstance> {
+    let mut plugin = create_plugin(id)?;
+    let refused_state = state.is_some_and(|st| !plugin.load_state(st));
+    if refused_state {
         log::warn!("{id}: the plugin did not accept its stored state");
     }
-    p.prepare(sample_rate, max_block, ch);
-    Some(p)
+    plugin.prepare(sample_rate, max_block, ch);
+    Some(NewInstance { plugin, refused_state })
 }
 
 /// Peak meter values for one strip (linear, per channel, max over the last block).
@@ -357,7 +363,7 @@ impl SlotCtx<'_> {
             }
         } else {
             let state = if third { ins.state_bytes() } else { None };
-            create_instance(&ins.plugin, state.as_deref(), self.sr, self.mb, ch)
+            create_instance(&ins.plugin, state.as_deref(), self.sr, self.mb, ch).map(|n| n.plugin)
         }?;
         Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new() })
     }

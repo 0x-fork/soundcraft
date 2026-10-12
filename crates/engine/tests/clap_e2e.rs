@@ -70,6 +70,17 @@ fn clap_insert_renders_through_the_mix() {
 }
 
 #[test]
+fn a_refused_state_is_reported() {
+    install_fixture();
+    let gain = "clap:org.soundcraft.test.gain";
+    let make = |state: Option<&[u8]>| soundcraft_mix::create_instance(gain, state, 48_000.0, 512, 2).unwrap();
+    let saved = make(None).plugin.save_state().unwrap();
+    assert!(!make(None).refused_state);
+    assert!(!make(Some(&saved)).refused_state);
+    assert!(make(Some(&[0xff; 16])).refused_state, "NaN gain");
+}
+
+#[test]
 fn clap_state_is_captured_stored_and_restored_before_the_first_block() {
     install_fixture();
     let gain = "clap:org.soundcraft.test.gain";
@@ -88,7 +99,7 @@ fn clap_state_is_captured_stored_and_restored_before_the_first_block() {
     eng.set_external_instances(true);
     let specs = soundcraft_mix::instance_specs(e.session());
     assert_eq!(specs.len(), 1);
-    let mut p = soundcraft_mix::create_instance(&specs[0].id, None, 48_000.0, 512, specs[0].ch).unwrap();
+    let mut p = soundcraft_mix::create_instance(&specs[0].id, None, 48_000.0, 512, specs[0].ch).unwrap().plugin;
     p.set_param("7", 1.5);
     let mut io = vec![vec![0.0f32; 64]];
     p.process(&mut io, 64);

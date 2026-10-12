@@ -27,7 +27,7 @@ use soundcraft_dsp::{Plugin, PluginEditor, PluginStateReader};
 use soundcraft_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_stereo_fold, main_channels};
 use soundcraft_model::{Session, TrackId};
 use soundcraft_time::{Range, Samples};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -319,13 +319,16 @@ struct Side {
     /// Editor handles of the live instances.
     editors: HashMap<(TrackId, usize), Box<dyn PluginEditor>>,
     /// State readers of the live instances.
-    states: HashMap<(TrackId, usize), Box<dyn PluginStateReader>>,
+    states: BTreeMap<(TrackId, usize), Box<dyn PluginStateReader>>,
+    /// Instances that refused their stored state: saves keep that state until the plugin's editor
+    /// is opened.
+    refused: HashSet<(TrackId, usize)>,
     garbage: Receiver<Vec<Box<dyn Plugin>>>,
 }
 
 impl Side {
     fn new(rate: f32, garbage: Receiver<Vec<Box<dyn Plugin>>>) -> Side {
-        Side { shadow: HashMap::new(), rate, editors: HashMap::new(), states: HashMap::new(), garbage }
+        Side { shadow: HashMap::new(), rate, editors: HashMap::new(), states: BTreeMap::new(), refused: HashSet::new(), garbage }
     }
 
     /// Drops retired instances (closing their editors first, inside the plugin's drop).
@@ -338,6 +341,7 @@ impl Side {
     fn forget(&mut self, key: (TrackId, usize)) {
         self.shadow.remove(&key);
         self.states.remove(&key);
+        self.refused.remove(&key);
         if let Some(mut e) = self.editors.remove(&key) {
             e.close();
         }
@@ -551,10 +555,7 @@ impl Player {
 
     /// Opens the plugin's own editor window. Main thread only.
     pub fn open_editor(&self, track: TrackId, slot: usize) -> Result<(), String> {
-        match self.side().editors.get_mut(&(track, slot)) {
-            Some(e) => e.open(),
-            None => Err("this plugin has no editor (or it is not loaded)".into()),
-        }
+        self.side().open_editor((track, slot))
     }
 
     pub fn close_editor(&self, track: TrackId, slot: usize) {
@@ -644,9 +645,14 @@ fn copy_meter_snapshot(source: &MeterSnapshot, out: &mut MeterSnapshot) {
 
 impl Side {
     fn capture_states(&mut self) -> PluginStates {
-        let mut out: PluginStates = self.states.iter_mut().filter_map(|(&(t, slot), r)| Some((t, slot, r.save_state()?))).collect();
-        out.sort_by_key(|(t, slot, _)| (*t, *slot));
-        out
+        self.states.iter_mut().filter(|(k, _)| !self.refused.contains(*k)).filter_map(|(&(t, slot), r)| Some((t, slot, r.save_state()?))).collect()
+    }
+
+    fn open_editor(&mut self, key: (TrackId, usize)) -> Result<(), String> {
+        let e = self.editors.get_mut(&key).ok_or_else(|| "this plugin has no editor (or it is not loaded)".to_string())?;
+        e.open()?;
+        self.refused.remove(&key);
+        Ok(())
     }
 
     /// Creates the third-party instances `s` needs that the audio thread does not have yet.
@@ -675,12 +681,15 @@ impl Side {
             self.forget(key);
             let made = soundcraft_mix::create_instance(&spec.id, spec.state.as_deref(), sr, BLOCK, spec.ch);
             self.shadow.insert(key, (spec.id.clone(), spec.ch, made.is_some()));
-            if let Some(mut plugin) = made {
+            if let Some(soundcraft_mix::NewInstance { mut plugin, refused_state }) = made {
                 if let Some(e) = plugin.editor() {
                     self.editors.insert(key, e);
                 }
                 if let Some(r) = plugin.state_reader() {
                     self.states.insert(key, r);
+                }
+                if refused_state {
+                    self.refused.insert(key);
                 }
                 out.push(PreparedInstance { track: spec.track, slot: spec.slot, id: spec.id, ch: spec.ch, plugin });
             }
@@ -833,32 +842,6 @@ mod tests {
         assert_eq!(shared.meters.lock().unwrap().main.peaks.len(), 6);
     }
 
-    struct Stateful(Box<dyn Plugin>);
-
-    impl Plugin for Stateful {
-        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
-            self.0.info()
-        }
-        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
-            self.0.prepare(sr, mb, ch);
-        }
-        fn reset(&mut self) {
-            self.0.reset();
-        }
-        fn set_param(&mut self, id: &str, v: f32) -> bool {
-            self.0.set_param(id, v)
-        }
-        fn param(&self, id: &str) -> Option<f32> {
-            self.0.param(id)
-        }
-        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
-            self.0.process(io, frames);
-        }
-        fn save_state(&mut self) -> Option<Vec<u8>> {
-            Some(b"blob".to_vec())
-        }
-    }
-
     #[test]
     fn instances_arrive_with_the_session_and_leave_through_the_return_channel() {
         use soundcraft_model::{ChannelFormat, Insert, TrackKind};
@@ -875,7 +858,7 @@ mod tests {
         let (tx, rx) = channel();
         let (gtx, grx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(soundcraft_model::Session::default()), 48_000.0, gtx);
-        let plugin: Box<dyn Plugin> = Box::new(Stateful(soundcraft_dsp::create("gain").unwrap()));
+        let plugin = soundcraft_dsp::create("gain").unwrap();
         tx.send(Cmd::Session(Arc::clone(&s), vec![PreparedInstance { track: t, slot: 1, id: "clap:test.fake".into(), ch: 2, plugin }])).unwrap();
         let mut out = vec![0.0f32; 256];
         st.fill(&mut out, 2);
@@ -887,13 +870,7 @@ mod tests {
         // A sample-rate change rebuilds the engine without dropping plugins on this thread.
         tx.send(Cmd::Session(
             Arc::clone(&s),
-            vec![PreparedInstance {
-                track: t,
-                slot: 1,
-                id: "clap:test.fake".into(),
-                ch: 2,
-                plugin: Box::new(Stateful(soundcraft_dsp::create("gain").unwrap())),
-            }],
+            vec![PreparedInstance { track: t, slot: 1, id: "clap:test.fake".into(), ch: 2, plugin: soundcraft_dsp::create("gain").unwrap() }],
         ))
         .unwrap();
         st.fill(&mut out, 2);
@@ -904,26 +881,45 @@ mod tests {
         assert_eq!(grx.try_recv().unwrap().len(), 1);
     }
 
-    struct Reads(Option<&'static [u8]>);
-
-    impl PluginStateReader for Reads {
-        fn save_state(&mut self) -> Option<Vec<u8>> {
-            self.0.map(<[u8]>::to_vec)
-        }
-    }
-
     #[test]
     fn plugin_states_are_read_without_the_audio_thread() {
         let mut side = Side::new(48_000.0, channel().1);
         let (a, b) = (TrackId(1), TrackId(2));
-        side.states.insert((b, 0), Box::new(Reads(Some(b"b0"))));
-        side.states.insert((a, soundcraft_mix::INSTRUMENT_SLOT), Box::new(Reads(Some(b"synth"))));
-        side.states.insert((a, 3), Box::new(Reads(Some(b"a3"))));
-        side.states.insert((a, 4), Box::new(Reads(None)));
+        side.states.insert((b, 0), Box::new(|| Some(b"b0".to_vec())));
+        side.states.insert((a, soundcraft_mix::INSTRUMENT_SLOT), Box::new(|| Some(b"synth".to_vec())));
+        side.states.insert((a, 3), Box::new(|| Some(b"a3".to_vec())));
+        side.states.insert((a, 4), Box::new(|| None));
         let want = vec![(a, 3, b"a3".to_vec()), (a, soundcraft_mix::INSTRUMENT_SLOT, b"synth".to_vec()), (b, 0, b"b0".to_vec())];
         assert_eq!(side.capture_states(), want);
         side.forget((a, 3));
         assert_eq!(side.capture_states(), want[1..]);
+    }
+
+    struct Window;
+
+    impl PluginEditor for Window {
+        fn open(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn close(&mut self) {}
+        fn is_open(&self) -> bool {
+            false
+        }
+        fn idle(&mut self) -> Vec<(String, f32)> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn a_refused_state_is_kept_until_the_editor_opens() {
+        let mut side = Side::new(48_000.0, channel().1);
+        let k = (TrackId(1), 0);
+        side.states.insert(k, Box::new(|| Some(b"defaults".to_vec())));
+        side.editors.insert(k, Box::new(Window));
+        side.refused.insert(k);
+        assert!(side.capture_states().is_empty());
+        side.open_editor(k).unwrap();
+        assert_eq!(side.capture_states(), vec![(TrackId(1), 0, b"defaults".to_vec())]);
     }
 
     #[test]
