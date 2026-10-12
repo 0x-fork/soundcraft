@@ -185,11 +185,18 @@ pub fn relink_videos(s: &mut Session, session_dir: &Path) -> Vec<String> {
     missing
 }
 
+/// Most meter changes a MIDI file may bring into the tempo map; scores have a handful.
+const MAX_MIDI_METERS: usize = 10_000;
+
 /// Import a Standard MIDI File as MIDI tracks (one per SMF track).
 pub fn import_midi_bytes(e: &mut Engine, bytes: &[u8], at: Samples, tempo_map: bool) -> Result<Vec<TrackId>> {
     let smf = soundcraft_midi::read_smf(bytes).map_err(|err| EngineError::Io(err.to_string()))?;
     let s = e.session_mut();
     if tempo_map {
+        // Each meter is placed by walking the ones before it.
+        if smf.meters.len() > MAX_MIDI_METERS {
+            return Err(EngineError::Io(format!("MIDI file: more than {MAX_MIDI_METERS} meter changes")));
+        }
         for (tick, bpm) in &smf.tempos {
             let _ = s.tempo.set_tempo(*tick, *bpm);
         }
@@ -210,8 +217,11 @@ pub fn import_midi_bytes(e: &mut Engine, bytes: &[u8], at: Samples, tempo_map: b
         if let Some(t) = s.track_mut(id) {
             t.instrument = Some(soundcraft_model::Insert::new(if drums { "drum_synth" } else { "subtractive_synth" }));
         }
-        let end_tick = base_tick + tr.sequence.end_tick().max(1);
-        let len = s.tempo.tick_to_samples(end_tick, s.sample_rate) - at;
+        let end_tick = base_tick.saturating_add(tr.sequence.end_tick().max(1));
+        let len = s.tempo.tick_to_samples(end_tick, s.sample_rate).saturating_sub(at);
+        if len > s.sample_rate.samples(86_400.0) {
+            return Err(EngineError::Io(format!("MIDI track {}: longer than 24 hours", i + 1)));
+        }
         let cid = s.new_clip_id();
         crate::edit::place_clip(s, id, Clip::midi(cid, name, at, len.max(1), tr.sequence.clone()));
         out.push(id);
@@ -1275,6 +1285,25 @@ mod name_tests {
         let ids = import_midi_bytes(&mut e, &soundcraft_midi::write_smf(&smf).unwrap(), 0, false).unwrap();
         let track = e.session().track(ids[0]).unwrap();
         assert_eq!((track.name.len(), track.clips()[0].name.len()), (soundcraft_model::MAX_NAME_CHARS, soundcraft_model::MAX_NAME_CHARS));
+    }
+
+    #[test]
+    fn midi_longer_than_a_day_is_refused() {
+        let held = soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: (1 << 28) - 1 };
+        let sequence = soundcraft_midi::Sequence { notes: vec![held], ..Default::default() };
+        let smf = soundcraft_midi::Smf { tracks: vec![soundcraft_midi::SmfTrack { name: String::new(), sequence }], ..Default::default() };
+        let err = import_midi_bytes(&mut Engine::default(), &soundcraft_midi::write_smf(&smf).unwrap(), 0, false).unwrap_err();
+        assert!(err.to_string().contains("longer than 24 hours"), "{err}");
+    }
+
+    #[test]
+    fn midi_with_more_meter_changes_than_scores_have_is_refused() {
+        let note = soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 960 };
+        let sequence = soundcraft_midi::Sequence { notes: vec![note], ..Default::default() };
+        let meters = (0..=MAX_MIDI_METERS as i64).map(|bar| (bar * 3840, 4, 4)).collect();
+        let smf = soundcraft_midi::Smf { tracks: vec![soundcraft_midi::SmfTrack { name: String::new(), sequence }], meters, ..Default::default() };
+        let err = import_midi_bytes(&mut Engine::default(), &soundcraft_midi::write_smf(&smf).unwrap(), 0, true).unwrap_err();
+        assert!(err.to_string().contains("meter changes"), "{err}");
     }
 
     #[test]
