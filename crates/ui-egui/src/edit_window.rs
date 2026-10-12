@@ -535,18 +535,23 @@ fn draw_rulers(app: &mut SoundApp, ui: &mut Ui, area: Rect, tl: Rect, rulers: &[
                     ));
                     painter.text(pos2(x + 8.0, row.center().y), Align2::LEFT_CENTER, &m.name, bold(11.0), t.marker_text);
                 }
-                // Click on the marker ruler: recall a marker; double-click adds one.
+                // Click on the marker ruler: recall a marker; double-click renames it, or adds one.
                 let resp = ui.interact(row, ui.id().with(("marker_ruler", lane)), Sense::click());
                 if let Some(p) = resp.interact_pointer_pos() {
+                    let hit = s
+                        .markers
+                        .iter()
+                        .filter(|m| m.ruler == lane || (lane == 1 && m.ruler == 0))
+                        .find(|m| (x_of(&s, tl, m.start) - p.x).abs() < 8.0);
                     if resp.double_clicked() {
-                        let at = sample_at(&s, tl, p.x).max(0);
-                        let _ = app.run("markers.add", json!({"at": at, "ruler": lane}));
+                        match hit {
+                            Some(m) => app.dialogs.open_rename_marker(m.id, &m.name),
+                            None => {
+                                let _ = app.run("markers.add", json!({"at": sample_at(&s, tl, p.x).max(0), "ruler": lane}));
+                            }
+                        }
                     } else if resp.clicked()
-                        && let Some(m) = s
-                            .markers
-                            .iter()
-                            .filter(|m| m.ruler == lane || (lane == 1 && m.ruler == 0))
-                            .find(|m| (x_of(&s, tl, m.start) - p.x).abs() < 8.0)
+                        && let Some(m) = hit
                     {
                         let _ = app.run("markers.recall", json!({"number": m.number}));
                     }
