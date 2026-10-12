@@ -1,29 +1,34 @@
 //! The Edit window: toolbar, rulers, track headers and playlists.
 
 use crate::theme::{Tokens, bold, clip_colors, regular, rgb};
-use crate::widgets::{rec_toggle, selector_box, text_toggle};
-use crate::{Gesture, SoundApp, icons, toolbar};
+use crate::widgets::{raised_key, shade};
+use crate::{Gesture, SoundApp, toolbar};
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
 use soundcraft_model::{AutoParam, Clip, ClipContent, ClipId, Session, Tool, Track, TrackHeight, TrackId, TrackKind};
 use soundcraft_time::{GridValue, NoteValue, Range, Samples, TimeFormat, format_position};
 
-pub const HEADER_W: f32 = 236.0;
+pub const HEADER_W: f32 = 136.0;
 pub const COLUMN_W: f32 = 112.0;
+/// Insert, send and instrument columns: Pro Tools' narrow stacks of slots.
+const PLUGIN_COLUMN_W: f32 = 75.0;
+const IO_COLUMN_W: f32 = 94.0;
+/// The track colour strip at the left of each track header.
+const STRIP_W: f32 = 14.0;
 /// The row under the rulers that holds the column titles, when any column is shown.
 const COLUMN_TITLES_H: f32 = 16.0;
 
-/// An optional Edit-window column: view id, menu label and title.
-type Column = (&'static str, &'static str, &'static str);
+/// An optional Edit-window column: view id, menu label, title and width.
+type Column = (&'static str, &'static str, &'static str, f32);
 
 const COLUMNS: [Column; 7] = [
-    ("instruments", "Instruments", "INSTRUMENT"),
-    ("inserts_ae", "Inserts A-E", "INSERTS A-E"),
-    ("inserts_fj", "Inserts F-J", "INSERTS F-J"),
-    ("sends_ae", "Sends A-E", "SENDS A-E"),
-    ("sends_fj", "Sends F-J", "SENDS F-J"),
-    ("io", "I/O", "I/O"),
-    ("comments", "Comments", "COMMENTS"),
+    ("instruments", "Instruments", "INSTRUMENT", PLUGIN_COLUMN_W),
+    ("inserts_ae", "Inserts A-E", "INSERTS A-E", PLUGIN_COLUMN_W),
+    ("inserts_fj", "Inserts F-J", "INSERTS F-J", PLUGIN_COLUMN_W),
+    ("sends_ae", "Sends A-E", "SENDS A-E", PLUGIN_COLUMN_W),
+    ("sends_fj", "Sends F-J", "SENDS F-J", PLUGIN_COLUMN_W),
+    ("io", "I/O", "I/O", IO_COLUMN_W),
+    ("comments", "Comments", "COMMENTS", COLUMN_W),
 ];
 
 /// Optional Edit-window columns (View › Edit Window Views) that are switched on, left to right.
@@ -33,7 +38,7 @@ pub fn edit_columns(s: &Session) -> Vec<Column> {
 }
 
 pub fn header_width(s: &Session) -> f32 {
-    HEADER_W + COLUMN_W * edit_columns(s).len() as f32
+    HEADER_W + edit_columns(s).iter().map(|c| c.3).sum::<f32>()
 }
 pub const RULER_H: f32 = 17.0;
 
@@ -697,16 +702,16 @@ fn column_titles(ui: &Ui, rulers: Rect, cols: &[Column]) {
     let t = Tokens::current();
     let line = Stroke::new(1.0, t.border);
     let mut x = rulers.min.x + HEADER_W;
-    let end = x + cols.len() as f32 * COLUMN_W;
+    let end = x + cols.iter().map(|c| c.3).sum::<f32>();
     let row = Rect::from_min_max(pos2(x, rulers.max.y - COLUMN_TITLES_H - 3.0), pos2(end, rulers.max.y));
     ui.painter().rect_filled(row, 0.0, t.panel_bg2);
     ui.painter().hline(rulers.min.x..=end, row.min.y + 0.5, line);
     ui.painter().hline(rulers.min.x..=end, row.max.y - 0.5, line);
     ui.painter().vline(end - 0.5, row.y_range(), line);
-    for &(_, _, title) in cols {
+    for &(_, _, title, w) in cols {
         ui.painter().vline(x + 0.5, row.y_range(), line);
-        ui.painter().text(pos2(x + COLUMN_W / 2.0, row.center().y), Align2::CENTER_CENTER, title, bold(10.0), t.section_label);
-        x += COLUMN_W;
+        ui.painter().text(pos2(x + w / 2.0, row.center().y), Align2::CENTER_CENTER, title, bold(10.0), t.section_label);
+        x += w;
     }
 }
 
@@ -714,12 +719,12 @@ fn column_titles(ui: &Ui, rulers: Rect, cols: &[Column]) {
 fn views_button(app: &mut SoundApp, ui: &mut Ui, rulers: Rect) {
     let r = Rect::from_min_size(rulers.min + vec2(6.0, 5.0), vec2(50.0, 18.0));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
-    let resp = selector_box(&mut child, r.width(), r.height(), "Views", Tokens::current().text);
+    let resp = crate::widgets::selector_box(&mut child, r.width(), r.height(), "Views", Tokens::current().text);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, child.is_enabled(), "Views"));
     let resp = resp.on_hover_text("Columns beside the track headers: inserts, sends, I/O…");
     egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         let shown = edit_columns(app.engine.session());
-        for (id, label, _) in COLUMNS {
+        for (id, label, _, _) in COLUMNS {
             if ui.add(egui::Button::new(label).selected(shown.iter().any(|c| c.0 == id))).clicked() {
                 let _ = app.run(&format!("view.edit_{id}"), json!({}));
             }
@@ -742,22 +747,19 @@ fn track_row(app: &mut SoundApp, ui: &mut Ui, id: TrackId, row: Rect, tl: Rect) 
     let Some(track) = s.track(id).cloned() else { return };
     let selected = s.edit.selected_tracks.contains(&id);
     let head = Rect::from_min_max(row.min, pos2(row.min.x + HEADER_W, row.max.y));
-    let cols = edit_columns(app.engine.session());
-    for (i, c) in cols.iter().enumerate() {
-        let cr = Rect::from_min_size(pos2(head.max.x + i as f32 * COLUMN_W, row.min.y), vec2(COLUMN_W, row.height()));
-        header_column(app, ui, &track, c.0, cr);
+    let (head_bg, lane_bg) = crate::theme::track_backgrounds(track.color, selected, app.ui.track_tint);
+    let mut x = head.max.x;
+    for (col, _, _, w) in edit_columns(app.engine.session()) {
+        header_column(app, ui, &track, col, Rect::from_min_size(pos2(x, row.min.y), vec2(w, row.height())), head_bg);
+        x += w;
     }
     let main_h = track.height.points();
     let lane = lane_rect(&track, row, tl);
-    let (head_bg, lane_bg) = crate::theme::track_backgrounds(track.color, selected, app.ui.track_tint);
     ui.painter().rect_filled(head, 0.0, head_bg);
-    ui.painter().rect_filled(Rect::from_min_size(head.min, vec2(5.0, head.height())), 0.0, rgb(track.color));
+    ui.painter().rect_filled(Rect::from_min_size(head.min, vec2(STRIP_W, head.height())), 0.0, rgb(track.color));
     ui.painter().line_segment([pos2(head.min.x, row.max.y + 0.5), pos2(tl.max.x, row.max.y + 0.5)], Stroke::new(1.0, t.border));
-    ui.painter().hline(head.min.x + 5.0..=head.max.x, head.min.y + 0.5, Stroke::new(1.0, t.edge_light));
-    if selected && app.ui.track_tint > 0.0 {
-        ui.painter().rect_stroke(head.with_min_x(head.min.x + 5.0), 0.0, Stroke::new(2.0, t.accent), StrokeKind::Inside);
-    }
-    track_header(app, ui, &track, head, selected);
+    ui.painter().hline(head.min.x + STRIP_W..=head.max.x, head.min.y + 0.5, Stroke::new(1.0, t.edge_light));
+    track_header(app, ui, &track, head, selected, head_bg);
     // Lane.
     ui.painter().vline(tl.min.x - 0.5, row.y_range(), Stroke::new(1.0, t.border));
     let painter = ui.painter().with_clip_rect(lane.intersect(ui.clip_rect()));
@@ -834,7 +836,7 @@ fn playlist_lanes(app: &mut SoundApp, ui: &mut Ui, track: &Track, row: Rect, mai
     }
 }
 
-fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, selected: bool) {
+fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, selected: bool, head_bg: Color32) {
     let t = Tokens::current();
     let id = track.id;
     // Drag the bottom edge to resize (snaps to the height presets).
@@ -852,7 +854,6 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
             let _ = app.run("track.height", json!({"tracks": [id.0], "height": best.label()}));
         }
     }
-    let x0 = head.min.x + 12.0;
     let h = head.height();
     // Click on header background selects the track.
     let bg = ui.interact(head, ui.id().with(("hdr", id.0)), Sense::click());
@@ -860,22 +861,55 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
         click_track(app, id, ui.input(|i| i.modifiers), in_edit_window);
     }
     bg.context_menu(|ui| track_context_menu(app, ui, id));
-    // Name field.
-    let name_r = Rect::from_min_size(pos2(x0, head.min.y + 4.0), vec2(150.0, 17.0));
-    ui.painter().rect(
-        name_r,
-        CornerRadius::same(2),
-        if selected { t.name_field_sel } else { t.name_field },
-        Stroke::new(1.0, Color32::from_rgb(20, 20, 20)),
-        StrokeKind::Inside,
-    );
+    let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(pos2(head.min.x + x, head.min.y + y), vec2(w, h));
+    let strip = rgb(track.color);
+    // The strip's round button opens a folder, or any other track's options.
+    let round = at(2.0, 2.0, 10.0, 10.0);
+    let rresp = ui.interact(round, ui.id().with(("options", id.0)), Sense::click());
+    ui.painter().circle_filled(round.center(), 5.0, shade(strip, if rresp.hovered() { 0.6 } else { 0.45 }));
+    let open = !track.is_folder() || track.folder_open;
+    arrow(ui.painter(), round.center(), open, shade(strip, -0.8));
+    if track.is_folder() {
+        if rresp.on_hover_text(if track.folder_open { "Close folder" } else { "Open folder" }).clicked() {
+            let _ = app.run("track.folder_toggle", json!({"track": id.0}));
+        }
+    } else {
+        egui::Popup::menu(&rresp.on_hover_text("Track options")).show(|ui| track_context_menu(app, ui, id));
+    }
+    if h >= 40.0 && track.kind.has_playlist() {
+        let ar = at(3.0, h - 12.0, 9.0, 9.0);
+        let aresp = ui.interact(ar, ui.id().with(("auto_lane", id.0)), Sense::click());
+        let showing = AutoParam::parse(&track.view).is_some();
+        ui.painter().rect_filled(ar, 1.5, shade(strip, if aresp.hovered() || showing { 0.6 } else { 0.45 }));
+        let ink = shade(strip, -0.8);
+        let (a, b) = (ar.min + vec2(2.5, 2.5), ar.max - vec2(2.5, 2.5));
+        ui.painter().line_segment([a, b], Stroke::new(1.0, ink));
+        ui.painter().circle_filled(a, 1.3, ink);
+        ui.painter().circle_filled(b, 1.3, ink);
+        if aresp.on_hover_text(if showing { "Hide automation" } else { "Show volume automation" }).clicked() {
+            let view = if !showing {
+                "volume"
+            } else if track.kind.is_midi() {
+                "notes"
+            } else {
+                "waveform"
+            };
+            let _ = app.run("track.view", json!({"track": id.0, "view": view}));
+        }
+    }
+    // Name, highlighted when the track is selected, and the playlist menu beside it.
+    let name_r = at(16.0, 1.5, 97.0, 15.0);
+    if selected {
+        ui.painter().rect_filled(name_r, 2.0, t.name_field_sel);
+    }
     let shown_name = if app.engine.session().edit.flag("edit_view.track_number") {
         let n = app.engine.session().track_index(id).map_or(0, |i| i + 1);
         format!("{n}  {}", track.name)
     } else {
         track.name.clone()
     };
-    ui.painter().with_clip_rect(name_r).text(name_r.center(), Align2::CENTER_CENTER, &shown_name, bold(12.0), t.text_dark);
+    let name_color = if selected { t.text_dark } else { t.text.lerp_to_gamma(t.text_dim, 0.4) };
+    ui.painter().with_clip_rect(name_r).text(pos2(name_r.min.x + 1.5, name_r.center().y), Align2::LEFT_CENTER, &shown_name, bold(12.5), name_color);
     let nresp = ui.interact(name_r, ui.id().with(("name", id.0)), Sense::click_and_drag());
     if nresp.double_clicked() {
         app.dialogs.open_rename_track(id, &track.name);
@@ -913,10 +947,11 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
             let _ = app.run("track.move", json!({"track": id.0, "to": to}));
         }
     }
-    // Playlist selector arrow.
-    let pl_r = Rect::from_min_size(pos2(name_r.max.x + 3.0, name_r.min.y), vec2(16.0, 17.0));
-    icons::draw(ui.painter(), pl_r.shrink(3.0), "triangle_down", t.text);
+    let pl_r = at(114.0, 1.0, 11.0, 14.5);
     let presp = ui.interact(pl_r, ui.id().with(("pl", id.0)), Sense::click());
+    ui.painter().rect_filled(pl_r, 1.5, shade(head_bg, if presp.hovered() { -0.2 } else { -0.35 }));
+    arrow(ui.painter(), pos2(pl_r.center().x, pl_r.min.y + 5.75), true, t.text);
+    let presp = presp.on_hover_text("Playlists");
     egui::Popup::menu(&presp).show(|ui| {
         if ui.button("New...").clicked() {
             let _ = app.run("track.playlist_new", json!({"track": id.0}));
@@ -934,113 +969,228 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
             }
         }
     });
-    if track.is_folder() {
-        let fr = Rect::from_min_size(pos2(head.min.x + 6.0, name_r.min.y), vec2(10.0, 17.0));
-        icons::draw(ui.painter(), fr, if track.folder_open { "triangle_down" } else { "triangle_right" }, t.text);
-        if ui.interact(fr, ui.id().with(("fold", id.0)), Sense::click()).clicked() {
-            let _ = app.run("track.folder_toggle", json!({"track": id.0}));
-        }
-    }
-    let kind_label = match track.kind {
-        TrackKind::Audio => "",
-        TrackKind::Aux => "AUX",
-        TrackKind::Master => "MASTER",
-        TrackKind::Midi => "MIDI",
-        TrackKind::Instrument => "INST",
-        TrackKind::Vca => "VCA",
-        TrackKind::Folder => "FOLDER",
-        TrackKind::Video => "VIDEO",
-    };
-    if !kind_label.is_empty() {
-        let kr = ui.painter().text(pos2(pl_r.max.x + 4.0, name_r.center().y), Align2::LEFT_CENTER, kind_label, bold(9.0), t.text_dim);
-        if track.kind == TrackKind::Instrument {
-            // The instrument picker (and the instrument's editor) behind the INST label.
-            let name = track.instrument.as_ref().and_then(|i| crate::mix_window::plugin_info(&i.plugin)).map_or("none", |p| p.name);
-            let resp = ui
-                .interact(kr.expand(3.0), ui.id().with(("instrument", id.0)), Sense::click())
-                .on_hover_text(format!("Instrument: {name} (click to change or open its editor)"));
-            egui::Popup::menu(&resp).show(|ui| crate::mix_window::instrument_menu(app, ui, id));
-        }
-    }
-    if h < 30.0 {
-        return;
-    }
-    // Buttons row.
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(Rect::from_min_size(pos2(x0, name_r.max.y + 5.0), vec2(170.0, 20.0)))
-            .layout(egui::Layout::left_to_right(egui::Align::Min)),
-    );
-    child.spacing_mut().item_spacing.x = 4.0;
     let m = &track.mixer;
-    let bs = vec2(26.0, 18.0);
-    if track.kind.has_playlist() {
-        if rec_toggle(&mut child, bs, m.record_arm, "Record enable").clicked() {
-            let _ = app.run("mix.record_arm", json!({"track": id.0}));
-        }
-        if text_toggle(&mut child, bs, "I", m.input_monitor, t.input, "Input monitoring").clicked() {
-            let _ = app.run("mix.input_monitor", json!({"track": id.0}));
-        }
-    } else {
-        child.add_space(bs.x * 2.0 + 4.0);
-    }
-    if track.kind != TrackKind::Master {
-        if text_toggle(&mut child, bs, "S", m.solo, t.solo, "Solo").clicked() {
-            let _ = app.run("mix.solo", json!({"track": id.0}));
-        }
-        if text_toggle(&mut child, bs, "M", m.mute, t.mute, "Mute").clicked() {
-            let _ = app.run("mix.mute", json!({"track": id.0}));
-        }
-    }
-    if h < 60.0 {
-        return;
-    }
-    // View selector.
-    let view_r = Rect::from_min_size(pos2(x0, head.min.y + 49.0), vec2(118.0, 16.0));
-    let mut c2 = ui.new_child(egui::UiBuilder::new().max_rect(view_r));
-    let vresp = selector_box(&mut c2, view_r.width(), view_r.height(), &view_label(&track.view), t.text);
-    egui::Popup::menu(&vresp).show(|ui| view_menu(app, ui, track));
-    // Automation mode.
-    let am_r = Rect::from_min_size(pos2(x0, head.min.y + 68.0), vec2(118.0, 16.0));
-    let mode = m.automation_mode;
-    let col = match mode {
-        soundcraft_model::AutomationMode::Read => t.auto_read,
-        soundcraft_model::AutomationMode::Write => t.auto_write,
-        soundcraft_model::AutomationMode::Touch | soundcraft_model::AutomationMode::TouchLatch => t.auto_touch,
-        soundcraft_model::AutomationMode::Latch => t.auto_latch,
-        _ => t.text_dim,
-    };
-    let mut c3 = ui.new_child(egui::UiBuilder::new().max_rect(am_r));
-    let aresp = selector_box(&mut c3, am_r.width(), am_r.height(), mode.label(), col);
-    egui::Popup::menu(&aresp).show(|ui| {
-        for m in soundcraft_model::AutomationMode::ALL {
-            if ui.selectable_label(m == mode, m.label()).clicked() {
-                let _ = app.run("mix.automation_mode", json!({"track": id.0, "mode": m.label()}));
+    if h >= 37.0 {
+        let key = |i: usize| at(23.0 + i as f32 * 26.0, 20.0, 16.0, 16.0);
+        if track.kind.has_playlist() {
+            if header_toggle(ui, key(0), id, HeaderKey::Rec, m.record_arm, false).clicked() {
+                let _ = app.run("mix.record_arm", json!({"track": id.0}));
+            }
+            if header_toggle(ui, key(1), id, HeaderKey::Input, m.input_monitor, false).clicked() {
+                let _ = app.run("mix.input_monitor", json!({"track": id.0}));
             }
         }
-    });
-    // Inline header meter.
-    let md = app.meters.get(&id).copied().unwrap_or_default();
-    let mr = Rect::from_min_max(pos2(head.max.x - 16.0, head.min.y + 4.0), pos2(head.max.x - 6.0, head.max.y - 4.0));
-    if track.channels() >= 2 {
-        let w = mr.width() / 2.0 - 0.5;
-        crate::widgets::meter(ui, Rect::from_min_size(mr.min, vec2(w, mr.height())), md.level[0], md.hold[0], md.clip);
-        crate::widgets::meter(ui, Rect::from_min_size(pos2(mr.min.x + w + 1.0, mr.min.y), vec2(w, mr.height())), md.level[1], md.hold[1], md.clip);
-    } else {
-        crate::widgets::meter(ui, mr, md.level[0], md.hold[0], md.clip);
+        if track.kind != TrackKind::Master {
+            if header_toggle(ui, key(2), id, HeaderKey::Solo, m.solo, false).clicked() {
+                let _ = app.run("mix.solo", json!({"track": id.0}));
+            }
+            let implied = !m.solo && app.engine.session().tracks.iter().any(|t| t.mixer.solo);
+            if header_toggle(ui, key(3), id, HeaderKey::Mute, m.mute, implied).clicked() {
+                let _ = app.run("mix.mute", json!({"track": id.0}));
+            }
+        }
     }
-    // Volume readout and inserts summary.
-    let info = format!("vol {}  pan {}", crate::widgets::db_text(m.volume_db), m.pan.first().map_or("-".into(), |p| crate::widgets::pan_text(*p)));
-    ui.painter().text(pos2(view_r.max.x + 8.0, view_r.center().y), Align2::LEFT_CENTER, info, regular(10.0), t.text_dim);
-    let ins: Vec<&str> = m.inserts.iter().flatten().filter_map(|i| soundcraft_dsp::plugin_info(&i.plugin).map(|p| p.short_name)).collect();
-    if !ins.is_empty() {
-        ui.painter().with_clip_rect(Rect::from_min_max(pos2(am_r.max.x + 6.0, am_r.min.y), pos2(head.max.x - 20.0, am_r.max.y))).text(
-            pos2(am_r.max.x + 8.0, am_r.center().y),
-            Align2::LEFT_CENTER,
-            ins.join(" · "),
-            regular(10.0),
-            t.text_dim,
-        );
+    if h >= 58.0 {
+        let vresp = header_selector(ui, at(17.0, 39.0, 105.0, 17.0), ui.id().with(("view", id.0)), &view_label(&track.view), t.text, true);
+        egui::Popup::menu(&vresp).show(|ui| view_menu(app, ui, track));
+    }
+    if h >= 76.0 {
+        if matches!(track.kind, TrackKind::Audio | TrackKind::Instrument | TrackKind::Aux) {
+            let r = at(17.0, 57.0, 13.0, 17.0);
+            let resp = ui.interact(r, ui.id().with(("freeze", id.0)), Sense::click());
+            raised_key(ui.painter(), r, if track.frozen { t.slot_bypassed } else { t.slot_face }, resp.hovered());
+            for a in [0.0f32, 60.0, 120.0] {
+                let d = vec2(a.to_radians().sin(), a.to_radians().cos()) * 3.5;
+                ui.painter().line_segment([r.center() - d, r.center() + d], Stroke::new(1.5, t.text));
+            }
+            if resp.on_hover_text(if track.frozen { "Unfreeze" } else { "Freeze" }).clicked() {
+                let _ = app.run("track.freeze", json!({"tracks": [id.0]}));
+            }
+        }
+        if !matches!(track.kind, TrackKind::Master | TrackKind::Vca | TrackKind::Folder) {
+            let (voice, color) = if track.inactive { ("off", t.text_dim) } else { ("dyn", t.text) };
+            let resp = header_selector(ui, at(31.0, 57.0, 31.0, 17.0), ui.id().with(("voice", id.0)), voice, color, false);
+            egui::Popup::menu(&resp.on_hover_text("Voice: dyn plays the track, off makes it inactive")).show(|ui| {
+                for (label, inactive) in [("dyn", false), ("off", true)] {
+                    if ui.selectable_label(track.inactive == inactive, label).clicked() {
+                        let _ = app.run("track.make_inactive", json!({"tracks": [id.0], "inactive": inactive}));
+                    }
+                }
+            });
+        }
+        let mode = m.automation_mode;
+        let col = match mode {
+            soundcraft_model::AutomationMode::Read => t.auto_read,
+            soundcraft_model::AutomationMode::Write => t.auto_write,
+            soundcraft_model::AutomationMode::Touch | soundcraft_model::AutomationMode::TouchLatch => t.auto_touch,
+            soundcraft_model::AutomationMode::Latch => t.auto_latch,
+            _ => t.text_dim,
+        };
+        let aresp = header_selector(ui, at(63.0, 57.0, 59.0, 17.0), ui.id().with(("auto_mode", id.0)), mode.label(), col, true);
+        egui::Popup::menu(&aresp).show(|ui| {
+            for m in soundcraft_model::AutomationMode::ALL {
+                if ui.selectable_label(m == mode, m.label()).clicked() {
+                    let _ = app.run("mix.automation_mode", json!({"track": id.0, "mode": m.label()}));
+                }
+            }
+        });
+    }
+    if h >= 94.0 {
+        if track.kind.has_playlist() {
+            let r = at(17.0, 75.0, 13.0, 17.0);
+            let resp = ui.interact(r, ui.id().with(("timebase", id.0)), Sense::click());
+            raised_key(ui.painter(), r, t.slot_face, resp.hovered());
+            let c = r.center();
+            if track.ticks_timebase {
+                let green = Color32::from_rgb(86, 172, 103);
+                ui.painter().add(Shape::convex_polygon(
+                    vec![c + vec2(-3.0, 3.25), c + vec2(3.0, 3.25), c + vec2(1.0, -3.25), c + vec2(-1.0, -3.25)],
+                    green,
+                    Stroke::NONE,
+                ));
+                ui.painter().line_segment([c + vec2(0.0, 2.0), c + vec2(2.0, -3.0)], Stroke::new(1.0, t.text));
+            } else {
+                ui.painter().circle_filled(c, 3.25, Color32::from_rgb(100, 184, 249));
+                ui.painter().line_segment([c, c + vec2(0.0, -3.25)], Stroke::new(1.0, t.slot_face[1]));
+                ui.painter().line_segment([c, c + vec2(3.25, 0.0)], Stroke::new(1.0, t.slot_face[1]));
+            }
+            let tip = if track.ticks_timebase { "Timebase: ticks" } else { "Timebase: samples" };
+            egui::Popup::menu(&resp.on_hover_text(tip)).show(|ui| {
+                for (label, ticks) in [("Samples", false), ("Ticks", true)] {
+                    if ui.selectable_label(track.ticks_timebase == ticks, label).clicked() {
+                        let _ = app.run("track.timebase", json!({"tracks": [id.0], "ticks": ticks}));
+                    }
+                }
+            });
+        }
+        let field = at(30.0, 75.0, 92.0, 17.0);
+        if matches!(track.kind, TrackKind::Audio | TrackKind::Instrument) {
+            let resp = ui.interact(field, ui.id().with(("field", id.0)), Sense::click());
+            ui.painter().rect_filled(field, 2.0, shade(head_bg, if resp.hovered() { -0.02 } else { -0.1 }));
+            if track.kind == TrackKind::Instrument {
+                let name =
+                    track.instrument.as_ref().and_then(|i| crate::mix_window::plugin_info(&i.plugin)).map_or("no instrument", |p| p.short_name);
+                ui.painter().with_clip_rect(field).text(pos2(field.min.x + 5.0, field.center().y), Align2::LEFT_CENTER, name, bold(10.0), t.text);
+                egui::Popup::menu(&resp.on_hover_text("Instrument")).show(|ui| crate::mix_window::instrument_menu(app, ui, id));
+            } else {
+                let c = pos2(field.min.x + 7.0, field.center().y);
+                ui.painter().line_segment([c + vec2(0.0, -3.5), c + vec2(0.0, 1.0)], Stroke::new(1.0, t.text));
+                ui.painter().add(Shape::convex_polygon(vec![c + vec2(0.0, 0.5), c + vec2(3.0, 3.5), c + vec2(-3.0, 3.5)], t.text, Stroke::NONE));
+                if let Some(alg) = &track.elastic {
+                    ui.painter().with_clip_rect(field).text(pos2(field.min.x + 14.0, field.center().y), Align2::LEFT_CENTER, alg, bold(10.0), t.text);
+                }
+                egui::Popup::menu(&resp.on_hover_text("Elastic Audio")).show(|ui| {
+                    for alg in ["none", "polyphonic", "rhythmic", "monophonic", "varispeed", "x-form"] {
+                        let current = track.elastic.as_deref().unwrap_or("none") == alg;
+                        if ui.selectable_label(current, alg).clicked() {
+                            let _ = app.run("track.elastic", json!({"tracks": [id.0], "algorithm": alg}));
+                        }
+                    }
+                });
+            }
+        }
+    }
+    let md = app.meters.get(&id).copied().unwrap_or_default();
+    header_meter(ui, Rect::from_min_max(pos2(head.max.x - 8.0, head.min.y + 1.0), pos2(head.max.x, head.max.y - 1.5)), &md, track.channels() >= 2);
+}
+
+/// A small menu arrow, pointing down, or right for a closed folder.
+fn arrow(p: &egui::Painter, c: Pos2, down: bool, color: Color32) {
+    let pts = if down {
+        vec![c + vec2(-2.5, -1.75), c + vec2(2.5, -1.75), c + vec2(0.0, 1.75)]
+    } else {
+        vec![c + vec2(-1.75, -2.5), c + vec2(1.75, 0.0), c + vec2(-1.75, 2.5)]
+    };
+    p.add(Shape::convex_polygon(pts, color, Stroke::NONE));
+}
+
+/// A header selector (track view, automation mode…): the value centred, and for menus an arrow
+/// in the top-right corner.
+fn header_selector(ui: &Ui, r: Rect, id: egui::Id, text: &str, color: Color32, menu: bool) -> egui::Response {
+    let resp = ui.interact(r, id, Sense::click());
+    raised_key(ui.painter(), r, Tokens::current().slot_face, resp.hovered());
+    let tr = if menu { r.with_max_x(r.max.x - 7.0) } else { r };
+    ui.painter().with_clip_rect(tr.shrink(1.0)).text(tr.center(), Align2::CENTER_CENTER, text, bold(10.0), color);
+    if menu {
+        arrow(ui.painter(), pos2(r.max.x - 5.5, r.min.y + 5.75), true, Tokens::current().text);
+    }
+    resp
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum HeaderKey {
+    Rec,
+    Input,
+    Solo,
+    Mute,
+}
+
+/// Record, input, solo or mute: `lit` gives the key its colour, `implied` a dark shade of it (a
+/// mute that another track's solo implies). Record keys stay dark red when off, as in Pro Tools.
+fn header_toggle(ui: &Ui, r: Rect, track: TrackId, key: HeaderKey, lit: bool, implied: bool) -> egui::Response {
+    let t = Tokens::current();
+    let (label, color) = match key {
+        HeaderKey::Rec => ("Record enable", t.rec),
+        HeaderKey::Input => ("Input monitoring", t.input),
+        HeaderKey::Solo => ("Solo", t.solo),
+        HeaderKey::Mute => ("Mute", t.mute),
+    };
+    let resp = ui.interact(r, ui.id().with((label, track.0)), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), lit, label));
+    let rec = key == HeaderKey::Rec;
+    let (tint, k) = if lit {
+        (color, 0.85)
+    } else if implied {
+        (shade(color, -0.35), 0.55)
+    } else if rec {
+        (shade(color, -0.5), 0.35)
+    } else {
+        (color, 0.0)
+    };
+    let [top, bottom] = t.slot_face.map(|f| f.lerp_to_gamma(tint, k));
+    raised_key(ui.painter(), r, [shade(top, 0.08), shade(bottom, -0.12)], resp.hovered());
+    let ink = if lit {
+        t.text_dark
+    } else if implied {
+        t.text.lerp_to_gamma(color, 0.3)
+    } else {
+        t.text
+    };
+    if rec {
+        ui.painter().circle_filled(r.center(), 4.0, if lit { Color32::WHITE } else { t.text.lerp_to_gamma(color, 0.3) });
+    } else {
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, label.get(..1).unwrap_or_default(), bold(11.0), ink);
+    }
+    resp.on_hover_text(label)
+}
+
+/// The header's level meter: black-rimmed bars, dim where unlit, with a clip light on top.
+fn header_meter(ui: &Ui, r: Rect, md: &crate::MeterDisplay, stereo: bool) {
+    let t = Tokens::current();
+    let p = ui.painter();
+    p.rect_filled(r, 0.0, Color32::BLACK);
+    let inner = r.shrink(1.0);
+    let clip = inner.with_max_y(inner.min.y + 4.0);
+    p.rect_filled(clip, 0.0, if md.clip { t.meter_red } else { t.meter_red.gamma_multiply(0.18) });
+    let body = inner.with_min_y(clip.max.y + 1.0);
+    let n = if stereo { 2 } else { 1 };
+    let w = (body.width() - (n - 1) as f32) / n as f32;
+    let pos = |v: f32| if v <= 1e-6 { 0.0 } else { crate::widgets::meter_pos(20.0 * v.log10()) };
+    let (amber, red) = (crate::widgets::meter_pos(-12.0), crate::widgets::meter_pos(-3.0));
+    for ch in 0..n {
+        let bar = Rect::from_min_size(pos2(body.min.x + ch as f32 * (w + 1.0), body.min.y), vec2(w, body.height()));
+        let y = |f: f32| bar.max.y - bar.height() * f;
+        let lv = pos(md.level[ch]);
+        for (lo, hi, col) in [(0.0, amber, t.meter_green), (amber, red, t.meter_yellow), (red, 1.0, t.meter_red)] {
+            p.rect_filled(Rect::from_x_y_ranges(bar.x_range(), y(hi)..=y(lo)), 0.0, col.gamma_multiply(0.18));
+            if lv > lo {
+                p.rect_filled(Rect::from_x_y_ranges(bar.x_range(), y(lv.min(hi))..=y(lo)), 0.0, col);
+            }
+        }
+        let hv = pos(md.hold[ch]);
+        if hv > 0.01 {
+            p.hline(bar.x_range(), y(hv), Stroke::new(1.0, if hv > red { t.meter_red } else { t.meter_yellow }));
+        }
     }
 }
 
@@ -1049,60 +1199,112 @@ fn column_ui(ui: &mut Ui, col: &str, r: Rect) -> Ui {
     ui.new_child(egui::UiBuilder::new().id_salt(("edit_column", col.to_string())).max_rect(r))
 }
 
-/// One optional Edit-window column for a track (instrument, inserts, sends, I/O, comments).
-fn header_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, col: &str, r: Rect) {
-    let t = Tokens::current();
-    let selected = app.engine.session().edit.selected_tracks.contains(&track.id);
-    ui.painter().rect_filled(r, 0.0, crate::theme::track_backgrounds(track.color, selected, app.ui.track_tint).0);
-    ui.painter().line_segment([pos2(r.min.x, r.min.y), pos2(r.min.x, r.max.y)], Stroke::new(1.0, t.border));
-    let line_h = 15.0;
-    let rows = ((r.height() - 4.0) / line_h).floor().max(1.0) as usize;
-    let item = |i: usize| Rect::from_min_size(pos2(r.min.x + 4.0, r.min.y + 3.0 + i as f32 * line_h), vec2(r.width() - 8.0, line_h - 2.0));
-    let text = |ui: &Ui, rr: Rect, s: &str, c: Color32| {
-        ui.painter().rect(rr, 2.0, t.slot_bg, Stroke::new(1.0, t.slot_border), StrokeKind::Inside);
-        ui.painter().with_clip_rect(rr).text(pos2(rr.min.x + 4.0, rr.center().y), Align2::LEFT_CENTER, s, regular(10.0), c);
-    };
-    let route = |r: &soundcraft_model::Route| match r {
-        soundcraft_model::Route::None => "none".to_string(),
-        soundcraft_model::Route::Main => "Out 1-2".to_string(),
-        soundcraft_model::Route::Bus(b) => app.engine.session().bus(*b).map_or("bus".into(), |b| b.name.clone()),
-        soundcraft_model::Route::Hardware(h) => h.clone(),
-    };
+/// One optional Edit-window column for a track (I/O, inserts, sends, comments).
+fn header_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, col: &str, r: Rect, head_bg: Color32) {
     match col {
-        "io" => {
-            if rows >= 1 {
-                text(ui, item(0), &format!("in: {}", route(&track.mixer.input)), t.text);
-            }
-            if rows >= 2 {
-                text(ui, item(1), &format!("out: {}", route(&track.mixer.output)), t.text);
-            }
-        }
-        "instruments" => {
-            if track.kind == TrackKind::Instrument {
-                crate::mix_window::instrument_slot(app, &mut column_ui(ui, col, r), track, item(0));
-            }
-        }
-        "inserts_ae" | "inserts_fj" => {
-            let off = if col == "inserts_ae" { 0 } else { 5 };
-            let mut ui = column_ui(ui, col, r);
-            for i in 0..5.min(rows) {
-                crate::mix_window::insert_slot(app, &mut ui, track, off + i, item(i));
-            }
-        }
-        "sends_ae" | "sends_fj" => {
-            let off = if col == "sends_ae" { 0 } else { 5 };
-            let mut ui = column_ui(ui, col, r);
-            for i in 0..5.min(rows) {
-                crate::mix_window::send_slot(app, &mut ui, track, off + i, item(i));
-            }
-        }
-        _ => {
+        "io" => io_column(app, ui, track, r),
+        "comments" => {
+            ui.painter().rect_filled(r, 0.0, head_bg);
+            ui.painter().line_segment([pos2(r.min.x, r.min.y), pos2(r.min.x, r.max.y)], Stroke::new(1.0, Tokens::current().border));
             let mut c = track.comments.clone();
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink(3.0)));
             if child.add(egui::TextEdit::multiline(&mut c).desired_width(r.width() - 6.0).font(regular(10.0))).changed() {
                 let _ =
                     app.engine.execute_merged("track.comments", &json!({"track": track.id.0, "comments": c}), &format!("comments:{}", track.id.0));
             }
+        }
+        _ => plugin_column(app, ui, track, col, r),
+    }
+}
+
+/// The I/O column as Pro Tools draws it: input and output selectors, then volume and pan.
+fn io_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
+    let t = Tokens::current();
+    let id = track.id;
+    ui.painter().rect_filled(r, 0.0, t.slot_well);
+    let ui = column_ui(ui, "io", r);
+    let (x, w) = (r.min.x + 7.0, r.width() - 14.0);
+    if r.height() >= 20.0 {
+        let input = if track.kind.has_playlist() && track.mixer.input == soundcraft_model::Route::None {
+            "In 1".to_string()
+        } else {
+            crate::mix_window::route_name(app, &track.mixer.input)
+        };
+        let resp = header_selector(&ui, Rect::from_min_size(pos2(x, r.min.y + 4.0), vec2(w, 15.0)), ui.id().with(("in", id.0)), &input, t.text, true);
+        egui::Popup::menu(&resp.on_hover_text("Input"))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| crate::mix_window::route_menu(app, ui, id, true));
+    }
+    if r.height() >= 39.0 {
+        let out = Rect::from_min_size(pos2(x, r.min.y + 21.0), vec2(w, 17.0));
+        let (sel, fader) = (out.with_max_x(out.max.x - 11.0), out.with_min_x(out.max.x - 11.0));
+        let resp = ui.interact(sel, ui.id().with(("out", id.0)), Sense::click());
+        let fresp = ui.interact(fader, ui.id().with(("out_fader", id.0)), Sense::click());
+        raised_key(ui.painter(), out, t.slot_face, resp.hovered() || fresp.hovered());
+        let [top, _] = t.slot_face;
+        ui.painter().vline(fader.min.x - 0.5, out.min.y + 1.0..=out.max.y - 1.0, Stroke::new(1.0, shade(top, -0.42)));
+        ui.painter().vline(fader.min.x + 0.5, out.min.y + 1.0..=out.max.y - 1.0, Stroke::new(1.0, shade(top, 0.12)));
+        let name = crate::mix_window::route_name(app, &track.mixer.output);
+        ui.painter().with_clip_rect(sel.shrink(1.0)).text(sel.center(), Align2::CENTER_CENTER, name, bold(10.0), t.text);
+        let c = fader.center() + vec2(0.5, 0.0);
+        ui.painter().vline(c.x, c.y - 5.0..=c.y + 5.0, Stroke::new(1.0, t.text));
+        ui.painter().rect_filled(Rect::from_center_size(c + vec2(0.0, -1.5), vec2(5.0, 2.5)), 0.5, t.text);
+        egui::Popup::menu(&resp.on_hover_text("Output"))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| crate::mix_window::route_menu(app, ui, id, false));
+        if fresp.on_hover_text("Show in the Mix window").clicked() {
+            let _ = app.run("edit.select", json!({"tracks": [id.0]}));
+            app.ui.window = crate::MainWindow::Mix;
+        }
+    }
+    if r.height() >= 76.0 {
+        let vr = Rect::from_min_size(pos2(x + 1.0, r.min.y + 45.0), vec2(w - 2.0, 30.0));
+        ui.painter().rect_filled(vr, 2.0, Color32::from_gray(15));
+        ui.painter().rect_filled(vr.shrink(1.5), 1.5, Color32::BLACK);
+        let m = &track.mixer;
+        let pan = m.pan.first().map_or("-".into(), |p| crate::widgets::pan_text(*p));
+        // The readout is black in both themes, so it takes the dark palette's green.
+        let ink = Tokens::DARK.counter_text;
+        for (y, label, value) in [(7.5, "vol", crate::widgets::db_text(m.volume_db)), (22.0, "pan", pan)] {
+            ui.painter().text(pos2(vr.min.x + 7.0, vr.min.y + y), Align2::LEFT_CENTER, label, bold(10.0), ink);
+            ui.painter().text(pos2(vr.max.x - 6.5, vr.min.y + y), Align2::RIGHT_CENTER, value, bold(10.0), ink);
+        }
+        ui.painter().hline(vr.min.x + 7.0..=vr.max.x - 6.0, vr.min.y + 14.5, Stroke::new(1.0, Color32::from_gray(35)));
+    }
+}
+
+/// Inserts, sends or the instrument, laid out as Pro Tools does: 15-point cells every 18 points
+/// on a neutral well, or on tracks too short for three of them, a row of squares.
+fn plugin_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, col: &str, r: Rect) {
+    let t = Tokens::current();
+    ui.painter().rect_filled(r, 0.0, t.slot_well);
+    let rows = if r.height() < 16.0 { 0 } else { ((r.height() - 16.0) / 18.0) as usize + 1 };
+    let cell = |row: usize| Rect::from_min_size(pos2(r.min.x + 4.0, r.min.y + 1.0 + row as f32 * 18.0), vec2(r.width() - 8.0, 15.0));
+    let square =
+        |i: usize, row: usize| Rect::from_min_size(pos2(r.min.x + 4.0 + i as f32 * 14.0, r.min.y + 1.0 + row as f32 * 18.0), vec2(10.0, 15.0));
+    let mut ui = column_ui(ui, col, r);
+    if col == "instruments" {
+        if rows > 0 && track.kind == TrackKind::Instrument {
+            crate::mix_window::instrument_slot(app, &mut ui, track, cell(0));
+        }
+        return;
+    }
+    let off = if col.ends_with("ae") { 0 } else { 5 };
+    let slots: Vec<Rect> = match rows {
+        0 => Vec::new(),
+        1 | 2 => (0..5).map(|i| square(i, 0)).collect(),
+        _ => (0..rows.min(5)).map(cell).collect(),
+    };
+    for (i, sr) in slots.into_iter().enumerate() {
+        if col.starts_with("inserts") {
+            crate::mix_window::insert_slot(app, &mut ui, track, off + i, sr);
+        } else {
+            crate::mix_window::send_slot(app, &mut ui, track, off + i, sr);
+        }
+    }
+    if rows == 2 {
+        for i in 0..5 {
+            ui.painter().rect_filled(square(i, 1), 1.5, t.slot_empty);
         }
     }
 }

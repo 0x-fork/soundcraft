@@ -4,7 +4,7 @@ use egui_kittest::kittest::Queryable;
 use serde_json::json;
 use soundcraft_model::{Track, TrackId};
 use soundcraft_ui_egui::edit_window::HEADER_W;
-use soundcraft_ui_egui::{Services, SoundApp};
+use soundcraft_ui_egui::{MainWindow, Services, SoundApp};
 
 const CMD: Modifiers = Modifiers { mac_cmd: true, command: true, ..Modifiers::NONE };
 
@@ -44,10 +44,10 @@ fn bypassed(h: &Harness<'_, SoundApp>, slot: usize) -> bool {
     kick(h).mixer.inserts.get(slot).cloned().flatten().is_some_and(|i| i.bypass)
 }
 
-fn harness(view: &str) -> (Harness<'static, SoundApp>, TrackId, [f32; 4]) {
+fn harness(height: &str, view: &str) -> (Harness<'static, SoundApp>, TrackId, [f32; 4]) {
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
     app.run(view, json!({})).unwrap();
-    app.run("track.height", json!({"tracks": ["Kick"], "height": "medium"})).unwrap();
+    app.run("track.height", json!({"tracks": ["Kick"], "height": height})).unwrap();
     let kick = app.engine.session().track_by_name("Kick").unwrap().id;
     let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_ui_state(
         |ui, app: &mut SoundApp| {
@@ -65,9 +65,29 @@ fn harness(view: &str) -> (Harness<'static, SoundApp>, TrackId, [f32; 4]) {
 }
 
 #[test]
+fn header_keys_freeze_silence_and_show_automation() {
+    let (mut h, _, row) = harness("medium", "view.edit_io");
+    let at = |x: f32, y: f32| pos2(row[0] + x, row[1] + y);
+
+    click(&mut h, at(23.5, 65.5));
+    assert!(kick(&h).frozen);
+
+    click(&mut h, at(46.5, 65.5));
+    let off = h.get_by_label("off").rect().center();
+    click(&mut h, off);
+    assert!(kick(&h).inactive);
+
+    click(&mut h, at(7.5, row[3] - row[1] - 7.5));
+    assert_eq!(kick(&h).view, "volume");
+
+    click(&mut h, at(HEADER_W + 81.5, 29.5));
+    assert_eq!(h.state().ui.window, MainWindow::Mix);
+}
+
+#[test]
 fn edit_window_insert_slots_open_change_and_add_plugins() {
-    let (mut h, kick, row) = harness("view.edit_inserts_ae");
-    let slot = |i: usize| pos2(row[0] + HEADER_W + 56.0, row[1] + 9.5 + i as f32 * 15.0);
+    let (mut h, kick, row) = harness("medium", "view.edit_inserts_ae");
+    let slot = |i: usize| pos2(row[0] + HEADER_W + 37.5, row[1] + 8.5 + i as f32 * 18.0);
 
     click(&mut h, slot(0));
     assert!(h.state().ui.plugin_windows.contains(&(kick, 0)));
@@ -95,8 +115,24 @@ fn edit_window_insert_slots_open_change_and_add_plugins() {
 }
 
 #[test]
+fn short_tracks_show_insert_slots_as_squares() {
+    let (mut h, kick, row) = harness("small", "view.edit_inserts_ae");
+    let square = |i: usize| pos2(row[0] + HEADER_W + 9.0 + i as f32 * 14.0, row[1] + 8.5);
+
+    click(&mut h, square(1));
+    assert!(h.state().ui.plugin_windows.contains(&(kick, 1)));
+
+    press(&mut h, square(0), PointerButton::Primary, CMD);
+    assert!(bypassed(&h, 0));
+
+    click(&mut h, square(4));
+    let plugin = soundcraft_dsp::plugins().iter().find(|p| !p.is_instrument).unwrap();
+    assert!(h.query_by_label(&format!("{:?} ⏵", plugin.category)).is_some());
+}
+
+#[test]
 fn the_views_menu_stays_open_until_a_click_elsewhere() {
-    let (mut h, _, _) = harness("view.edit_inserts_ae");
+    let (mut h, _, _) = harness("medium", "view.edit_inserts_ae");
     let views = h.get_by_label("Views").rect().center();
     click(&mut h, views);
     for column in ["Sends A-E", "I/O"] {
@@ -107,4 +143,20 @@ fn the_views_menu_stays_open_until_a_click_elsewhere() {
     assert!(edit.flag("edit_view.sends_ae") && edit.flag("edit_view.io"));
     click(&mut h, pos2(800.0, 990.0));
     assert!(h.query_by_label("Sends A-E").is_none());
+}
+
+#[test]
+fn the_io_columns_route_menus_stay_open_while_searching_buses() {
+    let (mut h, _, row) = harness("medium", "view.edit_io");
+    click(&mut h, pos2(row[0] + HEADER_W + 40.0, row[1] + 29.5));
+    let bus = h.get_by_label("Bus").rect();
+    let search = h
+        .query_all_by_role(egui::accesskit::Role::TextInput)
+        .map(|node| node.rect())
+        .filter(|r| r.min.y >= bus.max.y)
+        .min_by(|a, b| a.min.y.total_cmp(&b.min.y))
+        .unwrap()
+        .center();
+    click(&mut h, search);
+    assert!(h.query_by_label("no output").is_some(), "a click in the bus search closed the Output menu");
 }

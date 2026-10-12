@@ -148,16 +148,15 @@ pub struct Tokens {
     pub knob_ring: Color32,
     /// Pan knob pointer.
     pub knob_pointer: Color32,
-    /// Mix insert slot holding a plugin.
-    pub insert_on: Color32,
-    /// Mix insert slot, bypassed.
-    pub insert_bypass: Color32,
-    /// Mix send slot in use.
-    pub send_on: Color32,
-    /// Mix insert/send slot outline.
-    pub slot_border: Color32,
     /// Mix-window section captions (INSERTS A-E, I/O…).
     pub section_label: Color32,
+    /// Plugin slots, as Pro Tools draws them: the well they sit in, an empty slot, a used slot's
+    /// face (top, bottom), a bypassed one's, and the dots, letters and arrows on them.
+    pub slot_well: Color32,
+    pub slot_empty: Color32,
+    pub slot_face: [Color32; 2],
+    pub slot_bypassed: [Color32; 2],
+    pub slot_mark: Color32,
 }
 
 impl Tokens {
@@ -238,11 +237,12 @@ impl Tokens {
         knob_bg: Color32::from_rgb(26, 26, 28),
         knob_ring: Color32::from_rgb(150, 150, 154),
         knob_pointer: Color32::from_rgb(230, 230, 230),
-        insert_on: Color32::from_rgb(86, 88, 92),
-        insert_bypass: Color32::from_rgb(70, 56, 30),
-        send_on: Color32::from_rgb(46, 66, 56),
-        slot_border: Color32::from_rgb(16, 16, 16),
         section_label: Color32::from_rgb(200, 200, 200),
+        slot_well: Color32::from_rgb(43, 43, 43),
+        slot_empty: Color32::from_rgb(39, 39, 39),
+        slot_face: [Color32::from_rgb(92, 92, 92), Color32::from_rgb(75, 75, 75)],
+        slot_bypassed: [Color32::from_rgb(66, 96, 146), Color32::from_rgb(50, 76, 120)],
+        slot_mark: Color32::from_rgb(159, 159, 159),
     };
 
     pub const LIGHT: Tokens = Tokens {
@@ -322,11 +322,12 @@ impl Tokens {
         knob_bg: Color32::from_rgb(232, 233, 236),
         knob_ring: Color32::from_rgb(116, 120, 128),
         knob_pointer: Color32::from_rgb(30, 32, 38),
-        insert_on: Color32::from_rgb(228, 230, 233),
-        insert_bypass: Color32::from_rgb(224, 204, 164),
-        send_on: Color32::from_rgb(192, 218, 202),
-        slot_border: Color32::from_rgb(112, 115, 121),
         section_label: Color32::from_rgb(56, 58, 64),
+        slot_well: Color32::from_rgb(212, 214, 218),
+        slot_empty: Color32::from_rgb(198, 200, 205),
+        slot_face: [Color32::from_rgb(244, 245, 247), Color32::from_rgb(214, 216, 220)],
+        slot_bypassed: [Color32::from_rgb(190, 210, 240), Color32::from_rgb(160, 186, 228)],
+        slot_mark: Color32::from_rgb(92, 95, 102),
     };
 
     pub fn current() -> Tokens {
