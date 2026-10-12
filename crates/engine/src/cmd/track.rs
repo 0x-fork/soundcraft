@@ -174,7 +174,7 @@ pub fn specs() -> Vec<CommandSpec> {
                     tr.active_playlist = active;
                 }
                 let _ = src;
-                let ids = crate::edit::paste(s, t, r.start, &clips, r.len(), false);
+                let ids = crate::edit::paste(s, t, r.start, &clips, r.len(), false).unwrap_or_default();
                 Ok(json!({"clips": ids}))
             }
         ),

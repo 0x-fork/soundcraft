@@ -140,6 +140,13 @@ pub fn draw(painter: &Painter, r: Rect, name: &str, c: Color32) {
                 painter.line_segment([c0, c1], Stroke::new(s.width * 1.4, c));
             }
         }
+        "lock" => {
+            painter.rect_filled(Rect::from_min_max(p(r, 0.22, 0.46), p(r, 0.78, 0.88)), r.width() * 0.08, c);
+            let (x, y, w) = (r.center().x, r.min.y + r.height() * 0.46, r.width() * 0.19);
+            let arc: Vec<Pos2> =
+                (0..=12).map(|i| std::f32::consts::PI * i as f32 / 12.0).map(|a| pos2(x - w * a.cos(), y - w * 1.4 * a.sin())).collect();
+            painter.add(Shape::line(arc, s));
+        }
         "wave" => {
             let n = 24;
             let pts: Vec<Pos2> = (0..=n)

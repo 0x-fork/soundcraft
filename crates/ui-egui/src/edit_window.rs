@@ -1,12 +1,17 @@
 //! The Edit window: toolbar, rulers, track headers and playlists.
 
+use crate::dialogs::Dialog;
+use crate::spot::Spot;
 use crate::theme::{Tokens, bold, clip_colors, regular, rgb};
 use crate::widgets::{rec_toggle, selector_box, text_toggle};
 use crate::{Gesture, SoundApp, icons, toolbar};
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
-use soundcraft_model::{AutoParam, Clip, ClipContent, ClipId, Session, Tool, Track, TrackHeight, TrackId, TrackKind};
+use soundcraft_engine::edit as ops;
+use soundcraft_model::{AutoParam, Clip, ClipContent, ClipId, EditMode, Session, Tool, Track, TrackHeight, TrackId, TrackKind};
 use soundcraft_time::{GridValue, NoteValue, Range, Samples, TimeFormat, format_position};
+use std::collections::HashSet;
+use std::sync::Arc;
 
 pub const HEADER_W: f32 = 236.0;
 pub const COLUMN_W: f32 = 112.0;
@@ -256,7 +261,7 @@ fn main_area_content(app: &mut SoundApp, ui: &mut Ui) {
 }
 
 fn in_edit_window(s: &Session, t: &Track) -> bool {
-    !t.hidden && t.folder.and_then(|f| s.track(f)).is_none_or(|f| f.folder_open)
+    ops::shown(s, t)
 }
 
 /// Pro Tools' track-name click: Shift adds the tracks up to the nearest selected one, Cmd/Ctrl adds or removes one.
@@ -1329,7 +1334,7 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
     } else if s.edit.flag("view.clip.time.original") || s.edit.flag("view.clip.time.user") {
         clip.source().and_then(|src| s.source(src)).map(|src| {
             format_position(
-                i64::try_from(src.time_reference).unwrap_or(0) + clip.source_offset(),
+                i64::try_from(src.time_reference).unwrap_or(0).saturating_add(clip.source_offset()).saturating_sub(s.timecode_start),
                 TimeFormat::Timecode,
                 s.sample_rate,
                 &s.tempo,
@@ -1426,7 +1431,8 @@ fn plugin_range(track: &Track, p: &AutoParam) -> (f32, f32) {
 // ---- interaction -----------------------------------------------------------------------------
 
 fn snap(s: &Session, at: Samples) -> Samples {
-    if s.edit.edit_mode.is_grid() { s.edit.grid.snap(at, s.sample_rate, &s.tempo, s.frame_rate) } else { at }
+    let on = s.edit.edit_mode.is_grid() || s.edit.flag(ops::SNAP_TO_GRID);
+    if on { s.edit.grid.snap(at, s.sample_rate, &s.tempo, s.frame_rate) } else { at }
 }
 
 fn clip_at(track: &Track, at: Samples) -> Option<&Clip> {
@@ -1480,8 +1486,9 @@ fn lane_interaction(app: &mut SoundApp, ui: &mut Ui, track: &Track, lane: Rect, 
         && let Some(p) = ui.ctx().pointer_latest_pos()
     {
         let s = app.engine.session();
-        let at = snap(s, sample_at(s, tl, p.x).max(0));
-        let _ = app.run("clip.place_source", json!({"source": src.0, "track": track.id.0, "at": at}));
+        let at = drag_snap(s, sample_at(s, tl, p.x).max(0), ui.input(|i| i.modifiers.command));
+        let spot = Spot::source(s, soundcraft_model::SourceId(src.0), track.id, at);
+        spot_or_run(app, spot);
     }
     if resp.dnd_hover_payload::<crate::DragSource>().is_some() {
         ui.painter().rect_stroke(lane, 0.0, Stroke::new(2.0, Tokens::current().accent), StrokeKind::Inside);
@@ -1625,6 +1632,15 @@ fn lane_interaction(app: &mut SoundApp, ui: &mut Ui, track: &Track, lane: Rect, 
                     let mut ids = if mods.shift { s.edit.selected_clips.iter().map(|x| x.0).collect::<Vec<_>>() } else { Vec::new() };
                     ids.push(c.id.0);
                     let _ = app.run("edit.select", json!({"clips": ids}));
+                    if s.edit.edit_mode == EditMode::Spot {
+                        app.dialogs.open = Spot::clips(&s, vec![c.id], None, 0).map(Dialog::Spot);
+                    }
+                }
+            }
+            Tool::Trim if s.edit.edit_mode == EditMode::Spot && hit.is_some() => {
+                if let Some(c) = &hit {
+                    let start = at - c.start < c.end() - at;
+                    app.dialogs.open = Spot::trim(&s, c.id, start, if start { c.start } else { c.end() }).map(Dialog::Spot);
                 }
             }
             Tool::Zoom => {
@@ -1696,22 +1712,14 @@ fn drive_drag(app: &mut SoundApp, ctx: &egui::Context) {
                 *tracks = rows.get(a.min(b)..=a.max(b)).unwrap_or_default().iter().map(|(i, _)| TrackId(*i)).collect();
             }
         }
-        Some(Gesture::MoveClips { grab_at, delta, from_track, to_track: tt, .. }) => {
-            let raw = at - *grab_at;
-            *delta = if s.edit.edit_mode.is_grid() {
-                let base = s.track(*from_track).and_then(|t| clip_at(t, *grab_at)).map_or(*grab_at, |c| c.start);
-                snap(&s, base + raw) - base
-            } else {
-                raw
-            };
-            if s.edit.edit_mode == soundcraft_model::EditMode::Spot {
-                *delta = 0;
-            }
+        Some(Gesture::MoveClips { clips, grab_at, delta, from_track, to_track: tt }) => {
             if let Some(t2) = to_track {
                 *tt = t2;
             }
+            let plan = drag_plan(ctx, &s, app.engine.revision, clips, (*from_track, *tt), *grab_at);
+            *delta = move_delta(&plan, &s, *from_track, at - *grab_at, ctx.input(|i| i.modifiers.command));
         }
-        Some(Gesture::TrimStart { to, .. } | Gesture::TrimEnd { to, .. }) => *to = snap(&s, at),
+        Some(Gesture::TrimStart { to, .. } | Gesture::TrimEnd { to, .. }) => *to = drag_snap(&s, at, ctx.input(|i| i.modifiers.command)),
         Some(Gesture::Fade { to, .. }) => *to = at,
         Some(Gesture::Scrub { last }) => {
             *last = at;
@@ -1759,16 +1767,7 @@ fn drive_drag(app: &mut SoundApp, ctx: &egui::Context) {
 
 fn finish_drag(app: &mut SoundApp, s: &Session, tl: Rect, p: Option<Pos2>) {
     match app.gesture.take() {
-        Some(Gesture::MoveClips { clips, delta, from_track, to_track, .. }) => {
-            let ids: Vec<u64> = clips.iter().map(|c| c.0).collect();
-            let mut params = json!({"clips": ids, "by": delta});
-            if to_track != from_track {
-                params["track"] = json!(to_track.0);
-            }
-            if delta != 0 || to_track != from_track {
-                let _ = app.run("edit.move_clips", params);
-            }
-        }
+        Some(Gesture::MoveClips { clips, delta, from_track, to_track, .. }) => drop_clips(app, clips, delta, from_track, to_track),
         Some(Gesture::Fade { clip, track, fade_in, to }) => {
             if let Some((_, c)) = s.find_clip(clip) {
                 // Not clamp: it panics on a zero-length clip.
@@ -1776,8 +1775,8 @@ fn finish_drag(app: &mut SoundApp, s: &Session, tl: Rect, p: Option<Pos2>) {
                 let _ = app.run("edit.fades_create", json!({"tracks": [track.0], "start": a, "end": b, "shape": "s-curve"}));
             }
         }
-        Some(Gesture::TrimStart { clip, track, to }) => trim_clip(app, clip, track, to, true),
-        Some(Gesture::TrimEnd { clip, track, to }) => trim_clip(app, clip, track, to, false),
+        Some(Gesture::TrimStart { clip, to, .. }) => trim_clip(app, clip, to, true),
+        Some(Gesture::TrimEnd { clip, to, .. }) => trim_clip(app, clip, to, false),
         Some(Gesture::Pencil { track, points }) => {
             if let Some(param) = s.track(track).and_then(|t| AutoParam::parse(&t.view)) {
                 let pid = automation_id(&param);
@@ -1813,22 +1812,96 @@ fn automation_id(p: &AutoParam) -> String {
     }
 }
 
-fn trim_clip(app: &mut SoundApp, clip: ClipId, track: TrackId, to: Samples, start: bool) {
-    let cmd = if start { "edit.trim_start_to_insertion" } else { "edit.trim_end_to_insertion" };
-    // Trims through the command layer: select the clip's track and position the insertion.
-    let sel_before = app.engine.session().edit.selection;
-    let tracks_before: Vec<u64> = app.engine.session().edit.selected_tracks.iter().map(|x| x.0).collect();
-    let c = app.engine.session().find_clip(clip).map(|(_, c)| c.clone());
-    if let Some(c) = c {
-        if start && to < c.start || !start && to > c.end() {
-            // Extending: use trim to fill selection with handles.
-            let r = if start { Range::new(to, c.end()) } else { Range::new(c.start, to) };
-            let _ = app.run("edit.trim_to_fill_selection", json!({"clips": [clip.0], "start": r.start, "end": r.end}));
-        } else {
-            let _ = app.run(cmd, json!({"tracks": [track.0], "at": to}));
-        }
+/// Grid snapping while dragging; holding Cmd/Ctrl swaps Grid and Slip.
+fn drag_snap(s: &Session, at: Samples, flip: bool) -> Samples {
+    if s.edit.edit_mode.is_grid() != flip { s.edit.grid.snap(at, s.sample_rate, &s.tempo, s.frame_rate) } else { at }
+}
+
+/// What a clip drag works out once per target track rather than every frame: where the tracks go
+/// (None when the clips can't land there), each destination's earliest clip and Shuffle slots,
+/// the clips that move (track, start, length) and the clip Grid snaps.
+struct DragPlan {
+    dest: Option<Vec<(TrackId, TrackId)>>,
+    groups: Vec<(TrackId, Samples, Vec<Samples>)>,
+    moving: Vec<(TrackId, Samples, Samples)>,
+    grabbed: Option<Clip>,
+}
+
+/// The [`DragPlan`] for `clips` grabbed at `grab_at` on track `from` and dragged onto `to`, kept
+/// until the document, the Edit mode or the target changes.
+fn drag_plan(ctx: &egui::Context, s: &Session, revision: u64, clips: &[ClipId], (from, to): (TrackId, TrackId), grab_at: Samples) -> Arc<DragPlan> {
+    type Key = (u64, EditMode, Vec<ClipId>, TrackId, TrackId, Samples);
+    let id = egui::Id::new("clip_drag_plan");
+    let key: Key = (revision, s.edit.edit_mode, clips.to_vec(), from, to, grab_at);
+    if let Some((k, plan)) = ctx.data(|d| d.get_temp::<(Key, Arc<DragPlan>)>(id))
+        && k == key
+    {
+        return plan;
     }
-    let _ = app.engine.execute("edit.select", &json!({"tracks": tracks_before, "start": sel_before.start, "end": sel_before.end}));
+    let dest = if to == from { Some(Vec::new()) } else { ops::destinations(s, clips, from, to) };
+    let groups = match &dest {
+        Some(d) if s.edit.edit_mode == EditMode::Shuffle => {
+            ops::shuffle_groups(s, clips, d).into_iter().map(|(t, first)| (t, first, ops::shuffle_slots(s, t, clips))).collect()
+        }
+        _ => Vec::new(),
+    };
+    let ids: HashSet<ClipId> = clips.iter().copied().collect();
+    let movable = |c: &&Clip| ids.contains(&c.id) && !ops::locked(c);
+    let moving = s.tracks.iter().flat_map(|t| t.clips().iter().filter(movable).map(|c| (t.id, c.start, c.length))).collect();
+    let mine: Vec<&Clip> = s.track(from).map(|t| t.clips().iter().filter(movable).collect()).unwrap_or_default();
+    let grabbed = mine.iter().rev().find(|c| c.range().contains(grab_at)).or_else(|| mine.iter().min_by_key(|c| c.start)).map(|c| (*c).clone());
+    let plan = Arc::new(DragPlan { dest, groups, moving, grabbed });
+    ctx.data_mut(|d| d.insert_temp(id, (key, Arc::clone(&plan))));
+    plan
+}
+
+/// How far a Grabber drag by `raw` from track `from` takes the clips in the current Edit mode.
+/// Shuffle lands the earliest clip bound for the target track on a slot there, as
+/// `edit.move_clips` does; Grid snaps the grabbed clip.
+fn move_delta(plan: &DragPlan, s: &Session, from: TrackId, raw: Samples, flip: bool) -> Samples {
+    let mode = s.edit.edit_mode;
+    if mode == EditMode::Shuffle {
+        let to = plan.dest.as_ref().map_or(from, |d| ops::lands(d, from));
+        plan.groups
+            .iter()
+            .find(|g| g.0 == to)
+            .map_or(raw, |(_, first, slots)| ops::nearest_slot(slots, first.saturating_add(raw)).saturating_sub(*first))
+    } else if mode.is_grid() != flip
+        && let Some(c) = &plan.grabbed
+    {
+        ops::grid_delta(s, c, raw, mode == EditMode::GridRelative)
+    } else {
+        raw
+    }
+}
+
+/// The dragged clips with one from the grabbed track first: `edit.move_clips` sends that track to
+/// the target and the others along with it.
+fn grabbed_first(s: &Session, clips: &[ClipId], from: TrackId) -> Vec<ClipId> {
+    let mut v = clips.to_vec();
+    v.sort_by_key(|c| s.find_clip(*c).is_none_or(|(t, _)| t != from));
+    v
+}
+
+fn drop_clips(app: &mut SoundApp, clips: Vec<ClipId>, delta: Samples, from: TrackId, to: TrackId) {
+    let s = app.engine.session();
+    let spot = Spot::clips(s, grabbed_first(s, &clips, from), (to != from).then_some(to), delta);
+    spot_or_run(app, spot);
+}
+
+fn trim_clip(app: &mut SoundApp, clip: ClipId, to: Samples, start: bool) {
+    let spot = Spot::trim(app.engine.session(), clip, start, to);
+    spot_or_run(app, spot);
+}
+
+/// Spot mode asks for exact positions first; the other modes make the edit straight away.
+fn spot_or_run(app: &mut SoundApp, spot: Option<Spot>) {
+    let Some(spot) = spot else { return };
+    if app.engine.session().edit.edit_mode == EditMode::Spot {
+        app.dialogs.open = Some(Dialog::Spot(spot));
+    } else if let Some((id, params)) = spot.command(app.engine.session()) {
+        let _ = app.run(&id, params);
+    }
 }
 
 fn clip_context_menu(app: &mut SoundApp, ui: &mut Ui, clip: Option<ClipId>) {
@@ -1966,12 +2039,20 @@ fn overlay(app: &mut SoundApp, ui: &mut Ui, tl: Rect, area: Rect) {
         scroll_to = follow_to;
     }
     // Ghost of a clip move.
-    if let Some(Gesture::MoveClips { clips, delta, to_track, .. }) = &app.gesture {
-        let row = app.edit_layout.rows.iter().find(|(i, _)| *i == to_track.0).map(|(_, r)| *r);
-        for c in clips {
-            if let (Some((_, clip)), Some(r)) = (s.find_clip(*c), row) {
-                let x0 = x_of(s, tl, clip.start + delta);
-                let x1 = x_of(s, tl, clip.end() + delta);
+    if let Some(Gesture::MoveClips { clips, delta, from_track, to_track, grab_at }) = &app.gesture
+        && let plan = drag_plan(ui.ctx(), s, app.engine.revision, clips, (*from_track, *to_track), *grab_at)
+        && let Some(dest) = &plan.dest
+    {
+        for &(t, start, len) in &plan.moving {
+            let d = ops::lands(dest, t);
+            let start = plan
+                .groups
+                .iter()
+                .find(|g| g.0 == d)
+                .map_or(start + delta, |(_, first, slots)| ops::nearest_slot(slots, first + delta) + (start - first));
+            if let Some((_, r)) = app.edit_layout.rows.iter().find(|(i, _)| *i == d.0) {
+                let x0 = x_of(s, tl, start);
+                let x1 = x_of(s, tl, start + len);
                 painter.rect_stroke(
                     Rect::from_min_max(pos2(x0, r[1] + 1.0), pos2(x1, r[3] - 1.0)),
                     2.0,

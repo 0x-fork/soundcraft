@@ -121,13 +121,21 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             true
         }
         Key::F1 | Key::F2 | Key::F3 | Key::F4 if plain => {
-            let mode = match key {
-                Key::F1 => "shuffle",
-                Key::F2 => "slip",
-                Key::F3 => "spot",
-                _ => "grid",
+            edit_mode_key(app, key);
+            true
+        }
+        Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 if m.alt && !m.command && !m.ctrl && !m.shift => {
+            let f = match key {
+                Key::Num1 => Key::F1,
+                Key::Num2 => Key::F2,
+                Key::Num3 => Key::F3,
+                _ => Key::F4,
             };
-            let _ = app.run("edit.mode", json!({"mode": mode}));
+            edit_mode_key(app, f);
+            true
+        }
+        Key::Backtick if plain => {
+            cycle_edit_mode(app);
             true
         }
         Key::F5 | Key::F6 | Key::F7 | Key::F8 | Key::F9 | Key::F10 if plain => {
@@ -196,6 +204,68 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
         }
         _ => false,
     }
+}
+
+/// F1–F4 (and Alt+1–4) choose Shuffle, Slip, Spot and Grid; F4 in Grid switches between Absolute and
+/// Relative unless Edit/Tool Mode Keyboard Lock is on. Holding F4 with F1–F3, in either order, adds Snap to Grid.
+fn edit_mode_key(app: &mut SoundApp, pressed: Key) {
+    let ctx = app.docking_context.clone();
+    let held = |k: Key| ctx.as_ref().is_some_and(|c| c.input(|i| i.key_down(k)));
+    let (key, snap) = match [Key::F1, Key::F2, Key::F3].into_iter().find(|k| *k != pressed && held(*k)) {
+        Some(k) if pressed == Key::F4 => (k, true),
+        _ => (pressed, pressed != Key::F4 && held(Key::F4)),
+    };
+    let ed = &app.engine.session().edit;
+    let keep_grid = ed.edit_mode.is_grid() && ed.flag("options.edit_tool_mode_keyboard_lock");
+    // F4 pressed first in an F4+F1–F3 chord switched the Grid mode on its own; put that back.
+    let flipped = egui::Id::new("edit_mode_key_grid_before_f4");
+    let before =
+        (ed.edit_mode.is_grid() && !keep_grid).then(|| if ed.flag(soundcraft_engine::edit::RELATIVE_GRID) { "relative_grid" } else { "grid" });
+    let restore = match &ctx {
+        Some(c) if pressed == Key::F4 => {
+            c.data_mut(|d| d.insert_temp(flipped, before));
+            None
+        }
+        Some(c) if snap => c.data_mut(|d| d.remove_temp::<Option<&'static str>>(flipped)).flatten(),
+        _ => None,
+    };
+    let mode = match key {
+        Key::F1 => "shuffle",
+        Key::F2 => "slip",
+        Key::F3 => "spot",
+        _ if keep_grid => return,
+        _ => grid_mode(app),
+    };
+    if let Some(grid) = restore {
+        let _ = app.run("edit.mode", json!({"mode": grid}));
+    }
+    let _ = app.run("edit.mode", json!({"mode": mode, "snap_to_grid": snap}));
+}
+
+/// What choosing Grid picks: in Grid the other Grid mode, from another mode the one used last.
+pub(crate) fn grid_mode(app: &SoundApp) -> &'static str {
+    use soundcraft_model::EditMode;
+    let ed = &app.engine.session().edit;
+    match ed.edit_mode {
+        EditMode::Grid => "relative_grid",
+        EditMode::GridRelative => "grid",
+        _ if ed.flag(soundcraft_engine::edit::RELATIVE_GRID) => "relative_grid",
+        _ => "grid",
+    }
+}
+
+/// ` steps through the Edit modes in F-key order, past a locked Shuffle.
+fn cycle_edit_mode(app: &mut SoundApp) {
+    use soundcraft_model::EditMode;
+    let ed = &app.engine.session().edit;
+    let mode = match ed.edit_mode {
+        EditMode::Shuffle => "slip",
+        EditMode::Slip => "spot",
+        EditMode::Spot => grid_mode(app),
+        _ if ed.flag(soundcraft_engine::edit::SHUFFLE_LOCK) => "slip",
+        _ => "shuffle",
+    };
+    let _ = app.run("edit.mode", json!({"mode": mode}));
 }
 
 /// Single-key commands. Returns true when `key` was handled.

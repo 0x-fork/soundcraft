@@ -297,6 +297,10 @@ pub fn range_param(e: &Engine, cmd: &str, p: &Value) -> Result<Range> {
     }
 }
 
+pub fn clip_id(p: &Value, cmd: &str) -> Result<ClipId> {
+    p.get("clip").and_then(Value::as_u64).map(ClipId).ok_or_else(|| bad(cmd, "`clip` id required"))
+}
+
 pub fn clip_ids_param(e: &Engine, p: &Value) -> Vec<ClipId> {
     if let Some(arr) = p.get("clips").and_then(Value::as_array) {
         return arr.iter().filter_map(Value::as_u64).map(ClipId).collect();

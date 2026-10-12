@@ -200,7 +200,7 @@ impl TempoMap {
         let mut cur_tick = 0i64;
         let first = self.meter_at_tick(0);
         if bar < 1 {
-            return (bar - 1).saturating_mul(first.ticks_per_bar());
+            return bar.saturating_sub(1).saturating_mul(first.ticks_per_bar());
         }
         for (i, m) in self.meters.iter().enumerate() {
             let next_tick = self.meters.get(i + 1).map(|n| n.tick);

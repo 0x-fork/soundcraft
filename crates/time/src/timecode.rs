@@ -109,7 +109,7 @@ impl FrameRate {
             return 0;
         }
         let v = (i128::from(f) * i128::from(sr.hz()) * i128::from(d) + i128::from(n) / 2) / i128::from(n);
-        i64::try_from(v).unwrap_or(0)
+        i64::try_from(v).unwrap_or(if v < 0 { i64::MIN } else { i64::MAX })
     }
 
     /// Samples per frame (fractional).
@@ -153,11 +153,11 @@ impl Timecode {
     /// Absolute frame count of this label.
     pub fn to_frames(&self, rate: FrameRate) -> i64 {
         let base = rate.nominal().max(1);
-        let total_min = self.hours * 60 + self.minutes;
-        let mut f = (total_min * 60 + self.seconds) * base + self.frames;
+        let total_min = self.hours.saturating_mul(60).saturating_add(self.minutes);
+        let mut f = total_min.saturating_mul(60).saturating_add(self.seconds).saturating_mul(base).saturating_add(self.frames);
         if rate.is_drop() {
-            let drop = if base >= 60 { 4 } else { 2 };
-            f -= drop * (total_min - total_min / 10);
+            let drop: i64 = if base >= 60 { 4 } else { 2 };
+            f = f.saturating_sub(drop.saturating_mul(total_min - total_min / 10));
         }
         if self.negative { -f } else { f }
     }

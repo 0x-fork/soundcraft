@@ -19,6 +19,7 @@ pub enum Dialog {
     PathPrompt { cmd: String, title: String, path: String, key: String },
     Number { cmd: String, title: String, key: String, value: f64, suffix: String },
     TempoChange { at: Samples, bpm: f64 }, // from double-clicking the tempo ruler
+    Spot(crate::spot::Spot),
     Fades { shape: String },
     StripSilence { threshold: f64, min_ms: f64, pre_ms: f64, post_ms: f64 },
     Group { name: String, edit: bool, mix: bool, members: Vec<(u64, String, bool)> },
@@ -46,6 +47,7 @@ impl Dialogs {
             Dialog::PathPrompt { .. } => "path",
             Dialog::Number { .. } => "number",
             Dialog::TempoChange { .. } => "tempo_change",
+            Dialog::Spot(_) => "spot",
             Dialog::Fades { .. } => "fades",
             Dialog::StripSilence { .. } => "strip_silence",
             Dialog::Group { .. } => "group",
@@ -264,6 +266,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         Dialog::ClearClips { .. } => "Clear",
         Dialog::PathPrompt { title, .. } | Dialog::Number { title, .. } => title.as_str(),
         Dialog::TempoChange { .. } => "Tempo Change (BPM)",
+        Dialog::Spot(_) => "Spot",
         Dialog::Fades { .. } => "Fades",
         Dialog::StripSilence { .. } => "Strip Silence",
         Dialog::Group { .. } => "Create Group",
@@ -443,6 +446,13 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     });
                     if buttons(ui, "OK", enter) {
                         action = Some(tempo_change_action(*at, *bpm));
+                    }
+                }
+                Dialog::Spot(d) => {
+                    crate::spot::fields(ui, app.engine.session(), d);
+                    if buttons(ui, "OK", enter) {
+                        keep = false;
+                        action = d.command(app.engine.session());
                     }
                 }
                 Dialog::Fades { shape } => {
