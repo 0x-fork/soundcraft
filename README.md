@@ -277,6 +277,10 @@ Remove-Item Env:WGPU_BACKEND                     # restore the default for later
 An explicit `gl` override can bring the driver crash back on affected systems. The macOS, Linux
 and web backend defaults are unchanged.
 
+DirectX 12 shaders are compiled with FXC, which is part of Windows, so no `dxcompiler.dll` or
+`dxil.dll` is needed ("Parent device is lost" at start, #185). `$env:WGPU_DX12_COMPILER = "dxc"`
+(or `"auto"`) selects wgpu's DXC handling again for troubleshooting.
+
 ### macOS
 
 | Build | File | Notes |
