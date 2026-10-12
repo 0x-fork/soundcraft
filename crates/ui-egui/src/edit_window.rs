@@ -1650,6 +1650,9 @@ fn lane_interaction(app: &mut SoundApp, ui: &mut Ui, track: &Track, lane: Rect, 
         && let Some(c) = &hit
     {
         let _ = app.run("edit.select", json!({"clips": [c.id.0]}));
+        if eff == Tool::Grabber && matches!(c.content, ClipContent::Midi { .. }) {
+            app.ui.show_midi_editor = true;
+        }
     }
 }
 
