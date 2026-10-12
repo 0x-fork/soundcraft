@@ -570,6 +570,10 @@ impl Session {
         if !self.edit.zoom.samples_per_px.is_finite() || self.edit.zoom.samples_per_px <= 0.0 {
             self.edit.zoom.samples_per_px = 1024.0;
         }
+        if SampleRate::new(self.sample_rate.hz()).is_err() {
+            self.sample_rate = SampleRate::default();
+        }
+        self.tempo.sanitize();
     }
 }
 
@@ -639,6 +643,15 @@ mod tests {
         let mut c = c.clone();
         c.trim_start_to(100);
         assert_eq!(c.source_offset(), 580);
+    }
+
+    #[test]
+    fn a_bad_sample_rate_or_tempo_is_repaired_on_load() {
+        let mut v = serde_json::to_value(Session::default()).unwrap();
+        v["sample_rate"] = serde_json::json!(0);
+        v["tempo"]["tempos"] = serde_json::json!([{"tick": 0, "bpm": 4e9}]);
+        let s = Session::from_json(&v.to_string()).unwrap();
+        assert_eq!((s.sample_rate, s.tempo), (SampleRate::HZ_48000, TempoMap::default()));
     }
 
     #[test]
