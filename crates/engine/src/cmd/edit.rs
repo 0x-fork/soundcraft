@@ -52,6 +52,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let s = e.session_mut();
             s.edit.selected_tracks.clear();
             s.edit.selected_clips.clear();
+            s.edit.selected_sources.clear();
             s.edit.selection.end = s.edit.selection.start;
             Ok(json!({}))
         }),

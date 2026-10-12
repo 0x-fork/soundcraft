@@ -148,4 +148,13 @@ mod tests {
             assert!(e.execute("clip.clear", &p).is_err(), "{p}");
         }
     }
+
+    #[test]
+    fn deselect_all_clears_the_clip_list_selection() {
+        let mut e = crate::demo::demo_engine();
+        let (f, _) = kick(&e);
+        e.execute("edit.select", &json!({"sources": [f]})).unwrap();
+        e.execute("edit.select_none", &json!({})).unwrap();
+        assert!(e.session().edit.selected_sources.is_empty());
+    }
 }
