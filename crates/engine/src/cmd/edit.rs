@@ -153,39 +153,24 @@ fn shuffle(s: &Session) -> bool {
     s.edit.edit_mode == EditMode::Shuffle
 }
 
-const LAST: &str = "selection.last";
-
-fn last_selection(s: &Session) -> Option<(Range, Vec<TrackId>)> {
-    let v = |k: &str| s.edit.values.get(&format!("{LAST}.{k}")).copied().filter(|v| v.is_finite() && *v >= 0.0);
-    let range = Range::new(v("start")? as Samples, v("end")? as Samples);
-    let tracks = (0..).map_while(|i| v(&format!("track.{i}"))).map(|t| TrackId(t as u64)).filter(|t| s.track(*t).is_some()).collect();
-    Some((range, tracks))
-}
-
 fn has_last_selection(e: &Engine) -> std::result::Result<(), String> {
-    if last_selection(e.session()).is_some() { Ok(()) } else { Err("no previous selection to restore".into()) }
+    if e.last_selection.is_some() { Ok(()) } else { Err("no previous selection to restore".into()) }
 }
 
-/// Remember the selection `before` had when a command changed it, for Restore Last Selection
-/// (kept in `edit.values` like the recent playlist, so it is saved with the session).
+/// Remember the selection `before` had when a command changed it, for Restore Last Selection.
 pub(crate) fn remember_selection(e: &mut Engine, before: &Session) {
     let (old, new) = (&before.edit, &e.session().edit);
     if old.selection == new.selection && old.selected_tracks == new.selected_tracks {
         return;
     }
-    let values = &mut e.session_mut().edit.values;
-    values.retain(|k, _| !k.starts_with(LAST));
-    values.insert(format!("{LAST}.start"), old.selection.start as f64);
-    values.insert(format!("{LAST}.end"), old.selection.end as f64);
-    for (i, t) in old.selected_tracks.iter().enumerate() {
-        values.insert(format!("{LAST}.track.{i}"), t.0 as f64);
-    }
+    e.last_selection = Some((old.selection, old.selected_tracks.clone()));
 }
 
 /// Swaps in the previous selection; `remember_selection` then keeps the one replaced, so
 /// invoking it again goes back.
 fn restore_selection(e: &mut Engine, _: &Value) -> Result<Value> {
-    let (range, tracks) = last_selection(e.session()).ok_or_else(|| bad("edit.restore_last_selection", "no previous selection to restore"))?;
+    let (range, mut tracks) = e.last_selection.clone().ok_or_else(|| bad("edit.restore_last_selection", "no previous selection to restore"))?;
+    tracks.retain(|t| e.session().track(*t).is_some());
     let ed = &mut e.session_mut().edit;
     ed.selection = range;
     ed.selected_tracks = tracks;
