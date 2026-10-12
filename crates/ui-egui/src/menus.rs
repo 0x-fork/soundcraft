@@ -7,6 +7,8 @@ use soundcraft_engine::catalog;
 
 /// UI-layer commands: (id, label, catalog path or "", shortcut).
 pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
+    ("ui.dock", "Arrange Panel", "", None),
+    ("ui.dock.reset", "Reset Panel Layout", "Window > Reset Panel Layout", None),
     ("window.mix", "Mix", "Window > Mix", Some("Cmd+=")),
     ("window.edit", "Edit", "Window > Edit", Some("Cmd+=")),
     ("window.toggle_mix_edit", "Toggle Mix/Edit", "", Some("Cmd+=")),
@@ -143,6 +145,7 @@ pub const AUDIOSUITE: &[(&str, &str)] = &[
 
 /// Commands that open a dialog when invoked from a menu (programmatic calls never do).
 const DIALOG_COMMANDS: &[&str] = &[
+    "clip.clear",
     "track.new",
     "file.bounce_mix",
     "session.new",
@@ -195,6 +198,7 @@ pub fn tree() -> Vec<MenuNode> {
     for line in catalog::catalog() {
         insert_path(&mut roots, line);
     }
+    insert_path(&mut roots, "Window > Reset Panel Layout");
     for (path, _) in MENU_WINDOWS {
         insert_path(&mut roots, path);
     }
@@ -278,7 +282,11 @@ pub fn command_for_path(path: &str, extra: &[(&str, &str)]) -> Option<String> {
 /// Enabled and checked state shared by all menu presentations.
 pub fn item_state(app: &SoundApp, path: &str, id: Option<&str>) -> (bool, bool) {
     let enabled = match id {
-        Some(i) if i.starts_with("window.") || i.starts_with("view.mix_section") || i == "audiosuite.process" => true,
+        Some(i)
+            if i.starts_with("window.") || i.starts_with("view.mix_section") || matches!(i, "audiosuite.process" | "ui.dock" | "ui.dock.reset") =>
+        {
+            true
+        }
         Some(i) => soundcraft_engine::find_command(i).is_some_and(|c| (c.enabled)(&app.engine).is_ok()),
         None => false,
     };
@@ -429,6 +437,9 @@ fn wants_dialog(id: &str) -> bool {
 
 /// Handle UI-layer commands. Returns None when `id` is not a UI command.
 pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<Value, String>> {
+    if matches!(id, "ui.dock" | "ui.dock.reset") {
+        return Some(crate::docking::command(app, id == "ui.dock.reset", p));
+    }
     if let Some(v) = crate::extra_windows::run(app, id, p) {
         return Some(Ok(v));
     }
@@ -496,6 +507,9 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
         }
         "window.configurations" => toggle(&mut app.ui.show_configurations),
         "window.config_new" | "window.config_update" => {
+            if let Err(error) = app.ui.docking.validate().and_then(|()| app.ui.mix_docking.validate_mix()) {
+                return Some(Err(error));
+            }
             let mut snap = app.ui.clone();
             snap.configurations.clear();
             let v = serde_json::to_value(&snap).unwrap_or_default();
@@ -510,6 +524,9 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
             json!({"configurations": app.ui.configurations.len()})
         }
         "window.arrange_tile" | "window.arrange_tile_h" | "window.arrange_tile_v" | "window.arrange_cascade" => {
+            if let Err(error) = crate::docking::arrange(app) {
+                app.ui.status = format!("Panel windows could not be arranged: {error}");
+            }
             app.arrange_request = true;
             json!({})
         }
@@ -569,8 +586,12 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
                         obj.insert(k.clone(), v.clone());
                     }
                 }
-                match serde_json::from_value(cur) {
+                match serde_json::from_value::<crate::UiState>(cur) {
                     Ok(ns) => {
+                        if let Err(error) = ns.docking.validate().and_then(|()| ns.mix_docking.validate_mix()) {
+                            return Some(Err(error));
+                        }
+                        crate::docking::cancel_replaced_state(app, &ns);
                         app.ui = ns;
                         json!({"ui": app.ui})
                     }
