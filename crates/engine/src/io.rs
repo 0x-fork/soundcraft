@@ -28,16 +28,22 @@ pub(crate) fn at_rate(mut buf: AudioBuffer, rate: u32, limit: usize) -> Option<A
 /// A relative `Audio Files/` path no other source in `s` already uses.
 fn unique_audio_rel(s: &Session, stem: &str) -> String {
     let stem = sanitize_name(stem);
-    let mut path = format!("Audio Files/{stem}.wav");
-    let mut n = 2u32;
-    while s.sources.iter().any(|src| src.path == path) {
-        path = format!("Audio Files/{stem}-{n}.wav");
-        n = n.saturating_add(1);
-        if n > 10_000 {
-            break;
-        }
+    let (plain, prefix) = (format!("Audio Files/{stem}.wav"), format!("Audio Files/{stem}-"));
+    let used: std::collections::HashSet<u64> = s
+        .sources
+        .iter()
+        .filter_map(|src| {
+            if src.path == plain {
+                return Some(1);
+            }
+            let n = src.path.strip_prefix(&prefix)?.strip_suffix(".wav")?;
+            n.parse().ok().filter(|i: &u64| *i > 1 && i.to_string() == n)
+        })
+        .collect();
+    match (1..).find(|i| !used.contains(i)) {
+        Some(n) if n > 1 => format!("{prefix}{n}.wav"),
+        _ => plain,
     }
-    path
 }
 
 /// Register decoded audio as a new source. Resamples to the session rate if needed.
@@ -1252,6 +1258,23 @@ mod rate_tests {
         assert!(at_rate(buf(1), 48_000, 1_000_000).is_none());
         let ok = at_rate(buf(8_000), 48_000, 1_000_000).unwrap();
         assert_eq!((ok.sample_rate, ok.frames()), (48_000, 600));
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn new_sources_take_the_first_free_file_name() {
+        let mut s = Session::default();
+        let buf = || AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.0; 4]] };
+        add_source(&mut s, "k", buf(), Some("Audio Files/k-02.wav"), FileFormat::Wav);
+        let mut path = || {
+            let id = add_source(&mut s, "k", buf(), None, FileFormat::Wav);
+            s.source(id).map(|x| x.path.clone()).unwrap_or_default()
+        };
+        assert_eq!([path(), path(), path()], ["Audio Files/k.wav", "Audio Files/k-2.wav", "Audio Files/k-3.wav"]);
     }
 }
 

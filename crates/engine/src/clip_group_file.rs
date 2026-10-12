@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 pub const EXTENSION: &str = "scgrp";
 const FORMAT: &str = "soundcraft.clipgroup";
-/// Refuse files that would place absurd numbers of clips.
+/// Refuse files that would place absurd numbers of clips, tracks or audio files.
 const MAX_CLIPS: usize = 10_000;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -87,7 +87,7 @@ pub fn import(e: &mut Engine, path: &str, first: Option<TrackId>, at: Samples) -
     if file.format != FORMAT {
         return Err(EngineError::BadParams(id.into(), "not a SoundCraft clip group file".into()));
     }
-    if file.lanes.iter().map(Vec::len).sum::<usize>() > MAX_CLIPS {
+    if file.lanes.iter().map(|l| l.len().max(1)).sum::<usize>() > MAX_CLIPS || file.audio.len() > MAX_CLIPS {
         return Err(EngineError::BadParams(id.into(), "clip group file has too many clips".into()));
     }
     let dir = Path::new(path).parent().map(Path::to_path_buf).unwrap_or_default();

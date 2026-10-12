@@ -432,14 +432,15 @@ impl Session {
         if !base.is_empty() && !taken(base) && !matches!(base, "Audio" | "Aux" | "MIDI" | "Inst" | "VCA" | "Folder" | "Master") {
             return base.to_string();
         }
-        let mut i = 1;
-        loop {
-            let cand = format!("{base} {i}");
-            if !taken(&cand) {
-                return cand;
-            }
-            i += 1;
-        }
+        let prefix = format!("{base} ");
+        let used: std::collections::HashSet<u64> = self
+            .tracks
+            .iter()
+            .filter_map(|t| t.name.strip_prefix(&prefix))
+            .filter_map(|n| n.parse().ok().filter(|i: &u64| i.to_string() == n))
+            .collect();
+        let i = (1..).find(|i| !used.contains(i)).unwrap_or(1);
+        format!("{base} {i}")
     }
 
     /// Add a track with defaults; returns its id.
@@ -643,6 +644,17 @@ mod tests {
         let mut c = c.clone();
         c.trim_start_to(100);
         assert_eq!(c.source_offset(), 580);
+    }
+
+    #[test]
+    fn unique_track_names_take_the_first_free_number() {
+        let mut s = Session::default();
+        for name in ["Piano", "Piano 1", "Piano 3", "Piano 02", "Pianos 2"] {
+            s.add_track(TrackKind::Audio, ChannelFormat::Mono, Some(name));
+        }
+        assert_eq!(s.unique_track_name("Piano"), "Piano 2");
+        assert_eq!(s.unique_track_name("Organ"), "Organ");
+        assert_eq!(s.unique_track_name("Audio"), "Audio 1");
     }
 
     #[test]
