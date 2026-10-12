@@ -492,7 +492,7 @@ fn used_slot(p: &egui::Painter, r: Rect, faces: [Color32; 2], mark: Mark, name: 
     p.vline(groove + 1.0, r.y_range(), Stroke::new(1.0, shade(top, 0.12)));
     let mut text = r.with_min_x(groove + 1.5);
     if let Some(k) = level {
-        let well = Rect::from_min_max(pos2(outer.max.x - 9.0, outer.min.y + 2.0), pos2(outer.max.x - 4.0, outer.max.y - 2.0));
+        let well = level_icon(r);
         p.rect_filled(well, 1.0, Color32::BLACK);
         let inner = well.shrink(1.0);
         p.rect_filled(inner, 0.0, Color32::from_rgb(36, 38, 8));
@@ -502,6 +502,12 @@ fn used_slot(p: &egui::Painter, r: Rect, faces: [Color32; 2], mark: Mark, name: 
     let g = p.layout_no_wrap(name.to_string(), bold(NAME_SIZE), color);
     let x = if g.size().x <= text.width() { text.center().x - g.size().x / 2.0 } else { text.min.x + 1.0 };
     p.with_clip_rect(text).galley(pos2(x, text.center().y - g.size().y / 2.0), g, color);
+}
+
+/// A used send's level icon: the small fader at the right of its slot.
+fn level_icon(r: Rect) -> Rect {
+    let outer = r.expand(1.0);
+    Rect::from_min_max(pos2(outer.max.x - 9.0, outer.min.y + 2.0), pos2(outer.max.x - 4.0, outer.max.y - 2.0))
 }
 
 pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: usize, r: Rect) {
@@ -680,7 +686,9 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
     let t = Tokens::current();
     let id = track.id;
     let snd = track.mixer.sends.get(slot).cloned().flatten();
-    let level_r = Rect::from_min_max(pos2((r.max.x - 42.0).max(r.min.x), r.min.y), r.max);
+    // As in Pro Tools, only the fader icon opens a send's level; the rest of the slot picks its
+    // destination. A short track's square has no icon, so all of it is the level.
+    let level_r = if r.width() < COMPACT_SLOT { r } else { level_icon(r).expand2(vec2(3.0, 0.0)).with_min_y(r.min.y).with_max_y(r.max.y) };
     let route_r = Rect::from_min_max(r.min, pos2((level_r.min.x - 1.0).max(r.min.x), r.max.y));
     let route_resp = ui.interact(if snd.is_some() { route_r } else { r }, ui.id().with(("snd-route", id.0, slot)), Sense::click());
     let hovered = ui.rect_contains_pointer(r);

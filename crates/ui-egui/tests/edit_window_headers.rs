@@ -160,3 +160,25 @@ fn the_io_columns_route_menus_stay_open_while_searching_buses() {
     click(&mut h, search);
     assert!(h.query_by_label("no output").is_some(), "a click in the bus search closed the Output menu");
 }
+
+#[test]
+fn only_a_sends_fader_icon_opens_its_level() {
+    let (mut h, _, _) = harness("medium", "view.edit_sends_ae");
+    h.state_mut().run("track.height", json!({"tracks": ["Snare"], "height": "medium"})).unwrap();
+    for _ in 0..4 {
+        step(&mut h);
+    }
+    let snare = h.state().engine.session().track_by_name("Snare").map(|t| t.id.0).unwrap();
+    let row = h.state().edit_layout.rows.iter().find(|(id, _)| *id == snare).map(|(_, r)| *r).unwrap();
+    let send_a = |x: f32| pos2(row[0] + HEADER_W + x, row[1] + 8.5);
+
+    // The right of the name, where the level used to start, picks the destination.
+    click(&mut h, send_a(50.0));
+    assert!(h.query_by_label("DESTINATION").is_some());
+    assert_eq!(h.state().ui.send_window, None);
+    click(&mut h, pos2(800.0, 990.0));
+
+    click(&mut h, send_a(65.5));
+    assert_eq!(h.state().ui.send_window, Some((TrackId(snare), 0)));
+    assert!(h.query_by_label("DESTINATION").is_none());
+}
