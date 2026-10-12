@@ -873,6 +873,14 @@ fn process_strip(
         }
         TrackKind::Instrument | TrackKind::Midi => {
             if let Some(inst) = &mut strip.instrument {
+                // #152: push the instrument's stored parameter values into the live plugin
+                // before processing, the same way inserts do below. Without this, the values
+                // loaded from a session (or set via `mix.insert_state`) never reach the plugin
+                // instance and the rendered audio matches the plugin's defaults — e.g. a saved
+                // `level = -12 dB` sounds the same as `level = -6 dB`.
+                if let Some(ins) = &t.instrument {
+                    apply_params(inst, ins, t, INSTRUMENT_SLOT, pos);
+                }
                 schedule_notes(s, t, pos, frames, inst, &mut strip.held);
                 if strip.buf.len() >= 2 {
                     inst.plugin.process(&mut strip.buf, frames);
@@ -1345,20 +1353,31 @@ fn note_insert_latency(t: &Track, strip: &mut Strip, pos: Samples) {
 }
 
 fn apply_params(slot: &mut PluginSlot, ins: &soundcraft_model::Insert, t: &Track, i: usize, pos: Samples) {
-    let slot_u8 = u8::try_from(i).unwrap_or(0);
+    // Automation lanes address insert slots; the instrument (`INSTRUMENT_SLOT`) has none, so it
+    // must not pick up slot A's lanes.
+    let Ok(slot_u8) = u8::try_from(i) else {
+        return apply_values(slot, ins, |_, v| v);
+    };
     let automated = t.mixer.automation_mode.reads()
         && t.automation.iter().any(|l| matches!(&l.param, AutoParam::Plugin { slot, .. } if *slot == slot_u8) && !l.points.is_empty());
-    if slot.applied.len() != ins.params.len() {
-        slot.applied = vec![f32::NAN; ins.params.len()];
-    }
-    for ((k, v), last) in ins.params.iter().zip(slot.applied.iter_mut()) {
-        let mut val = *v;
+    apply_values(slot, ins, |k, val| {
         if automated
             && let Some(l) = t.automation.iter().find(|l| matches!(&l.param, AutoParam::Plugin { slot, param } if *slot == slot_u8 && param == k))
             && !l.points.is_empty()
         {
-            val = l.value_at(pos, val);
+            return l.value_at(pos, val);
         }
+        val
+    });
+}
+
+/// Sends each stored param (as mapped by `value`) to the plugin when it changed since last time.
+fn apply_values(slot: &mut PluginSlot, ins: &soundcraft_model::Insert, value: impl Fn(&str, f32) -> f32) {
+    if slot.applied.len() != ins.params.len() {
+        slot.applied = vec![f32::NAN; ins.params.len()];
+    }
+    for ((k, v), last) in ins.params.iter().zip(slot.applied.iter_mut()) {
+        let val = value(k, *v);
         if val.to_bits() != last.to_bits() {
             slot.plugin.set_param(k, val);
             *last = val;
@@ -1905,6 +1924,46 @@ mod tests {
     use soundcraft_audio_io::AudioBuffer;
     use soundcraft_model::{Insert, SourceAudio, SourceId};
     use std::sync::Arc;
+
+    fn synth_session(level_db: f32) -> Session {
+        use soundcraft_midi::{Note, Sequence};
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        let mut seq = Sequence::default();
+        seq.notes.push(Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 960 });
+        let cid = s.new_clip_id();
+        let tr = s.track_mut(t).unwrap();
+        tr.playlist_mut().unwrap().clips.push(Clip::midi(cid, "n", 0, 24_000, seq));
+        let mut ins = Insert::new("subtractive_synth");
+        ins.params.insert("level".into(), level_db);
+        tr.instrument = Some(ins);
+        s
+    }
+
+    #[test]
+    fn stored_instrument_params_reach_the_plugin() {
+        // #152: a saved instrument level of -12 dB must render quieter than -6 dB.
+        // RMS over the held part of the note, past any parameter smoothing.
+        let rms = |db: f32| {
+            let out = render_range(&synth_session(db), Range::new(0, 12_000), 512);
+            let tail = out[0].get(6_000..).unwrap_or_default();
+            (tail.iter().map(|x| x * x).sum::<f32>() / tail.len().max(1) as f32).sqrt()
+        };
+        let (loud, quiet) = (rms(-6.0), rms(-12.0));
+        assert!(loud > 0.0, "the synth should sound");
+        assert!((quiet / loud - 0.5).abs() < 0.05, "-12 dB vs -6 dB should halve the level: {quiet} / {loud}");
+    }
+
+    #[test]
+    fn insert_slot_a_automation_does_not_drive_the_instrument() {
+        let mut s = synth_session(-6.0);
+        let reference = render_range(&s, Range::new(0, 12_000), 512);
+        let tr = &mut s.tracks[0];
+        let mut lane = soundcraft_model::AutomationLane::new(AutoParam::Plugin { slot: 0, param: "level".into() });
+        lane.set_point(0, -48.0);
+        tr.automation.push(lane);
+        assert_eq!(render_range(&s, Range::new(0, 12_000), 512), reference);
+    }
 
     fn session_with_dc(level: f32, frames: usize) -> (Session, TrackId) {
         let mut s = Session::default();

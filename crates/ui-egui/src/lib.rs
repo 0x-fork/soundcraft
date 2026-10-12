@@ -101,6 +101,11 @@ pub struct UiState {
     pub configurations: Vec<(String, Value)>,
     /// Appearance (`ui.theme`): dark by default, light or follow the system on request.
     pub theme: theme::ThemeMode,
+    /// The main window's size (logical points) and maximized state, and the interface scale, as
+    /// the desktop app last saw them; it restores them at launch.
+    pub window_size: [f32; 2],
+    pub window_maximized: bool,
+    pub ui_scale: f32,
 }
 
 impl Default for UiState {
@@ -153,6 +158,9 @@ impl Default for UiState {
             workspace_dir: String::new(),
             configurations: Vec::new(),
             theme: theme::ThemeMode::Dark,
+            window_size: [1600.0, 1000.0],
+            window_maximized: false,
+            ui_scale: 1.0,
         }
     }
 }
@@ -162,11 +170,21 @@ impl Default for UiState {
 pub struct Services {
     pub pick_open: Option<Box<dyn Fn(&str, &[&str]) -> Option<String>>>,
     pub pick_save: Option<Box<dyn Fn(&str, &str) -> Option<String>>>,
+    pub pick_folder: Option<Box<dyn Fn(&str) -> Option<String>>>,
 }
 
 /// File-system-safe folder name for a plugin id (`clap:com.x.y` → `clap_com.x.y`).
 pub fn preset_folder_name(plugin: &str) -> String {
     plugin.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' }).collect()
+}
+
+/// On the first frame, maximizes a window too big for the screen it opened on (sized on a larger
+/// monitor) instead of letting it run off the edge; its saved size is kept for that monitor.
+pub fn fit_window_to_screen(ctx: &egui::Context) {
+    let (inner, monitor) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().monitor_size));
+    if ctx.cumulative_pass_nr() == 0 && inner.zip(monitor).is_some_and(|(r, m)| (r.size() - m).max_elem() > 0.0) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+    }
 }
 
 /// Drag-and-drop payload: an audio file (source id) dragged from the Clip List.
@@ -421,17 +439,14 @@ impl SoundApp {
             return;
         }
         self.ensure_input();
-        if self.recorder.is_none() {
-            self.ui.status = "Cannot record: no audio input device".into();
+        if let Err(err) = self.arm_recorder() {
+            self.ui.status = format!("Cannot record: {err}");
             return;
         }
         if let Some(p) = &self.player {
             p.set_recording(true);
         }
         let already_playing = self.is_playing();
-        if let Some(r) = &self.recorder {
-            r.arm();
-        }
         self.engine.transport.recording = true;
         if already_playing {
             // Punch in on the fly at the current playhead.
@@ -455,6 +470,19 @@ impl SoundApp {
             let end = (!sel.is_empty()).then_some(sel.end + post);
             self.start_play(from, end, None);
         }
+    }
+
+    /// Arm the input for the record-enabled tracks; a session never saved records into its
+    /// autosave folder.
+    fn arm_recorder(&mut self) -> Result<(), String> {
+        let name = soundcraft_engine::io::sanitize_name(&self.engine.session().name);
+        let unsaved_dir = self.autosave_dir.as_ref().map_or_else(std::env::temp_dir, |d| d.join(name));
+        let Some(r) = &mut self.recorder else { return Err("no audio input device".into()) };
+        let plan = soundcraft_engine::io::plan_takes(&self.engine, &unsaved_dir, r.channels);
+        if plan.is_empty() {
+            return Err("no audio track is record-enabled".into());
+        }
+        r.arm(plan)
     }
 
     /// Reads every live third-party plugin's state from the audio engine and stores it on its
@@ -551,49 +579,26 @@ impl SoundApp {
         if let Some(p) = &self.player {
             p.set_recording(false);
         }
-        let Some(r) = &self.recorder else { return };
-        let take = r.take();
-        let rate = take.sample_rate;
+        let Some(r) = &mut self.recorder else { return };
+        let (takes, problem) = r.finish();
+        let tracks = takes.len().max(1);
         let sel = self.engine.session().edit.selection;
-        if self.engine.session().edit.loop_record && !sel.is_empty() {
-            // Split the capture into one take per loop pass; each pass gets its own playlist.
-            let pass = usize::try_from(soundcraft_time::to_samples(sel.len() as f64 * f64::from(rate) / self.engine.session().sample_rate.as_f64()))
-                .unwrap_or(0)
-                .max(1);
-            let total = take.channels.first().map_or(0, Vec::len);
-            let passes = total.div_ceil(pass).max(1);
-            let mut made = 0;
-            for k in 0..passes {
-                let chunk: Vec<Vec<f32>> =
-                    take.channels.iter().map(|c| c.get(k * pass..((k + 1) * pass).min(c.len())).map(<[f32]>::to_vec).unwrap_or_default()).collect();
-                if chunk.first().is_none_or(|c| c.len() < pass / 8) {
-                    continue;
-                }
-                if made > 0 {
-                    let armed: Vec<u64> = self.engine.session().tracks.iter().filter(|t| t.mixer.record_arm).map(|t| t.id.0).collect();
-                    let _ = self.engine.execute("track.playlist_new", &serde_json::json!({"tracks": armed}));
-                }
-                if soundcraft_engine::io::add_recording(&mut self.engine, sel.start, chunk, rate).is_ok() {
-                    made += 1;
-                }
-            }
-            self.ui.status = format!("Loop-recorded {made} take(s)");
-            return;
+        let looped = self.engine.session().edit.loop_record && !sel.is_empty();
+        let (start, pass) = if looped { (sel.start, Some(sel.len())) } else { (self.record_start, None) };
+        let ids = soundcraft_engine::io::add_recording(&mut self.engine, start, takes, pass);
+        if let Some(p) = self.punch.take() {
+            // Keep only the punch range of each new take (merged into the Record undo step).
+            let clip_ids: Vec<u64> = ids.iter().map(|c| c.0).collect();
+            let _ = self.engine.execute_merged(
+                "edit.trim_to_fill_selection",
+                &serde_json::json!({"clips": clip_ids, "start": p.start, "end": p.end}),
+                "record",
+            );
         }
-        match soundcraft_engine::io::add_recording(&mut self.engine, self.record_start, take.channels, rate) {
-            Ok(ids) => {
-                if let Some(p) = self.punch.take() {
-                    // Keep only the punch range of each new take (merged into the Record undo step).
-                    let clip_ids: Vec<u64> = ids.iter().map(|c| c.0).collect();
-                    let _ = self.engine.execute_merged(
-                        "edit.trim_to_fill_selection",
-                        &serde_json::json!({"clips": clip_ids, "start": p.start, "end": p.end}),
-                        "record",
-                    );
-                }
-                self.ui.status = format!("Recorded {} clip(s)", ids.len());
-            }
-            Err(e) => self.ui.status = e.to_string(),
+        self.ui.status = if looped { format!("Loop-recorded {} take(s)", ids.len() / tracks) } else { format!("Recorded {} clip(s)", ids.len()) };
+        if let Some(p) = problem {
+            log::warn!("recording: {p}");
+            self.ui.status = format!("{} ({p})", self.ui.status);
         }
     }
 
@@ -1051,6 +1056,35 @@ mod tests {
     #[test]
     fn automation_write_fires_after_loop_wrap() {
         assert!(automation_step_due(0, 1_000_000, 960));
+    }
+
+    #[test]
+    fn preferences_saved_before_the_window_was_remembered_keep_full_scale() {
+        let ui: super::UiState = serde_json::from_value(json!({"show_transport": true})).unwrap();
+        assert_eq!((ui.window_size, ui.window_maximized, ui.ui_scale), ([1600.0, 1000.0], false, 1.0));
+    }
+
+    #[test]
+    fn a_window_bigger_than_its_screen_opens_maximized() {
+        let maximizes = |w: f32, frames: usize| {
+            let ctx = egui::Context::default();
+            let info = egui::ViewportInfo {
+                inner_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, 1000.0))),
+                monitor_size: Some(egui::vec2(1728.0, 1117.0)),
+                ..Default::default()
+            };
+            let mut maximized = false;
+            for _ in 0..frames {
+                let raw = egui::RawInput { viewports: [(egui::ViewportId::ROOT, info.clone())].into_iter().collect(), ..Default::default() };
+                let mut out = ctx.run_ui(raw, |ui| super::fit_window_to_screen(ui.ctx()));
+                out.textures_delta.clear();
+                maximized = out.viewport_output[&egui::ViewportId::ROOT].commands.contains(&egui::ViewportCommand::Maximized(true));
+            }
+            maximized
+        };
+        assert!(maximizes(2400.0, 1));
+        assert!(!maximizes(1600.0, 1));
+        assert!(!maximizes(2400.0, 2));
     }
 
     #[test]
