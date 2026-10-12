@@ -43,14 +43,22 @@
 //! [`MixEngine::capture_states`] reads every live instance's state back (for saving the session);
 //! it calls into the plugins and allocates, so a realtime host runs it only on request.
 //!
+//! A built-in instrument's parameter values are applied the same way. A sample-playing
+//! instrument (the Sampler) is handed the decoded audio of its insert's
+//! [`Insert::sample`] source straight from the session's pool, shared and never copied.
+//!
 //! [`Insert::state`]: soundcraft_model::Insert::state
+//! [`Insert::sample`]: soundcraft_model::Insert::sample
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 use soundcraft_dsp::pan::{PanLaw, SpeakerPos, SurroundParams, gains};
-use soundcraft_dsp::{Plugin, db_to_gain};
-use soundcraft_model::{AutoParam, BusId, ChannelFormat, Clip, ClipContent, Route, Session, Speaker, SurroundPan, Track, TrackId, TrackKind};
+use soundcraft_dsp::{Plugin, SampleSource, db_to_gain};
+use soundcraft_model::{
+    AutoParam, BusId, ChannelFormat, Clip, ClipContent, Route, Session, SourceAudio, Speaker, SurroundPan, Track, TrackId, TrackKind,
+};
 use soundcraft_time::{Range, Samples};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Default (stereo) main mix width. The actual width is [`main_channels`].
 pub const MAIN_CHANNELS: usize = 2;
@@ -187,6 +195,8 @@ struct Strip {
     scratch: Vec<f32>,
     plugins: Vec<Option<PluginSlot>>,
     instrument: Option<PluginSlot>,
+    /// The pool audio handed to the instrument with `set_sample` (sample-playing instruments).
+    sample: Option<Arc<SourceAudio>>,
     /// MIDI notes currently sounding on the instrument (pitch), for note-offs at stops/seek.
     held: Vec<u8>,
     muted: bool,
@@ -261,6 +271,7 @@ impl Strip {
             scratch: Vec::new(),
             plugins: Vec::new(),
             instrument: None,
+            sample: None,
             held: Vec::new(),
             muted: false,
             gr: 0.0,
@@ -518,7 +529,9 @@ impl MixEngine {
                 let old = strip.instrument.take();
                 cx.retire(old);
                 strip.instrument = want.and_then(|i| cx.make(t.id, INSTRUMENT_SLOT, i, ich));
+                strip.sample = None;
             }
+            sync_sample(strip, want, s);
         }
         // Instances nobody claimed (the session changed again before they arrived).
         let leftovers: Vec<(TrackId, usize)> = cx.adopt.keys().copied().collect();
@@ -1060,6 +1073,10 @@ fn structure_fingerprint(s: &Session) -> usize {
             snd.target.hash(&mut h);
         }
         t.instrument.as_ref().map(|x| x.plugin.as_str()).hash(&mut h);
+        let sample = t.instrument.as_ref().and_then(|x| x.sample);
+        sample.hash(&mut h);
+        // Which decoded audio it is, so new audio under the same id (another session) re-syncs.
+        sample.and_then(|id| s.pool.get(id)).map(|a| Arc::as_ptr(a) as usize).hash(&mut h);
     }
     for b in &s.busses {
         b.id.hash(&mut h);
@@ -1336,6 +1353,40 @@ fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mu
             }
         }
     }
+}
+
+/// Session audio shared with a sample-playing instrument.
+struct PoolSample(Arc<SourceAudio>);
+
+impl SampleSource for PoolSample {
+    fn sample_rate(&self) -> f32 {
+        self.0.buffer.sample_rate as f32
+    }
+    fn num_channels(&self) -> usize {
+        self.0.buffer.num_channels()
+    }
+    fn channel(&self, ch: usize) -> Option<&[f32]> {
+        self.0.channel(ch)
+    }
+}
+
+/// Hands a strip's instrument the audio of its insert's sample source when it changed (a new
+/// sample, a cleared one, or a new instance). Missing media plays nothing.
+fn sync_sample(strip: &mut Strip, want: Option<&soundcraft_model::Insert>, s: &Session) {
+    let audio = want.and_then(|i| i.sample).and_then(|id| s.pool.get(id));
+    let same = match (strip.sample.as_ref(), audio) {
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        (None, None) => true,
+        _ => false,
+    };
+    if same {
+        return;
+    }
+    if let Some(inst) = strip.instrument.as_mut() {
+        let shared = audio.map(|a| Arc::new(PoolSample(Arc::clone(a))) as Arc<dyn SampleSource>);
+        inst.plugin.set_sample(shared);
+    }
+    strip.sample = audio.cloned();
 }
 
 /// Record insert latency without processing audio, so this block can compensate for it.
