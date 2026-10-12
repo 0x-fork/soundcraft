@@ -315,6 +315,33 @@ fn an_id3_tag_before_the_audio_is_skipped_unread() {
 }
 
 #[test]
+fn wav_info_entries_beyond_the_file_are_refused() {
+    let alaw = |len: u32| {
+        let info = [&b"INFO"[..], b"INAM", &len.to_le_bytes(), b"hi"].concat();
+        riff(&[(b"fmt ", [fmt(6, 1, 8_000, 8), vec![0, 0]].concat()), (b"LIST", info), (b"data", vec![0xD5; 800])])
+    };
+    assert_eq!(decode(&alaw(2), None).unwrap().1.frames(), 800);
+    let mut f = alaw(0x7fff_fff0);
+    f[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    let list = f.windows(4).position(|w| w == b"LIST").unwrap();
+    f[list + 4..list + 8].copy_from_slice(&0x7fff_fffcu32.to_le_bytes());
+    assert!(matches!(decode(&f, None), Err(AudioError::Malformed(m)) if m.contains("larger than the file")));
+}
+
+#[test]
+fn wav_info_entries_are_found_where_symphonia_reads_them() {
+    let list = [&b"LIST"[..], &0x7fff_fffcu32.to_le_bytes(), b"INFO", b"INAM", &0x7fff_fff0u32.to_le_bytes(), b"hi"].concat();
+    let alaw = |extra: u16| (b"fmt ", [fmt(6, 1, 8_000, 8), extra.to_le_bytes().to_vec()].concat());
+    // A-law's extra bytes are read past its chunk; an odd list is padded twice.
+    let files =
+        [riff(&[alaw(12), (b"JUNK", [&[0; 4][..], &list].concat())]), [riff(&[alaw(0), (b"LIST", b"adtl\0".to_vec())]), vec![0], list].concat()];
+    for mut f in files {
+        f[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(decode(&f, None), Err(AudioError::Malformed(m)) if m.contains("larger than the file")));
+    }
+}
+
+#[test]
 fn many_tiny_chunks_terminate() {
     let mut chunks: Vec<(&[u8; 4], Vec<u8>)> = vec![(b"fmt ", fmt(1, 1, 8_000, 16))];
     for _ in 0..200_000 {
