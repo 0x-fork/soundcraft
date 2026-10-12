@@ -230,10 +230,15 @@ fn main_area_content(app: &mut SoundApp, ui: &mut Ui) {
             track_row(app, &mut child, TrackId(id), row, tl);
         }
     }
-    // Empty area click clears track selection.
+    // Below the tracks a click clears the selection and a double-click opens New Tracks.
     let empty = Rect::from_min_max(pos2(full.min.x, y.max(tl.min.y)), tl.max);
-    if empty.height() > 4.0 && ui.interact(empty, ui.id().with("empty"), Sense::click()).clicked() {
-        let _ = app.run("edit.select_none", json!({}));
+    if empty.height() > 4.0 {
+        let resp = ui.interact(empty, ui.id().with("empty"), Sense::click());
+        if resp.double_clicked() {
+            let _ = app.dialogs.open_for_command(&app.engine, "track.new");
+        } else if resp.clicked() {
+            let _ = app.run("edit.select_none", json!({}));
+        }
     }
     overlay(app, ui, tl, Rect::from_min_max(pos2(tl.min.x, rulers_rect.min.y), tl.max));
     let _ = header;
