@@ -155,6 +155,35 @@ pub fn copy_range(s: &Session, track: TrackId, range: Range) -> Vec<Clip> {
     out
 }
 
+/// Merge the MIDI inside `range` into one clip covering the whole range, gaps included, as it
+/// sounds (muted clips stay silent). Returns false for tracks that aren't MIDI or instrument tracks.
+pub fn consolidate_midi(s: &mut Session, track: TrackId, range: Range) -> bool {
+    let Some(name) = s.track(track).filter(|t| t.kind.is_midi()).map(|t| t.name.clone()) else { return false };
+    let mut merged = soundcraft_midi::Sequence::default();
+    {
+        let t = TimeCtx::of(s);
+        let base = t.ticks(range.start);
+        for part in copy_range(s, track, range).into_iter().filter(|c| !c.muted) {
+            let at = t.ticks(range.start.saturating_add(part.start)).saturating_sub(base);
+            let len = t.ticks(range.start.saturating_add(part.end())).saturating_sub(base).saturating_sub(at);
+            let ClipContent::Midi { sequence } = part.content else { continue };
+            for mut n in sequence.notes.into_iter().filter(|n| (0..len).contains(&n.start)) {
+                n.length = n.length.min(len - n.start);
+                n.start += at;
+                merged.notes.push(n);
+            }
+            for mut c in sequence.ctrls.into_iter().filter(|c| (0..len).contains(&c.tick)) {
+                c.tick += at;
+                merged.ctrls.push(c);
+            }
+        }
+    }
+    merged.sort();
+    let id = s.new_clip_id();
+    place_clip(s, track, Clip::midi(id, name, range.start, range.len(), merged));
+    true
+}
+
 /// Insert `clips` (positions relative to 0) at `at`. Overwrites what's underneath unless
 /// `shuffle`, which first pushes later material right by `length`.
 pub fn paste(s: &mut Session, track: TrackId, at: Samples, clips: &[Clip], length: Samples, shuffle: bool) -> Vec<ClipId> {

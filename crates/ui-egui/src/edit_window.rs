@@ -1596,6 +1596,9 @@ fn lane_interaction(app: &mut SoundApp, ui: &mut Ui, track: &Track, lane: Rect, 
                 _ => Gesture::TrimEnd { clip: c.id, track: track.id, to: c.end() },
             }),
             Tool::Scrubber => Some(Gesture::Scrub { last: at }),
+            Tool::Pencil if auto_view.is_none() && track.kind.is_midi() => {
+                hit.is_none().then_some(Gesture::MidiClip { track: track.id, from: at_origin, to: at_origin })
+            }
             Tool::Pencil => Some(Gesture::Pencil { track: track.id, points: Vec::new() }),
             Tool::Zoom => Some(Gesture::ZoomBox { start: origin.x }),
         };
@@ -1639,6 +1642,8 @@ fn lane_interaction(app: &mut SoundApp, ui: &mut Ui, track: &Track, lane: Rect, 
                         "automation.set_point",
                         json!({"track": track.id.0, "param": automation_id(param), "at": at, "value": lo + (hi - lo) * k}),
                     );
+                } else if track.kind.is_midi() && hit.is_none() {
+                    new_midi_clip(app, &s, track.id, at, at);
                 }
             }
             _ if !selector_press => place_insertion(app, ui, &s, track.id, at, mods.shift),
@@ -1712,7 +1717,7 @@ fn drive_drag(app: &mut SoundApp, ctx: &egui::Context) {
             }
         }
         Some(Gesture::TrimStart { to, .. } | Gesture::TrimEnd { to, .. }) => *to = snap(&s, at),
-        Some(Gesture::Fade { to, .. }) => *to = at,
+        Some(Gesture::Fade { to, .. } | Gesture::MidiClip { to, .. }) => *to = at,
         Some(Gesture::Scrub { last }) => {
             *last = at;
             let _ = app.engine.execute("transport.locate", &json!({"at": at}));
@@ -1778,6 +1783,7 @@ fn finish_drag(app: &mut SoundApp, s: &Session, tl: Rect, p: Option<Pos2>) {
         }
         Some(Gesture::TrimStart { clip, track, to }) => trim_clip(app, clip, track, to, true),
         Some(Gesture::TrimEnd { clip, track, to }) => trim_clip(app, clip, track, to, false),
+        Some(Gesture::MidiClip { track, from, to }) => new_midi_clip(app, s, track, from, to),
         Some(Gesture::Pencil { track, points }) => {
             if let Some(param) = s.track(track).and_then(|t| AutoParam::parse(&t.view)) {
                 let pid = automation_id(&param);
@@ -1829,6 +1835,30 @@ fn trim_clip(app: &mut SoundApp, clip: ClipId, track: TrackId, to: Samples, star
         }
     }
     let _ = app.engine.execute("edit.select", &json!({"tracks": tracks_before, "start": sel_before.start, "end": sel_before.end}));
+}
+
+/// Whole bars from `from` to `to` (at least one), inside the gap between clips where `from` is.
+fn midi_clip_span(s: &Session, track: TrackId, from: Samples, to: Samples) -> Option<Range> {
+    let clips = s.track(track)?.clips();
+    let bar = GridValue::Note { value: NoteValue::Bar, dotted: false, triplet: false };
+    let start = bar.line_at_or_before(from.min(to), s.sample_rate, &s.tempo, s.frame_rate);
+    let last = from.max(to);
+    let mut end = bar.line_at_or_before(last, s.sample_rate, &s.tempo, s.frame_rate);
+    if end < last || end <= start {
+        end = bar.next_line(end, s.sample_rate, &s.tempo, s.frame_rate);
+    }
+    let prev = clips.iter().map(Clip::end).filter(|&e| e <= from).max().unwrap_or(start);
+    let next = clips.iter().map(|c| c.start).filter(|&b| b > from).min().unwrap_or(end);
+    let r = Range::new(start.max(prev), end.min(next));
+    (!r.is_empty()).then_some(r)
+}
+
+fn new_midi_clip(app: &mut SoundApp, s: &Session, track: TrackId, from: Samples, to: Samples) {
+    if let Some(r) = midi_clip_span(s, track, from, to)
+        && let Ok(v) = app.run("midi.new_clip", json!({"track": track.0, "start": r.start, "end": r.end}))
+    {
+        let _ = app.run("edit.select", json!({"clips": [v["clip"]]}));
+    }
 }
 
 fn clip_context_menu(app: &mut SoundApp, ui: &mut Ui, clip: Option<ClipId>) {
@@ -1980,6 +2010,13 @@ fn overlay(app: &mut SoundApp, ui: &mut Ui, tl: Rect, area: Rect) {
                 );
             }
         }
+    }
+    if let Some(Gesture::MidiClip { track, from, to }) = &app.gesture
+        && let Some(r) = midi_clip_span(s, *track, *from, *to)
+        && let Some((_, row)) = app.edit_layout.rows.iter().find(|(i, _)| *i == track.0)
+    {
+        let ghost = Rect::from_min_max(pos2(x_of(s, tl, r.start), row[1] + 1.0), pos2(x_of(s, tl, r.end), row[3] - 1.0));
+        painter.rect_stroke(ghost, 2.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Inside);
     }
     if let Some(Gesture::TrimStart { to, clip, .. } | Gesture::TrimEnd { to, clip, .. }) = &app.gesture
         && let Some((tid, _)) = s.find_clip(*clip)

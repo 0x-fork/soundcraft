@@ -66,7 +66,24 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     ui.painter().rect_filled(header, 0.0, t.panel_bg2);
     ui.painter().text(pos2(header.min.x + 8.0, header.center().y), Align2::LEFT_CENTER, "MIDI EDITOR", bold(11.5), t.header_text);
     let Some(cid) = target_clip(app) else {
-        ui.painter().text(full.center(), Align2::CENTER_CENTER, "Select a MIDI clip (or a MIDI track) to edit its notes.", regular(13.0), t.text_dim);
+        let track = {
+            let s = app.engine.session();
+            s.tracks.iter().find(|t| t.kind.is_midi() && s.edit.selected_tracks.contains(&t.id)).map(|t| (t.id, t.name.clone()))
+        };
+        let msg = match &track {
+            Some((_, name)) => format!("Click to add a MIDI clip to {name} at the insertion point."),
+            None => "Select a MIDI clip (or a MIDI track) to edit its notes.".into(),
+        };
+        ui.painter().text(full.center(), Align2::CENTER_CENTER, msg, regular(13.0), t.text_dim);
+        let body = Rect::from_min_max(pos2(full.min.x, header.max.y), full.max);
+        if let Some((id, _)) = track
+            && ui.interact(body, ui.id().with("new_clip"), Sense::click()).clicked()
+        {
+            let sel = app.engine.session().edit.selection;
+            if let Ok(v) = app.run("midi.new_clip", json!({"track": id.0, "start": sel.start, "end": sel.end})) {
+                let _ = app.run("edit.select", json!({"clips": [v["clip"]]}));
+            }
+        }
         return;
     };
     let Some((track, clip)) = app.engine.session().find_clip(cid).map(|(t, c)| (t, c.clone())) else { return };
