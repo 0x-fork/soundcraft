@@ -224,7 +224,7 @@ fn main() -> eframe::Result {
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("SoundCraft")
-            .with_inner_size(prefs.window_size)
+            .with_inner_size(sane_window_size(prefs.window_size))
             .with_maximized(prefs.window_maximized)
             .with_min_inner_size([960.0, 600.0])
             .with_drag_and_drop(true)
@@ -274,4 +274,9 @@ fn main() -> eframe::Result {
             )))
         }),
     )
+}
+
+/// A saved window size, or the default when the prefs file holds nonsense (NaN, negative, tiny).
+fn sane_window_size([w, h]: [f32; 2]) -> [f32; 2] {
+    if w.is_finite() && h.is_finite() && w >= 960.0 && h >= 600.0 { [w.min(16_384.0), h.min(16_384.0)] } else { [1600.0, 1000.0] }
 }
