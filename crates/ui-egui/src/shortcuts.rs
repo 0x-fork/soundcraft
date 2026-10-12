@@ -55,6 +55,8 @@ fn search_chord(m: Modifiers, mac: bool) -> bool {
 }
 
 pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
+    // Cmd+= and Cmd+0 are Mix/Edit and Quantize to Grid, not egui's built-in interface zoom.
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
     if ctx.egui_wants_keyboard_input() || app.dialogs.open.is_some() {
         return;
     }
@@ -167,6 +169,12 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
         }
         Key::ArrowUp | Key::ArrowDown if m.ctrl && !m.shift => {
             let id = if key == Key::ArrowUp { "edit.extend_selection_up" } else { "edit.extend_selection_down" };
+            let _ = app.run(id, json!({}));
+            true
+        }
+        // Ctrl+Shift+Up/Down nudge clip gain off macOS too (the registry's Ctrl is the Mac Control key).
+        Key::ArrowUp | Key::ArrowDown if !mac && m.ctrl && m.shift && !m.alt => {
+            let id = if key == Key::ArrowUp { "clip.gain_nudge_up" } else { "clip.gain_nudge_down" };
             let _ = app.run(id, json!({}));
             true
         }

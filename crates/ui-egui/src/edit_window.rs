@@ -2,7 +2,7 @@
 
 use crate::theme::{Tokens, bold, clip_colors, regular, rgb};
 use crate::widgets::{rec_toggle, selector_box, text_toggle};
-use crate::{Gesture, SoundApp, icons, panels, toolbar};
+use crate::{Gesture, SoundApp, icons, toolbar};
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
 use soundcraft_model::{AutoParam, Clip, ClipContent, ClipId, Session, Tool, Track, TrackHeight, TrackId, TrackKind};
@@ -81,27 +81,10 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     egui::Panel::top("edit_toolbar").exact_size(toolbar::HEIGHT).frame(egui::Frame::NONE.fill(t.toolbar_bg)).show(ui, |ui| toolbar::show(app, ui));
     egui::Panel::bottom("edit_status").exact_size(22.0).frame(egui::Frame::NONE.fill(t.toolbar_bg)).show(ui, |ui| status_bar(app, ui));
     egui::Panel::bottom("lower_dock_tabs").exact_size(22.0).frame(egui::Frame::NONE.fill(t.panel_bg2)).show(ui, |ui| dock_tabs(app, ui));
-    if app.ui.show_midi_editor {
-        egui::Panel::bottom("midi_editor")
-            .resizable(true)
-            .default_size(320.0)
-            .min_size(260.0)
-            .frame(egui::Frame::NONE.fill(t.panel_bg))
-            .show(ui, |ui| crate::midi_editor::show(app, ui));
-    }
     if app.ui.show_universe {
         egui::Panel::top("universe").exact_size(64.0).frame(egui::Frame::NONE.fill(Tokens::current().universe_bg)).show(ui, |ui| universe(app, ui));
     }
-    if app.ui.show_tracks_list {
-        egui::Panel::left("tracks_list")
-            .exact_size(168.0)
-            .frame(egui::Frame::NONE.fill(t.panel_bg))
-            .show(ui, |ui| panels::tracks_and_groups(app, ui));
-    }
-    if app.ui.show_clip_list {
-        egui::Panel::right("clip_list").exact_size(230.0).frame(egui::Frame::NONE.fill(t.panel_bg)).show(ui, |ui| panels::clip_list(app, ui));
-    }
-    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.window_bg)).show(ui, |ui| main_area(app, ui));
+    crate::docking::show(app, ui, crate::MainWindow::Edit);
 }
 
 /// Universe: the whole session in miniature; the box is the visible area (drag or click to move).
@@ -192,7 +175,17 @@ fn status_bar(app: &mut SoundApp, ui: &mut Ui) {
     );
 }
 
-fn main_area(app: &mut SoundApp, ui: &mut Ui) {
+pub(crate) fn main_area(app: &mut SoundApp, ui: &mut Ui) {
+    let session = app.engine.session();
+    let mut ruler_height_total = session.edit.rulers.iter().map(|ruler| ruler_height(ruler)).sum::<f32>();
+    if session.edit.flag("view.ruler.tempo_editor") && session.edit.rulers.iter().any(|ruler| ruler == "tempo") {
+        ruler_height_total += ruler_height("tempo_editor");
+    }
+    let minimum = vec2(header_width(session) + 64.0, ruler_height_total + 100.0);
+    crate::docking::minimum_body(ui, minimum, |ui| main_area_content(app, ui));
+}
+
+fn main_area_content(app: &mut SoundApp, ui: &mut Ui) {
     let t = Tokens::current();
     let full = ui.max_rect();
     let rulers: Vec<String> = app.engine.session().edit.rulers.clone();
