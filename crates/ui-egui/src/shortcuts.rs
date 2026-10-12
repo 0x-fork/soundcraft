@@ -175,6 +175,20 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             }
             true
         }
+        // The registry's key families "Cmd+Alt+[ / ]", "Cmd+Alt+0-5" and "Cmd+Ctrl+1-5", which `parse` can't read.
+        Key::OpenBracket | Key::CloseBracket if mods_match(Modifiers::COMMAND | Modifiers::ALT, m, mac) => {
+            let factor = if key == Key::CloseBracket { 2.0 } else { 0.5 };
+            let _ = app.run("view.waveform_zoom", json!({"factor": factor}));
+            true
+        }
+        Key::Num0 | Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 if mods_match(Modifiers::COMMAND | Modifiers::ALT, m, mac) => {
+            let _ = app.run("clip.rating", json!({"rating": digit(key)}));
+            true
+        }
+        Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 if mods_match(Modifiers::COMMAND | Modifiers::CTRL, m, mac) => {
+            let _ = app.run("view.zoom_preset", json!({"preset": digit(key)}));
+            true
+        }
         Key::ArrowUp | Key::ArrowDown if m.ctrl && !m.shift => {
             let id = if key == Key::ArrowUp { "edit.extend_selection_up" } else { "edit.extend_selection_down" };
             let _ = app.run(id, json!({}));
@@ -211,6 +225,11 @@ fn commands_focus(app: &mut SoundApp, key: Key) -> bool {
         Key::C => "edit.copy",
         Key::V => "edit.paste",
         Key::Z => "edit.undo",
+        Key::N => "options.insertion_follows_playback",
+        Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 => {
+            let _ = app.run("view.zoom_preset", json!({"preset": digit(key)}));
+            return true;
+        }
         Key::P => {
             move_selection_track(app, -1);
             return true;
@@ -253,6 +272,10 @@ fn tab_clip(app: &mut SoundApp, back: bool) {
     if let Some(n) = next {
         let _ = app.run("transport.locate", json!({"at": n}));
     }
+}
+
+fn digit(key: Key) -> u8 {
+    key.name().parse().unwrap_or(0)
 }
 
 /// Shortcut text for display. The registry stores macOS-style strings ("Cmd+N"); off macOS the Cmd
