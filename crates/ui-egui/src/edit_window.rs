@@ -256,7 +256,32 @@ fn main_area_content(app: &mut SoundApp, ui: &mut Ui) {
 }
 
 fn in_edit_window(s: &Session, t: &Track) -> bool {
-    !t.hidden && t.folder.and_then(|f| s.track(f)).is_none_or(|f| f.folder_open)
+    !t.hidden && !folder_collapsed(s, t)
+}
+
+/// Hidden because a folder at any level above this track is closed.
+fn folder_collapsed(s: &Session, track: &Track) -> bool {
+    let mut current = track.folder;
+    for _ in 0..64 {
+        let Some(folder) = current.and_then(|folder| s.track(folder)) else { return false };
+        if !folder.folder_open {
+            return true;
+        }
+        current = folder.folder;
+    }
+    false
+}
+
+fn folder_depth(s: &Session, track: &Track) -> usize {
+    let mut current = track.folder;
+    let mut depth = 0;
+    while let Some(folder) = current.and_then(|folder| s.track(folder))
+        && depth < 6
+    {
+        depth += 1;
+        current = folder.folder;
+    }
+    depth
 }
 
 /// Pro Tools' track-name click: Shift adds the tracks up to the nearest selected one, Cmd/Ctrl adds or removes one.
@@ -795,7 +820,8 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
     }
     bg.context_menu(|ui| track_context_menu(app, ui, id));
     // Name field.
-    let name_r = Rect::from_min_size(pos2(x0, head.min.y + 4.0), vec2(150.0, 17.0));
+    let indent = folder_depth(app.engine.session(), track) as f32 * 10.0;
+    let name_r = Rect::from_min_size(pos2(x0 + indent, head.min.y + 4.0), vec2(150.0 - indent, 17.0));
     ui.painter().rect(
         name_r,
         CornerRadius::same(2),
@@ -869,7 +895,7 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
         }
     });
     if track.is_folder() {
-        let fr = Rect::from_min_size(pos2(head.min.x + 6.0, name_r.min.y), vec2(10.0, 17.0));
+        let fr = Rect::from_min_size(pos2(name_r.min.x - 12.0, name_r.min.y), vec2(10.0, 17.0));
         icons::draw(ui.painter(), fr, if track.folder_open { "triangle_down" } else { "triangle_right" }, t.text);
         if ui.interact(fr, ui.id().with(("fold", id.0)), Sense::click()).clicked() {
             let _ = app.run("track.folder_toggle", json!({"track": id.0}));
@@ -1093,21 +1119,45 @@ fn track_context_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
         ("Move to New Folder...", "track.move_to_new_folder"),
         ("Group...", "track.group"),
     ];
+    let selection: Vec<u64> = {
+        let selected = &app.engine.session().edit.selected_tracks;
+        if selected.contains(&id) { selected.iter().map(|track| track.0).collect() } else { vec![tid] }
+    };
     for (label, cmd) in items {
         if ui.button(label).clicked() {
             if cmd == "ui.rename_track" {
                 let name = app.engine.session().track(id).map(|t| t.name.clone()).unwrap_or_default();
                 app.dialogs.open_rename_track(id, &name);
             } else {
-                let _ = app.run(cmd, json!({"tracks": [tid]}));
+                let _ = app.run(cmd, json!({"tracks": selection}));
             }
         }
+    }
+    let folders: Vec<(u64, String)> = app
+        .engine
+        .session()
+        .tracks
+        .iter()
+        .filter(|track| track.is_folder() && !selection.contains(&track.id.0))
+        .map(|track| (track.id.0, track.name.clone()))
+        .collect();
+    if !folders.is_empty() {
+        ui.menu_button("Move to Folder", |ui| {
+            for (folder, name) in &folders {
+                if ui.button(name).clicked() {
+                    let _ = app.run("track.move_to_folder", json!({"tracks": selection, "folder": folder}));
+                }
+            }
+        });
+    }
+    if app.engine.session().track(id).is_some_and(|track| track.folder.is_some()) && ui.button("Remove from Folder").clicked() {
+        let _ = app.run("track.remove_from_folder", json!({"tracks": selection}));
     }
     ui.separator();
     ui.menu_button("Track Height", |ui| {
         for h in TrackHeight::ALL {
             if ui.button(h.label()).clicked() {
-                let _ = app.run("track.height", json!({"tracks": [tid], "height": h.label()}));
+                let _ = app.run("track.height", json!({"tracks": selection, "height": h.label()}));
             }
         }
     });
@@ -1116,7 +1166,7 @@ fn track_context_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
             let (r, resp) = ui.allocate_exact_size(vec2(120.0, 14.0), Sense::click());
             ui.painter().rect_filled(r, 2.0, rgb(*c));
             if resp.clicked() {
-                let _ = app.run("track.color", json!({"tracks": [tid], "color": i}));
+                let _ = app.run("track.color", json!({"tracks": selection, "color": i}));
             }
         }
     });
