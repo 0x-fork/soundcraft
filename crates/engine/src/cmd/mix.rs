@@ -105,7 +105,15 @@ pub fn specs() -> Vec<CommandSpec> {
             insert_params
         ),
         cmd!("mix.insert_move", "Move Insert", [], None, "{track?, from, to}", has_selection, insert_move),
-        cmd!("mix.send", "Assign Send", [], None, "{track?, slot?: 0..9|a..j, bus: name, level_db?: 0 (kept when re-targeting), pre_fader?: false}", has_selection, send),
+        cmd!(
+            "mix.send",
+            "Assign Send",
+            [],
+            None,
+            "{track?, slot?: 0..9|a..j, bus: name, level_db?: 0 (kept when re-targeting), pre_fader?: false}",
+            has_selection,
+            send
+        ),
         cmd!("mix.send_remove", "Remove Send", [], None, "{track?, slot}", has_selection, |e, p| {
             let (t, slot) = track_slot(e, p, "mix.send_remove", SEND_SLOTS)?;
             if let Some(tr) = e.session_mut().track_mut(t)

@@ -214,7 +214,7 @@ fn main_area_content(app: &mut SoundApp, ui: &mut Ui) {
     let mut y = tl.min.y - app.edit_layout.scroll_y;
     app.edit_layout.rows.clear();
     let mut content_h = 0.0;
-    for t in app.engine.session().tracks.iter().filter(|x| !x.hidden && !folder_collapsed(app.engine.session(), x)) {
+    for t in app.engine.session().tracks.iter().filter(|x| in_edit_window(app.engine.session(), x)) {
         let h = track_height(t);
         app.edit_layout.rows.push((t.id.0, [full.min.x, y, tl.max.x, y + h]));
         y += h + 1.0;
@@ -255,8 +255,33 @@ fn main_area_content(app: &mut SoundApp, ui: &mut Ui) {
     }
 }
 
-fn folder_collapsed(s: &Session, t: &Track) -> bool {
-    t.folder.and_then(|f| s.track(f)).is_some_and(|f| !f.folder_open)
+fn in_edit_window(s: &Session, t: &Track) -> bool {
+    !t.hidden && t.folder.and_then(|f| s.track(f)).is_none_or(|f| f.folder_open)
+}
+
+/// Pro Tools' track-name click: Shift adds the tracks up to the nearest selected one, Cmd/Ctrl adds or removes one.
+pub(crate) fn click_track(app: &mut SoundApp, id: TrackId, mods: egui::Modifiers, shown: impl Fn(&Session, &Track) -> bool) {
+    let s = app.engine.session();
+    let order: Vec<TrackId> = s.tracks.iter().filter(|t| shown(s, t)).map(|t| t.id).collect();
+    let row = |t: &TrackId| order.iter().position(|o| o == t);
+    let mut tracks = s.edit.selected_tracks.clone();
+    if mods.command {
+        if tracks.contains(&id) {
+            tracks.retain(|t| *t != id);
+        } else {
+            tracks.push(id);
+        }
+    } else if mods.shift
+        && let Some(a) = row(&id)
+        && let Some(b) = tracks.iter().filter_map(row).min_by_key(|b| b.abs_diff(a))
+    {
+        let span = order.get(a.min(b)..=a.max(b)).unwrap_or_default();
+        tracks.extend(span.iter().filter(|t| !tracks.contains(t)).copied().collect::<Vec<_>>());
+    } else {
+        tracks = vec![id];
+    }
+    let ids: Vec<u64> = tracks.iter().map(|t| t.0).collect();
+    let _ = app.run("edit.select", json!({"tracks": ids}));
 }
 
 fn scroll_and_zoom(app: &mut SoundApp, ui: &Ui, area: Rect, tl: Rect) {
@@ -766,15 +791,7 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
     // Click on header background selects the track.
     let bg = ui.interact(head, ui.id().with(("hdr", id.0)), Sense::click());
     if bg.clicked() {
-        let add = ui.input(|i| i.modifiers.command || i.modifiers.shift);
-        let mut tracks = if add { app.engine.session().edit.selected_tracks.clone() } else { Vec::new() };
-        if add && tracks.contains(&id) {
-            tracks.retain(|x| *x != id);
-        } else {
-            tracks.push(id);
-        }
-        let ids: Vec<u64> = tracks.iter().map(|x| x.0).collect();
-        let _ = app.run("edit.select", json!({"tracks": ids}));
+        click_track(app, id, ui.input(|i| i.modifiers), in_edit_window);
     }
     bg.context_menu(|ui| track_context_menu(app, ui, id));
     // Name field.
@@ -797,7 +814,7 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
     if nresp.double_clicked() {
         app.dialogs.open_rename_track(id, &track.name);
     } else if nresp.clicked() {
-        let _ = app.run("edit.select", json!({"tracks": [id.0]}));
+        click_track(app, id, ui.input(|i| i.modifiers), in_edit_window);
     }
     // Drag the name plate to reorder tracks.
     if nresp.dragged()
@@ -2121,8 +2138,8 @@ mod tests {
         h.step();
     }
 
-    fn shift_click(h: &mut Harness<SoundApp>, at: Pos2) {
-        h.event(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    fn click_with(h: &mut Harness<SoundApp>, at: Pos2, mods: egui::Modifiers) {
+        h.event(egui::Event::ModifiersChanged(mods));
         click(h, at);
         h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
     }
@@ -2260,14 +2277,27 @@ mod tests {
         let (a, b, c) = (lane_point(&h, 0), lane_point(&h, 2) + vec2(100.0, 0.0), lane_point(&h, 3) + vec2(300.0, 0.0));
         drag(&mut h, a, a + vec2(200.0, 0.0));
         let sel = h.state().engine.session().edit.selection;
-        shift_click(&mut h, b);
+        click_with(&mut h, b, egui::Modifiers::SHIFT);
         assert_eq!(h.state().engine.session().edit.selected_tracks, [ids[0], ids[2]]);
         assert_eq!(h.state().engine.session().edit.selection, sel);
-        shift_click(&mut h, c);
+        click_with(&mut h, c, egui::Modifiers::SHIFT);
         let s = h.state().engine.session();
         assert_eq!(s.edit.selected_tracks, [ids[0], ids[2], ids[3]]);
         assert_eq!(s.edit.selection, Range::new(sel.start, sample_at(s, timeline(&h), c.x)));
         assert_eq!(highlighted_rows(&h), [0, 2, 3]);
+    }
+
+    #[test]
+    fn shift_and_cmd_click_on_track_names_extend_the_selection() {
+        let mut h = harness(5);
+        let ids = row_ids(&h);
+        let (none, shift, cmd) = (egui::Modifiers::NONE, egui::Modifiers::SHIFT, egui::Modifiers::COMMAND);
+        for (i, mods, want) in [(1, none, vec![1]), (3, shift, vec![1, 2, 3]), (2, cmd, vec![1, 3]), (0, cmd, vec![0, 1, 3]), (4, none, vec![4])] {
+            let at = row(&h, i).min + vec2(60.0, 10.0);
+            click_with(&mut h, at, mods);
+            let want: Vec<TrackId> = want.into_iter().map(|k| ids[k]).collect();
+            assert_eq!(h.state().engine.session().edit.selected_tracks, want, "row {i} clicked with {mods:?}");
+        }
     }
 
     #[test]
