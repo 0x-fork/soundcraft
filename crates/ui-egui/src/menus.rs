@@ -152,6 +152,7 @@ const DIALOG_COMMANDS: &[&str] = &[
     "file.import_audio",
     "file.import_midi",
     "session.open",
+    "session.save",
     "session.save_as",
     "session.save_copy",
     "track.group",
@@ -223,7 +224,7 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                     }
                     ui.separator();
                     if ui.button("Quit").clicked() {
-                        let _ = app.run("app.quit", json!({}));
+                        let _ = crate::dialogs::run_or_ask(app, "app.quit", json!({}));
                     }
                 });
                 let extra = ui_aliases();
@@ -437,12 +438,13 @@ pub fn invoke_menu(app: &mut SoundApp, id: &str, path: &str) {
         return;
     }
     let params = params_for(path, id);
-    let _ = app.run(id, params);
+    let _ = crate::dialogs::run_or_ask(app, id, params);
 }
 
-/// Keyboard shortcut for a dialog command: open its dialog. Returns true when handled.
+/// Keyboard shortcut for a dialog command, or one that would close a modified session: open its
+/// dialog. Returns true when handled.
 pub fn invoke_shortcut_dialog(app: &mut SoundApp, id: &str) -> bool {
-    wants_dialog(id) && app.dialogs.open_for_command(&app.engine, id)
+    (wants_dialog(id) && app.dialogs.open_for_command(&app.engine, id)) || crate::dialogs::ask_to_save(app, id, &json!({}))
 }
 
 /// Commands that open a dialog first: the listed ones, Score Setup, and anything that needs a path.
@@ -655,5 +657,25 @@ mod tests {
         app.dialogs.open = None;
         invoke_menu(&mut app, "ui.bounce_dialog", "File > Bounce Mix...");
         assert_eq!(app.dialogs.open_name(), Some("bounce"));
+    }
+
+    #[test]
+    fn save_asks_for_a_path_until_the_session_has_one() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        invoke_menu(&mut app, "session.save", "File > Save Session");
+        assert!(matches!(&app.dialogs.open, Some(crate::dialogs::Dialog::PathPrompt { cmd, .. }) if cmd == "session.save_as"));
+        app.dialogs.open = None;
+        assert!(invoke_shortcut_dialog(&mut app, "session.save"));
+        app.dialogs.open = None;
+
+        let dir = std::env::temp_dir().join(format!("soundcraft-save-{}", std::process::id()));
+        let path = dir.join("Song.scraft");
+        app.run("session.save_as", json!({"path": path.to_string_lossy()})).unwrap();
+        app.run("track.new", json!({})).unwrap();
+        assert!(!invoke_shortcut_dialog(&mut app, "session.save"));
+        invoke_menu(&mut app, "session.save", "File > Save Session");
+        assert!(app.dialogs.open.is_none());
+        assert!(!app.engine.is_dirty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

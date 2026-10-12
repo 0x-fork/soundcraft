@@ -24,11 +24,14 @@ pub enum Dialog {
     Group { name: String, edit: bool, mix: bool, members: Vec<(u64, String, bool)> },
     Session { frame_rate: String, bit_depth: String },
     ScoreSetup { title: String, composer: String, bars_per_system: u32, show_track_names: bool },
+    SaveChanges { then: (String, Value) },
 }
 
 #[derive(Default)]
 pub struct Dialogs {
     pub open: Option<Dialog>,
+    /// Runs once the session has been saved from `SaveChanges`.
+    after_save: Option<(String, Value)>,
 }
 
 impl Dialogs {
@@ -48,6 +51,7 @@ impl Dialogs {
             Dialog::Group { .. } => "group",
             Dialog::Session { .. } => "session",
             Dialog::ScoreSetup { .. } => "score_setup",
+            Dialog::SaveChanges { .. } => "save_changes",
         })
     }
 
@@ -68,6 +72,7 @@ impl Dialogs {
 
     /// Open the dialog for a command; false when the command has no dialog.
     pub fn open_for_command(&mut self, e: &Engine, id: &str) -> bool {
+        self.after_save = None;
         let home = default_dir();
         let name = e.session().name.clone();
         self.open = Some(match id {
@@ -85,8 +90,9 @@ impl Dialogs {
             "file.import_audio" => Dialog::PathPrompt { cmd: id.into(), title: "Import Audio".into(), path: home, key: "path".into() },
             "file.import_midi" => Dialog::PathPrompt { cmd: id.into(), title: "Import MIDI".into(), path: home, key: "path".into() },
             "session.open" => Dialog::PathPrompt { cmd: id.into(), title: "Open Session".into(), path: home, key: "path".into() },
-            "session.save_as" | "session.save_copy" => Dialog::PathPrompt {
-                cmd: id.into(),
+            "session.save" if e.path.is_some() => return false,
+            "session.save" | "session.save_as" | "session.save_copy" => Dialog::PathPrompt {
+                cmd: if id == "session.save_copy" { id } else { "session.save_as" }.into(),
                 title: "Save Session As".into(),
                 // The browser has no folders: the name becomes the bundle file's name.
                 path: if home.is_empty() {
@@ -130,6 +136,32 @@ impl Dialogs {
         });
         true
     }
+}
+
+/// When `id` would close a session with unsaved changes, ask first; true when the question is
+/// open instead. A take in progress is stopped first, so it counts as a change.
+pub fn ask_to_save(app: &mut SoundApp, id: &str, params: &Value) -> bool {
+    if !matches!(id, "session.new" | "session.open" | "session.close" | "session.revert" | "app.quit")
+        || soundcraft_engine::find_command(id).is_some_and(|c| (c.enabled)(&app.engine).is_err())
+    {
+        return false;
+    }
+    if app.engine.transport.recording {
+        app.stop_play();
+    }
+    if !app.engine.is_dirty() {
+        return false;
+    }
+    app.dialogs.open = Some(Dialog::SaveChanges { then: (id.into(), params.clone()) });
+    true
+}
+
+/// Runs `id`, unless it asks to save first (`ask_to_save`).
+pub fn run_or_ask(app: &mut SoundApp, id: &str, params: Value) -> Result<Value, String> {
+    if ask_to_save(app, id, &params) {
+        return Ok(Value::Null);
+    }
+    app.run(id, params)
 }
 
 /// A path prompt for any command whose parameters start with a required `path` or `dir` (plus
@@ -221,6 +253,8 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
     let Some(mut d) = app.dialogs.open.take() else { return };
     let mut keep = true;
     let mut action: Option<(String, Value)> = None;
+    let mut save_first: Option<(String, Value)> = None;
+    let confirmed = matches!(d, Dialog::SaveChanges { .. });
     let title = match &d {
         Dialog::NewTracks { .. } => "New Tracks",
         Dialog::NewSession { .. } => "New Session",
@@ -235,6 +269,8 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         Dialog::Group { .. } => "Create Group",
         Dialog::Session { .. } => "Session Setup",
         Dialog::ScoreSetup { .. } => "Score Setup",
+        Dialog::SaveChanges { then } if then.0 == "session.revert" => "Revert to Saved",
+        Dialog::SaveChanges { .. } => "Unsaved Changes",
     }
     .to_string();
     let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
@@ -484,12 +520,54 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         ));
                     }
                 }
+                Dialog::SaveChanges { then } => {
+                    let name = &app.engine.session().name;
+                    let revert = then.0 == "session.revert";
+                    if revert || cfg!(target_arch = "wasm32") {
+                        let (question, ok) = if revert {
+                            (format!("Revert “{name}” to its last saved version?"), "Revert")
+                        } else {
+                            (format!("Close “{name}” without saving?"), "Don't Save")
+                        };
+                        ui.label(format!("{question} Your changes will be lost."));
+                        if buttons(ui, ok, false) {
+                            action = Some(then.clone());
+                        }
+                    } else {
+                        ui.label(format!("Save changes to “{name}” before closing?"));
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Don't Save").clicked() {
+                                action = Some(then.clone());
+                            }
+                            if buttons(ui, "Save", enter) {
+                                save_first = Some(then.clone());
+                            }
+                        });
+                    }
+                }
             }
         });
     if esc || ctx.memory(|m| m.data.get_temp::<bool>(egui::Id::new("dlg_cancel")).unwrap_or(false)) {
         keep = false;
+        app.dialogs.after_save = None;
         ctx.memory_mut(|m| m.data.remove::<bool>(egui::Id::new("dlg_cancel")));
     }
+    if let Some(then) = save_first {
+        keep = false;
+        if !app.dialogs.open_for_command(&app.engine, "session.save") {
+            action = Some(("session.save".into(), json!({})));
+        }
+        app.dialogs.after_save = Some(then);
+    }
+    if let Some((cmd, params)) = &action
+        && !confirmed
+        && ask_to_save(app, cmd, params)
+    {
+        keep = false;
+        action = None;
+    }
+    let saving = action.as_ref().is_some_and(|(cmd, _)| cmd.starts_with("session.save"));
     if let Some((cmd, params)) = action {
         keep = false;
         match app.run(&cmd, params) {
@@ -499,6 +577,13 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
             Ok(_) => {}
             Err(e) => app.ui.status = e,
         }
+    }
+    if saving
+        && let Some((then, params)) = app.dialogs.after_save.take()
+        && !app.engine.is_dirty()
+        && let Err(e) = app.run(&then, params)
+    {
+        app.ui.status = e;
     }
     if keep {
         app.dialogs.open = Some(d);

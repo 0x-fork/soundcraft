@@ -20,7 +20,7 @@ mod logging;
 mod native_menu;
 
 use soundcraft_engine::Engine;
-use soundcraft_ui_egui::{Services, SoundApp, UiState};
+use soundcraft_ui_egui::{Services, SoundApp, UiState, dialogs};
 use std::sync::Arc;
 
 struct App(SoundApp, Option<&'static logging::AppLogger>, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
@@ -57,6 +57,8 @@ impl eframe::App for App {
         }
         if self.0.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if ctx.input(|i| i.viewport().close_requested()) && dialogs::ask_to_save(&mut self.0, "app.quit", &serde_json::json!({})) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         soundcraft_ui_egui::fit_window_to_screen(ctx);
         let (inner, maximized) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().maximized.unwrap_or(false)));
@@ -100,7 +102,7 @@ impl eframe::App for App {
 fn open_path(app: &mut SoundApp, p: &str) {
     let lower = p.to_ascii_lowercase();
     let r = if lower.ends_with(".scraft") {
-        app.run("session.open", serde_json::json!({"path": p}))
+        dialogs::run_or_ask(app, "session.open", serde_json::json!({"path": p}))
     } else if lower.ends_with(".mid") || lower.ends_with(".midi") || lower.ends_with(".smf") {
         app.run("file.import_midi", serde_json::json!({"path": p}))
     } else {

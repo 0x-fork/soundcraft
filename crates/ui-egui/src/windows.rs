@@ -350,7 +350,7 @@ fn workspace(app: &mut SoundApp, ctx: &egui::Context) {
                     if is_dir {
                         app.ui.workspace_dir = path;
                     } else if name.ends_with(".scraft") {
-                        let _ = app.run("session.open", json!({"path": path}));
+                        let _ = crate::dialogs::run_or_ask(app, "session.open", json!({"path": path}));
                     } else if name.ends_with(".mid") || name.ends_with(".midi") {
                         let _ = app.run("file.import_midi", json!({"path": path}));
                     } else {

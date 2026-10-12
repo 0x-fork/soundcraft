@@ -49,7 +49,7 @@ pub fn specs() -> Vec<CommandSpec> {
             }
             Ok(json!({"path": file}))
         }),
-        cmd!(noundo "session.revert", "Revert Session to Saved...", ["File"], None, "{}", always, |e, _| {
+        cmd!(noundo "session.revert", "Revert Session to Saved...", ["File"], None, "{}", |e| if e.path.is_some() { Ok(()) } else { Err("the session has not been saved".into()) }, |e, _| {
             let path = e.path.clone().ok_or_else(|| bad("session.revert", "the session has not been saved"))?;
             crate::io::open_session(e, &path)?;
             Ok(json!({}))
@@ -470,6 +470,17 @@ mod tests {
         assert!(res["missing"].as_array().is_some_and(|m| !m.is_empty()), "{res}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn saving_a_session_without_audio_creates_its_folder() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-new-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("Song").join("Song.scraft");
+        Engine::default().execute("session.save_as", &json!({"path": path.to_string_lossy()})).unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn tone_engine() -> (Engine, u64) {
         let mut e = Engine::default();
         e.execute("track.new", &json!({"count": 1, "name": "Tone", "format": "mono"})).unwrap();
