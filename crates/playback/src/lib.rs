@@ -628,6 +628,14 @@ impl Player {
         }
     }
 
+    /// Closes every plugin editor window (main thread). Call before replacing the player: its
+    /// instances may be dropped on the audio thread, where editor windows cannot be closed.
+    pub fn close_editors(&self) {
+        for e in self.side().editors.values_mut() {
+            e.close();
+        }
+    }
+
     pub fn editor_open(&self, track: TrackId, slot: usize) -> bool {
         self.side().editors.get(&(track, slot)).is_some_and(|e| e.is_open())
     }
