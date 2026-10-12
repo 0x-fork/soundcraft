@@ -25,7 +25,9 @@ pub fn specs() -> Vec<CommandSpec> {
             p,
             "edit.clear_clip_gain"
         )),
-        cmd!("edit.cut_all_automation", "All Automation", ["Edit", "Cut Special"], None, "{}", has_range, |e, p| clear_automation(e, p, None)),
+        cmd!("edit.cut_all_automation", "All Automation", ["Edit", "Cut Special"], None, "{tracks?, start?, end?}", has_range, |e, p| {
+            super::edit_more::cut_all_automation(e, p)
+        }),
         cmd!("edit.clear_all_automation", "All Automation", ["Edit", "Clear Special"], None, "{}", has_range, |e, p| clear_automation(e, p, None)),
         cmd!("edit.clear_pan_automation", "Pan Automation", ["Edit", "Clear Special"], None, "{}", has_range, |e, p| clear_automation(
             e,
@@ -47,11 +49,12 @@ pub fn specs() -> Vec<CommandSpec> {
             repeat_to_fill
         ),
         cmd!(noundo "edit.select_all", "Select All", ["Edit"], Some("Cmd+A"), "{}", always, select_all),
-        cmd!(noundo "edit.select", "Set Edit Selection", [], None, "{tracks?: [id|name], start?, end?, clips?: [id], exact?: bool (ignore edit groups)}", always, select),
+        cmd!(noundo "edit.select", "Set Edit Selection", [], None, "{tracks?: [id|name], start?, end?, clips?: [id], sources?: [id] (Clip List files), exact?: bool (ignore edit groups)}", always, select),
         cmd!(noundo "edit.select_none", "Deselect All", [], None, "{}", always, |e, _| {
             let s = e.session_mut();
             s.edit.selected_tracks.clear();
             s.edit.selected_clips.clear();
+            s.edit.selected_sources.clear();
             s.edit.selection.end = s.edit.selection.start;
             Ok(json!({}))
         }),
@@ -349,6 +352,9 @@ fn select(e: &mut Engine, p: &Value) -> Result<Value> {
     let en = position_param(e, "edit.select", p, "end")?;
     let clips =
         p.get("clips").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).map(soundcraft_model::ClipId).collect::<Vec<_>>());
+    let sources =
+        p.get("sources").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).map(soundcraft_model::SourceId).collect::<Vec<_>>());
+    let list_changes = clips.is_some() || sources.is_some() || st.is_some();
     let exact = bool_or(p, "exact", false);
     let s = e.session_mut();
     if let Some(mut t) = tracks {
@@ -388,13 +394,17 @@ fn select(e: &mut Engine, p: &Value) -> Result<Value> {
             s.edit.selected_tracks = trs;
         }
         s.edit.selected_clips = c;
-    } else if st.is_some() {
+    } else if list_changes {
         s.edit.selected_clips.clear();
+    }
+    if list_changes {
+        let mut known: std::collections::BTreeSet<_> = s.sources.iter().map(|f| f.id).collect();
+        s.edit.selected_sources = sources.unwrap_or_default().into_iter().filter(|id| known.remove(id)).collect();
     }
     if s.edit.link_timeline_edit {
         s.edit.timeline_selection = s.edit.selection;
     }
-    Ok(json!({"selection": s.edit.selection, "tracks": s.edit.selected_tracks, "clips": s.edit.selected_clips}))
+    Ok(json!({"selection": s.edit.selection, "tracks": s.edit.selected_tracks, "clips": s.edit.selected_clips, "sources": s.edit.selected_sources}))
 }
 
 fn shift_selection(e: &mut Engine, dir: i64) -> Result<Value> {
