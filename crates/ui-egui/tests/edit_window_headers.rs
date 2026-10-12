@@ -44,11 +44,11 @@ fn bypassed(h: &Harness<'_, SoundApp>, slot: usize) -> bool {
     kick(h).mixer.inserts.get(slot).cloned().flatten().is_some_and(|i| i.bypass)
 }
 
-fn harness(height: &str, view: &str) -> (Harness<'static, SoundApp>, TrackId, [f32; 4]) {
+fn harness(track: &str, height: &str, view: &str) -> (Harness<'static, SoundApp>, TrackId, [f32; 4]) {
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
     app.run(view, json!({})).unwrap();
-    app.run("track.height", json!({"tracks": ["Kick"], "height": height})).unwrap();
-    let kick = app.engine.session().track_by_name("Kick").unwrap().id;
+    app.run("track.height", json!({"tracks": [track], "height": height})).unwrap();
+    let id = app.engine.session().track_by_name(track).unwrap().id;
     let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_ui_state(
         |ui, app: &mut SoundApp| {
             let ctx = ui.ctx().clone();
@@ -60,13 +60,13 @@ fn harness(height: &str, view: &str) -> (Harness<'static, SoundApp>, TrackId, [f
     for _ in 0..6 {
         step(&mut h);
     }
-    let row = h.state().edit_layout.rows.iter().find(|(id, _)| *id == kick.0).map(|(_, r)| *r).unwrap();
-    (h, kick, row)
+    let row = h.state().edit_layout.rows.iter().find(|(t, _)| *t == id.0).map(|(_, r)| *r).unwrap();
+    (h, id, row)
 }
 
 #[test]
 fn header_keys_freeze_silence_and_show_automation() {
-    let (mut h, _, row) = harness("medium", "view.edit_io");
+    let (mut h, _, row) = harness("Kick", "medium", "view.edit_io");
     let at = |x: f32, y: f32| pos2(row[0] + x, row[1] + y);
 
     click(&mut h, at(23.5, 65.5));
@@ -86,7 +86,7 @@ fn header_keys_freeze_silence_and_show_automation() {
 
 #[test]
 fn edit_window_insert_slots_open_change_and_add_plugins() {
-    let (mut h, kick, row) = harness("medium", "view.edit_inserts_ae");
+    let (mut h, kick, row) = harness("Kick", "medium", "view.edit_inserts_ae");
     let slot = |i: usize| pos2(row[0] + HEADER_W + 37.5, row[1] + 8.5 + i as f32 * 18.0);
 
     click(&mut h, slot(0));
@@ -116,7 +116,7 @@ fn edit_window_insert_slots_open_change_and_add_plugins() {
 
 #[test]
 fn short_tracks_show_insert_slots_as_squares() {
-    let (mut h, kick, row) = harness("small", "view.edit_inserts_ae");
+    let (mut h, kick, row) = harness("Kick", "small", "view.edit_inserts_ae");
     let square = |i: usize| pos2(row[0] + HEADER_W + 9.0 + i as f32 * 14.0, row[1] + 8.5);
 
     click(&mut h, square(1));
@@ -132,7 +132,7 @@ fn short_tracks_show_insert_slots_as_squares() {
 
 #[test]
 fn the_views_menu_stays_open_until_a_click_elsewhere() {
-    let (mut h, _, _) = harness("medium", "view.edit_inserts_ae");
+    let (mut h, _, _) = harness("Kick", "medium", "view.edit_inserts_ae");
     let views = h.get_by_label("Views").rect().center();
     click(&mut h, views);
     for column in ["Sends A-E", "I/O"] {
@@ -147,7 +147,7 @@ fn the_views_menu_stays_open_until_a_click_elsewhere() {
 
 #[test]
 fn the_io_columns_route_menus_stay_open_while_searching_buses() {
-    let (mut h, _, row) = harness("medium", "view.edit_io");
+    let (mut h, _, row) = harness("Kick", "medium", "view.edit_io");
     click(&mut h, pos2(row[0] + HEADER_W + 40.0, row[1] + 29.5));
     let bus = h.get_by_label("Bus").rect();
     let search = h
@@ -163,13 +163,7 @@ fn the_io_columns_route_menus_stay_open_while_searching_buses() {
 
 #[test]
 fn only_a_sends_fader_icon_opens_its_level() {
-    let (mut h, _, _) = harness("medium", "view.edit_sends_ae");
-    h.state_mut().run("track.height", json!({"tracks": ["Snare"], "height": "medium"})).unwrap();
-    for _ in 0..4 {
-        step(&mut h);
-    }
-    let snare = h.state().engine.session().track_by_name("Snare").map(|t| t.id.0).unwrap();
-    let row = h.state().edit_layout.rows.iter().find(|(id, _)| *id == snare).map(|(_, r)| *r).unwrap();
+    let (mut h, snare, row) = harness("Snare", "medium", "view.edit_sends_ae");
     let send_a = |x: f32| pos2(row[0] + HEADER_W + x, row[1] + 8.5);
 
     // The right of the name, where the level used to start, picks the destination.
@@ -179,6 +173,6 @@ fn only_a_sends_fader_icon_opens_its_level() {
     click(&mut h, pos2(800.0, 990.0));
 
     click(&mut h, send_a(65.5));
-    assert_eq!(h.state().ui.send_window, Some((TrackId(snare), 0)));
+    assert_eq!(h.state().ui.send_window, Some((snare, 0)));
     assert!(h.query_by_label("DESTINATION").is_none());
 }

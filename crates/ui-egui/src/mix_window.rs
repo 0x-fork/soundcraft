@@ -3,7 +3,7 @@
 use crate::SoundApp;
 use crate::theme::{Tokens, bold, regular, rgb};
 use crate::widgets::{
-    PannerEdit, PannerSpeaker, db_text, fader, inset, meter, multi_meter, pan_knob, pan_text, raised_key, rec_toggle, selector_box,
+    PannerEdit, PannerSpeaker, db_text, fader, groove, inset, meter, multi_meter, pan_knob, pan_text, raised_key, rec_toggle, selector_box,
     selector_box_with_tooltip, shade, surround_panner, text_toggle, vgradient,
 };
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
@@ -86,6 +86,16 @@ pub(crate) fn route_name(app: &SoundApp, r: &Route) -> String {
         Route::Bus(b) => app.engine.session().bus(*b).map_or_else(|| "bus?".into(), |b| b.name.clone()),
         Route::Hardware(h) => h.clone(),
     }
+}
+
+pub(crate) fn input_name(app: &SoundApp, track: &Track) -> String {
+    if track.kind.has_playlist() && track.mixer.input == Route::None { "In 1".to_string() } else { route_name(app, &track.mixer.input) }
+}
+
+/// The input or output menu under `resp`. It closes only on a click outside, so its bus search
+/// field can be typed in.
+pub(crate) fn route_popup(app: &mut SoundApp, resp: &egui::Response, id: TrackId, input: bool) {
+    egui::Popup::menu(resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| route_menu(app, ui, id, input));
 }
 
 fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapshot>) {
@@ -221,14 +231,12 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         section_label(ui, sec, "I / O");
         let in_r = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 15.0), vec2(inner_w - 4.0, 16.0));
         let out_r = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 33.0), vec2(inner_w - 4.0, 16.0));
-        let input =
-            if track.kind.has_playlist() && track.mixer.input == Route::None { "In 1".to_string() } else { route_name(app, &track.mixer.input) };
         let mut c = ui.new_child(egui::UiBuilder::new().id_salt(("mix-input", id.0)).max_rect(in_r));
-        let resp = selector_box(&mut c, in_r.width(), in_r.height(), &input, t.text);
-        egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| route_menu(app, ui, id, true));
+        let resp = selector_box(&mut c, in_r.width(), in_r.height(), &input_name(app, &track), t.text);
+        route_popup(app, &resp, id, true);
         let mut c = ui.new_child(egui::UiBuilder::new().id_salt(("mix-output", id.0)).max_rect(out_r));
         let resp = selector_box(&mut c, out_r.width(), out_r.height(), &route_name(app, &track.mixer.output), t.text);
-        egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| route_menu(app, ui, id, false));
+        route_popup(app, &resp, id, false);
         // Automation mode.
         let am_r = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 51.0), vec2(inner_w - 4.0, 16.0));
         ui.painter().text(pos2(am_r.center().x, am_r.min.y - 1.0), Align2::CENTER_BOTTOM, "", regular(9.0), t.text_dim);
@@ -442,9 +450,10 @@ pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r:
 
 /// What a plugin slot shows at its left: a dot for inserts, the send's letter, or an arrow for
 /// a send on a short track.
-enum Mark<'a> {
+#[derive(Clone, Copy)]
+enum Mark {
     Dot,
-    Letter(&'a str),
+    Letter(char),
     Arrow,
 }
 
@@ -452,14 +461,14 @@ enum Mark<'a> {
 const COMPACT_SLOT: f32 = 30.0;
 const NAME_SIZE: f32 = 9.5;
 
-fn draw_mark(p: &egui::Painter, r: Rect, mark: &Mark, color: Color32) {
+fn draw_mark(p: &egui::Painter, r: Rect, mark: Mark, color: Color32) {
     let at = r.min + vec2(4.75, 4.75);
     match mark {
         Mark::Dot => {
             p.circle_filled(at, 2.0, color);
         }
         Mark::Letter(l) => {
-            p.text(pos2(r.min.x + 2.5, r.center().y), Align2::LEFT_CENTER, *l, bold(NAME_SIZE), color);
+            p.text(pos2(r.min.x + 2.5, r.center().y), Align2::LEFT_CENTER, l, bold(NAME_SIZE), color);
         }
         Mark::Arrow => {
             let at = at + vec2(0.0, 0.5);
@@ -473,7 +482,7 @@ fn empty_slot(p: &egui::Painter, r: Rect, hovered: bool, mark: Mark) {
     let t = Tokens::current();
     p.rect_filled(r, 2.0, if hovered { shade(t.slot_empty, 0.06) } else { t.slot_empty });
     let color = if matches!(mark, Mark::Letter(_)) { t.slot_mark.lerp_to_gamma(t.text, 0.55) } else { t.slot_mark };
-    draw_mark(p, r, &mark, color);
+    draw_mark(p, r, mark, color);
 }
 
 /// A used slot, a button a point bigger than the empty cell: the mark, a groove, the name
@@ -483,14 +492,13 @@ fn used_slot(p: &egui::Painter, r: Rect, faces: [Color32; 2], mark: Mark, name: 
     let t = Tokens::current();
     let outer = r.expand(1.0);
     let top = raised_key(p, outer, faces, false);
-    draw_mark(p, r, &mark, if matches!(mark, Mark::Dot) { t.slot_mark.lerp_to_gamma(color, 0.35) } else { color });
+    draw_mark(p, r, mark, if matches!(mark, Mark::Dot) { t.slot_mark.lerp_to_gamma(color, 0.35) } else { color });
     if r.width() < COMPACT_SLOT {
         return;
     }
-    let groove = r.min.x + 10.5;
-    p.vline(groove, r.y_range(), Stroke::new(1.0, shade(top, -0.42)));
-    p.vline(groove + 1.0, r.y_range(), Stroke::new(1.0, shade(top, 0.12)));
-    let mut text = r.with_min_x(groove + 1.5);
+    let groove_x = r.min.x + 10.5;
+    groove(p, groove_x, r.y_range(), top);
+    let mut text = r.with_min_x(groove_x + 1.5);
     if let Some(k) = level {
         let well = level_icon(r);
         p.rect_filled(well, 1.0, Color32::BLACK);
@@ -515,12 +523,13 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
     let id = track.id;
     let ins = track.mixer.inserts.get(slot).cloned().flatten();
     let resp = ui.interact(r, ui.id().with(("ins", id.0, slot)), Sense::click());
-    let name = ins.as_ref().map(|i| plugin_info(&i.plugin).map_or(i.plugin.as_str(), |p| p.short_name)).unwrap_or_default();
+    let info = ins.as_ref().and_then(|i| plugin_info(&i.plugin));
+    let name = ins.as_ref().map(|i| info.map_or(i.plugin.as_str(), |p| p.short_name)).unwrap_or_default();
     match &ins {
         None => empty_slot(ui.painter(), r, resp.hovered(), Mark::Dot),
         Some(i) => {
             let faces = if i.bypass { t.slot_bypassed } else { t.slot_face };
-            let color = if plugin_info(&i.plugin).is_some() { t.text } else { t.text_dim };
+            let color = if info.is_some() { t.text } else { t.text_dim };
             used_slot(ui.painter(), r, faces, Mark::Dot, name, color, None);
         }
     }
@@ -686,14 +695,13 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
     let t = Tokens::current();
     let id = track.id;
     let snd = track.mixer.sends.get(slot).cloned().flatten();
+    let compact = r.width() < COMPACT_SLOT;
     // As in Pro Tools, only the fader icon opens a send's level; the rest of the slot picks its
     // destination. A short track's square has no icon, so all of it is the level.
-    let level_r = if r.width() < COMPACT_SLOT { r } else { level_icon(r).expand2(vec2(3.0, 0.0)).with_min_y(r.min.y).with_max_y(r.max.y) };
+    let level_r = if compact { r } else { level_icon(r).expand2(vec2(3.0, 0.0)).with_min_y(r.min.y).with_max_y(r.max.y) };
     let route_r = Rect::from_min_max(r.min, pos2((level_r.min.x - 1.0).max(r.min.x), r.max.y));
     let route_resp = ui.interact(if snd.is_some() { route_r } else { r }, ui.id().with(("snd-route", id.0, slot)), Sense::click());
-    let hovered = ui.rect_contains_pointer(r);
-    let letter = ((b'a' + slot as u8) as char).to_string();
-    let mark = if r.width() < COMPACT_SLOT { Mark::Arrow } else { Mark::Letter(&letter) };
+    let mark = if compact { Mark::Arrow } else { Mark::Letter((b'a' + slot as u8) as char) };
     match &snd {
         Some(s) => {
             let name = route_name(app, &s.target);
@@ -728,7 +736,7 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
             ));
             level_resp.context_menu(|ui| send_options_menu(app, ui, id, slot, s));
         }
-        None => empty_slot(ui.painter(), r, hovered, mark),
+        None => empty_slot(ui.painter(), r, ui.rect_contains_pointer(r), mark),
     }
     if let Some(send) = &snd {
         egui::Popup::menu(&route_resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
@@ -1031,7 +1039,7 @@ fn send_route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, cu
     }
 }
 
-pub(crate) fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
+fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
     let key = if input { "input" } else { "output" };
     let cmd = if input { "track.input" } else { "track.output" };
     if ui.button(if input { "no input" } else { "no output" }).clicked() {

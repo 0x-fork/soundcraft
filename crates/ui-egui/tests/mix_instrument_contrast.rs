@@ -9,7 +9,7 @@ struct Slot {
     /// The face behind the label's centre line.
     fill: Color32,
     /// The face's top and bottom colours.
-    faces: (Color32, Color32),
+    faces: [Color32; 2],
     text: Color32,
     border: Color32,
 }
@@ -52,13 +52,12 @@ fn slot(output: &FullOutput, label: &str) -> Slot {
     let foreground = text.override_text_color.unwrap_or(text.galley.job.sections[0].format.color);
     assert_eq!(text.opacity_factor, 1.0);
     assert_eq!(foreground.a(), 255);
-    Slot { rect: rim.rect, fill: top.color.lerp_to_gamma(bottom.color, k), faces: (top.color, bottom.color), text: foreground, border: rim.fill }
+    Slot { rect: rim.rect, fill: top.color.lerp_to_gamma(bottom.color, k), faces: [top.color, bottom.color], text: foreground, border: rim.fill }
 }
 
 /// Face colours as painted: the anti-aliased edge sits half a pixel inside the gradient's ends.
-fn near((a, b): (Color32, Color32), (c, d): (Color32, Color32)) -> bool {
-    let close = |x: Color32, y: Color32| x.to_array().iter().zip(y.to_array()).all(|(p, q)| p.abs_diff(q) <= 2);
-    close(a, c) && close(b, d)
+fn near(a: [Color32; 2], b: [Color32; 2]) -> bool {
+    a.iter().zip(b).all(|(x, y)| x.to_array().iter().zip(y.to_array()).all(|(p, q)| p.abs_diff(q) <= 2))
 }
 
 fn contrast(a: Color32, b: Color32) -> f64 {
@@ -125,7 +124,7 @@ fn populated_mix_instrument_uses_readable_palette_in_real_frames() {
         let ordinary = slot(harness.output(), "SubSynth");
         let insert = slot(harness.output(), "EQ7");
         let palette = if light { soundcraft_ui_egui::theme::Tokens::LIGHT } else { soundcraft_ui_egui::theme::Tokens::DARK };
-        let face = (palette.slot_face[0], palette.slot_face[1]);
+        let face = palette.slot_face;
         assert!(near(insert.faces, face), "{name}: insert faces {:?}", insert.faces);
         // The empty instrument track's slot sits beside the populated one, drawn as an empty cell.
         let row = ordinary.rect.center().y;

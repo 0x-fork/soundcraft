@@ -50,6 +50,13 @@ pub fn raised_key(p: &Painter, r: Rect, faces: [Color32; 2], hovered: bool) -> C
     top
 }
 
+/// A groove across a raised key whose face starts at `top`: a dark line, then a light one.
+pub fn groove(p: &Painter, x: f32, ys: impl Into<egui::Rangef>, top: Color32) {
+    let ys = ys.into();
+    p.vline(x, ys, Stroke::new(1.0, shade(top, -0.42)));
+    p.vline(x + 1.0, ys, Stroke::new(1.0, shade(top, 0.12)));
+}
+
 pub fn inset(p: &Painter, r: Rect, fill: Color32) {
     let t = Tokens::current();
     p.rect(r, 2.0, fill, Stroke::new(1.0, t.border), StrokeKind::Inside);
@@ -215,13 +222,9 @@ pub fn meter(ui: &Ui, r: Rect, level: f32, hold: f32, clip: bool) {
     let t = Tokens::current();
     let p = ui.painter();
     p.rect_filled(r, 0.0, t.meter_bg);
-    let pos = |v: f32| -> f32 {
-        let db = if v <= 1e-6 { -80.0 } else { 20.0 * v.log10() };
-        meter_pos(db)
-    };
     let h = r.height() - 4.0;
     let inner = Rect::from_min_max(pos2(r.min.x + 1.0, r.min.y + 3.0), pos2(r.max.x - 1.0, r.max.y - 1.0));
-    let lv = pos(level);
+    let lv = level_pos(level);
     let (amber, red) = (meter_pos(-12.0), meter_pos(-3.0));
     let mut leds = Mesh::default();
     for i in 0..(h / 3.0).clamp(0.0, 1000.0) as usize {
@@ -238,13 +241,18 @@ pub fn meter(ui: &Ui, r: Rect, level: f32, hold: f32, clip: bool) {
         quad(&mut leds, Rect::from_x_y_ranges(inner.x_range(), y - 2.0..=y), [col; 4]);
     }
     p.add(leds);
-    let hv = pos(hold);
+    let hv = level_pos(hold);
     if hv > 0.01 {
         let y = inner.max.y - h * hv;
         p.line_segment([pos2(inner.min.x, y), pos2(inner.max.x, y)], Stroke::new(1.0, if hv > red { t.meter_red } else { t.meter_yellow }));
     }
     let clip_r = Rect::from_min_max(r.min, pos2(r.max.x, r.min.y + 2.5));
     p.rect_filled(clip_r, 0.0, if clip { t.meter_red } else { t.meter_clip_off });
+}
+
+/// A linear peak → 0..1 meter position.
+pub fn level_pos(v: f32) -> f32 {
+    meter_pos(if v <= 1e-6 { -80.0 } else { 20.0 * v.log10() })
 }
 
 /// dB → 0..1 meter position (logarithmic-ish scale like hardware meters).
