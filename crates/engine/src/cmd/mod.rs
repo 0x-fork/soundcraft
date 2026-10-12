@@ -238,9 +238,7 @@ pub fn tracks_required(e: &Engine, cmd: &str, p: &Value) -> Result<Vec<TrackId>>
     if t.is_empty() { Err(bad(cmd, "no tracks: pass `track`/`tracks` or select tracks")) } else { Ok(t) }
 }
 
-/// Largest position accepted from parameters: 2^40 samples (about 265 days at 48 kHz). Clamping
-/// here keeps every later addition and subtraction on positions far away from overflow.
-pub const MAX_POSITION: Samples = 1 << 40;
+pub use soundcraft_time::MAX_POSITION;
 
 /// Position from `key`: a number of samples, or `{"seconds": x}`, or a string in the main counter format.
 /// Values are clamped to ±[`MAX_POSITION`].

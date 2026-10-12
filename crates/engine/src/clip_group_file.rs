@@ -144,11 +144,10 @@ pub fn import(e: &mut Engine, path: &str, first: Option<TrackId>, at: Samples) -
                 continue;
             }
             c.id = s.new_clip_id();
-            soundcraft_model::truncate_chars(&mut c.name, soundcraft_model::MAX_NAME_CHARS);
             c.start = at.saturating_add(scale(c.start.max(0)));
-            c.length = scale(c.length).max(1);
+            c.length = scale(c.length);
             c.group = Some(group_id);
-            c.clamp_fades();
+            c.sanitize();
             placed.push(c.id);
             crate::edit::place_clip(s, target, c);
         }
@@ -191,6 +190,28 @@ mod tests {
         e.undo();
         assert_eq!(e.session().tracks.len(), before);
         assert!(e.session().find_clip(soundcraft_model::ClipId(placed[0])).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn positions_in_a_group_file_are_kept_within_reach() {
+        let dir = std::env::temp_dir().join(format!("sc-grp-far-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("far.scgrp");
+        let note = json!({"pitch": 60, "velocity": 100, "release_velocity": 64, "channel": 0, "start": i64::MAX, "length": i64::MAX});
+        let clip =
+            json!({"id": 1, "name": "far", "start": i64::MAX, "length": i64::MAX, "content": {"Midi": {"sequence": {"notes": [note], "ctrls": []}}}});
+        let file = json!({"format": "soundcraft.clipgroup", "version": 1, "sample_rate": 48000, "length": 1, "lanes": [[clip]], "audio": {}});
+        std::fs::write(&p, file.to_string()).unwrap();
+        let mut e = crate::demo::demo_engine();
+        let r = e.execute("file.import_clip_groups", &json!({"path": p.to_string_lossy()})).unwrap();
+        let id = soundcraft_model::ClipId(r["clips"][0].as_u64().unwrap());
+        let c = e.session().find_clip(id).unwrap().1;
+        assert!(c.start <= crate::cmd::MAX_POSITION && c.length <= crate::cmd::MAX_POSITION);
+        e.execute("edit.select_all", &json!({})).unwrap();
+        for cmd in ["edit.duplicate", "event.extract_chords"] {
+            assert!(!matches!(e.execute(cmd, &json!({})), Err(crate::EngineError::Internal(..))), "{cmd}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

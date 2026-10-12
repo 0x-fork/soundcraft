@@ -1330,7 +1330,7 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
     } else if s.edit.flag("view.clip.time.original") || s.edit.flag("view.clip.time.user") {
         clip.source().and_then(|src| s.source(src)).map(|src| {
             format_position(
-                i64::try_from(src.time_reference).unwrap_or(0) + clip.source_offset(),
+                i64::try_from(src.time_reference).unwrap_or(0).saturating_add(clip.source_offset()),
                 TimeFormat::Timecode,
                 s.sample_rate,
                 &s.tempo,
@@ -2067,6 +2067,15 @@ mod tests {
         h.input_mut().max_texture_side = Some(8192);
         h.run_steps(4);
         h
+    }
+
+    #[test]
+    fn a_file_time_stamp_at_the_end_of_the_range_draws() {
+        let mut engine = soundcraft_engine::demo::demo_engine();
+        let s = engine.session_mut();
+        s.edit.flags.insert("view.clip.time.original".into());
+        s.sources.iter_mut().for_each(|src| src.time_reference = i64::MAX as u64);
+        harness_with(engine).run_steps(2);
     }
 
     fn smart_demo() -> Harness<'static, SoundApp> {

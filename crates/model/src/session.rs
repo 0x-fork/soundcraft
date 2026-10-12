@@ -1,5 +1,6 @@
 //! The session: the whole document.
 
+use crate::clip::{bound, bound_sequence};
 use crate::{
     Bus, BusId, ChannelFormat, Clip, ClipId, Group, GroupId, MarkerId, MarkerKind, MemoryLocation, OutputPath, Source, SourceId, SourcePool,
     TRACK_COLORS, Track, TrackId, TrackKind, VideoSource,
@@ -529,8 +530,12 @@ impl Session {
             .max()
             .unwrap_or(0);
         self.next_id = self.next_id.max(max_id.saturating_add(1));
+        truncate_chars(&mut self.name, MAX_NAME_CHARS);
+        truncate_chars(&mut self.comments, MAX_COMMENT_CHARS);
         for t in &mut self.tracks {
             t.mixer.sanitize();
+            truncate_chars(&mut t.name, MAX_NAME_CHARS);
+            truncate_chars(&mut t.comments, MAX_COMMENT_CHARS);
             if t.playlists.is_empty() {
                 t.playlists.push(crate::Playlist::new(t.name.clone()));
             }
@@ -538,23 +543,41 @@ impl Session {
                 t.active_playlist = 0;
             }
             for p in &mut t.playlists {
+                truncate_chars(&mut p.name, MAX_NAME_CHARS);
                 p.clips.retain(|c| c.length > 0);
-                for c in &mut p.clips {
-                    c.fade_in.len = c.fade_in.len.clamp(0, c.length);
-                    c.fade_out.len = c.fade_out.len.clamp(0, c.length);
-                    if !c.gain_db.is_finite() {
-                        c.gain_db = 0.0;
-                    }
-                    if !c.stretch.is_finite() || c.stretch <= 0.0 {
-                        c.stretch = 1.0;
-                    }
-                }
+                p.clips.iter_mut().for_each(Clip::sanitize);
                 p.sort();
             }
             for l in &mut t.automation {
                 l.points.retain(|p| p.value.is_finite());
+                l.points.iter_mut().for_each(|p| bound(&mut p.at));
                 l.points.sort_by_key(|p| p.at);
             }
+        }
+        for m in &mut self.markers {
+            bound(&mut m.start);
+            bound(&mut m.end);
+            truncate_chars(&mut m.name, MAX_NAME_CHARS);
+            truncate_chars(&mut m.comments, MAX_COMMENT_CHARS);
+        }
+        for (at, key) in &mut self.key_signatures {
+            bound(at);
+            truncate_chars(key, MAX_NAME_CHARS);
+        }
+        self.midi_originals.values_mut().for_each(bound_sequence);
+        let e = &mut self.edit;
+        for at in [
+            &mut e.selection.start,
+            &mut e.selection.end,
+            &mut e.timeline_selection.start,
+            &mut e.timeline_selection.end,
+            &mut e.playhead,
+            &mut e.pre_roll,
+            &mut e.post_roll,
+            &mut e.zoom.scroll,
+            &mut self.timecode_start,
+        ] {
+            bound(at);
         }
         for v in &mut self.videos {
             if !v.frame_rate.is_finite() || v.frame_rate < 0.0 {
@@ -563,7 +586,12 @@ impl Session {
             if !v.duration.is_finite() || v.duration < 0.0 {
                 v.duration = 0.0;
             }
+            truncate_chars(&mut v.name, MAX_NAME_CHARS);
         }
+        self.busses.iter_mut().for_each(|b| truncate_chars(&mut b.name, MAX_NAME_CHARS));
+        self.outputs.iter_mut().for_each(|o| truncate_chars(&mut o.name, MAX_NAME_CHARS));
+        self.groups.iter_mut().for_each(|g| truncate_chars(&mut g.name, MAX_NAME_CHARS));
+        self.sources.iter_mut().for_each(|s| truncate_chars(&mut s.name, MAX_NAME_CHARS));
         // Drop performances whose clip no longer exists anywhere (any playlist).
         let clip_ids: std::collections::BTreeSet<u64> =
             self.tracks.iter().flat_map(|t| t.playlists.iter().flat_map(|p| p.clips.iter().map(|c| c.id.0))).collect();
@@ -575,26 +603,6 @@ impl Session {
             self.sample_rate = SampleRate::default();
         }
         self.tempo.sanitize();
-        truncate_chars(&mut self.name, MAX_NAME_CHARS);
-        truncate_chars(&mut self.comments, MAX_COMMENT_CHARS);
-        for t in &mut self.tracks {
-            truncate_chars(&mut t.name, MAX_NAME_CHARS);
-            truncate_chars(&mut t.comments, MAX_COMMENT_CHARS);
-            for p in &mut t.playlists {
-                truncate_chars(&mut p.name, MAX_NAME_CHARS);
-                p.clips.iter_mut().for_each(|c| truncate_chars(&mut c.name, MAX_NAME_CHARS));
-            }
-        }
-        for m in &mut self.markers {
-            truncate_chars(&mut m.name, MAX_NAME_CHARS);
-            truncate_chars(&mut m.comments, MAX_COMMENT_CHARS);
-        }
-        self.key_signatures.iter_mut().for_each(|(_, k)| truncate_chars(k, MAX_NAME_CHARS));
-        self.busses.iter_mut().for_each(|b| truncate_chars(&mut b.name, MAX_NAME_CHARS));
-        self.outputs.iter_mut().for_each(|o| truncate_chars(&mut o.name, MAX_NAME_CHARS));
-        self.groups.iter_mut().for_each(|g| truncate_chars(&mut g.name, MAX_NAME_CHARS));
-        self.sources.iter_mut().for_each(|s| truncate_chars(&mut s.name, MAX_NAME_CHARS));
-        self.videos.iter_mut().for_each(|v| truncate_chars(&mut v.name, MAX_NAME_CHARS));
     }
 }
 
