@@ -121,6 +121,9 @@ fn tools(app: &mut SoundApp, ui: &mut Ui) {
             ui.spacing_mut().item_spacing = vec2(2.0, 3.0);
             let row = ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
+                if icon_button(ui, vec2(36.0, 26.0), "zoom_toggle", app.engine.session().edit.zoom_toggle.is_some(), "Zoom Toggle (E)").clicked() {
+                    crate::edit_window::zoom_toggle(app);
+                }
                 for (tool, icon) in [
                     (Tool::Zoom, "zoom"),
                     (Tool::Trim, "trim"),
@@ -138,7 +141,7 @@ fn tools(app: &mut SoundApp, ui: &mut Ui) {
             });
             // Smart tool bracket above Trim/Selector/Grabber.
             let rr = row.response.rect;
-            let bx0 = rr.min.x + 38.0;
+            let bx0 = rr.min.x + 76.0;
             let bx1 = bx0 + 38.0 * 3.0 - 2.0;
             let bracket = Rect::from_min_max(pos2(bx0 - 2.0, r.min.y + 1.0), pos2(bx1 + 2.0, r.min.y + 5.0));
             let resp = ui.interact(bracket.expand2(vec2(0.0, 2.0)), ui.id().with("smart"), Sense::click());

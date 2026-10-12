@@ -148,6 +148,14 @@ impl Default for ZoomState {
     }
 }
 
+/// The view Zoom Toggle goes back to.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ZoomToggle {
+    pub samples_per_px: f64,
+    pub scroll: Samples,
+    pub heights: Vec<(TrackId, crate::TrackHeight)>,
+}
+
 /// Edit-window state saved with the session (selection, tools, modes, view settings).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EditState {
@@ -169,6 +177,8 @@ pub struct EditState {
     pub main_counter: TimeFormat,
     pub sub_counter: Option<TimeFormat>,
     pub zoom: ZoomState,
+    /// Set while Zoom Toggle is on.
+    pub zoom_toggle: Option<ZoomToggle>,
     /// Visible rulers.
     pub rulers: Vec<String>,
     pub link_timeline_edit: bool,
@@ -241,6 +251,7 @@ impl Default for EditState {
             main_counter: TimeFormat::MinSecs,
             sub_counter: Some(TimeFormat::Samples),
             zoom: ZoomState::default(),
+            zoom_toggle: None,
             rulers: vec!["bars_beats".into(), "min_secs".into(), "tempo".into(), "meter".into(), "markers".into()],
             link_timeline_edit: true,
             link_track_edit: false,

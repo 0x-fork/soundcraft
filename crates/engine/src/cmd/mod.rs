@@ -33,6 +33,7 @@ mod video;
 mod view;
 mod view_more;
 mod vst3;
+mod zoom_toggle;
 
 pub type Run = fn(&mut Engine, &Value) -> Result<Value>;
 /// `Err(reason)` = disabled.
@@ -124,6 +125,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(plugin_state::specs());
         v.extend(instrument::specs());
         v.extend(video::specs());
+        v.extend(zoom_toggle::specs());
         v
     })
 }

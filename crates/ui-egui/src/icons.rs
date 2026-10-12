@@ -47,6 +47,12 @@ pub fn draw(painter: &Painter, r: Rect, name: &str, c: Color32) {
             painter.circle_stroke(p(r, 0.42, 0.4), r.width() * 0.2, s);
             painter.line_segment([p(r, 0.56, 0.55), p(r, 0.8, 0.8)], Stroke::new(s.width * 1.6, c));
         }
+        "zoom_toggle" => {
+            for (x, y, dx, dy) in [(0.18, 0.24, 0.16, 0.14), (0.82, 0.24, -0.16, 0.14), (0.18, 0.76, 0.16, -0.14), (0.82, 0.76, -0.16, -0.14)] {
+                painter.add(Shape::line(vec![p(r, x + dx, y), p(r, x, y), p(r, x, y + dy)], s));
+            }
+            painter.rect_filled(Rect::from_min_max(p(r, 0.34, 0.41), p(r, 0.66, 0.59)), 1.0, c);
+        }
         "trim" => {
             painter.line_segment([p(r, 0.5, 0.2), p(r, 0.5, 0.8)], s);
             painter.line_segment([p(r, 0.15, 0.5), p(r, 0.85, 0.5)], s);

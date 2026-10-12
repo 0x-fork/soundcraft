@@ -32,6 +32,8 @@ pub struct EditLayout {
     pub rows: Vec<(u64, [f32; 4])>,
     pub scroll_y: f32,
     pub content_h: f32,
+    /// While Zoom Toggle is on: the vertical scroll to go back to.
+    zoom_back: Option<f32>,
     /// Follow-hold: the view was moved by something other than the playhead
     /// follow (a manual pan, scrollbar, universe jump, or programmatic
     /// scroll) during playback, so timeline auto-scroll stays paused until
@@ -187,6 +189,7 @@ fn main_area_content(app: &mut SoundApp, ui: &mut Ui) {
     let tl = Rect::from_min_max(pos2(full.min.x + hw, full.min.y + rulers_h), pos2(full.max.x - 12.0, full.max.y - hscroll_h));
     let rulers_rect = Rect::from_min_max(pos2(full.min.x, full.min.y), pos2(full.max.x, full.min.y + rulers_h));
     app.edit_layout.timeline = [tl.min.x, tl.min.y, tl.max.x, tl.max.y];
+    follow_zoom_toggle(app);
     ui.painter().rect_filled(full, 0.0, t.window_bg);
     // Wheel: vertical scroll tracks, shift/horizontal scroll timeline, cmd = zoom.
     let hovered = ui.rect_contains_pointer(Rect::from_min_max(pos2(full.min.x, tl.min.y), full.max));
@@ -270,6 +273,28 @@ fn hscrollbar(app: &mut SoundApp, ui: &mut Ui, sb: Rect, tl: Rect) {
         let dx = resp.drag_delta().x / sb.width();
         let by_px = f64::from(dx) * total / s.edit.zoom.samples_per_px;
         let _ = app.engine.execute("view.scroll", &json!({"by_px": by_px}));
+    }
+}
+
+/// Zoom Toggle sized to the track area on screen.
+pub fn zoom_toggle(app: &mut SoundApp) {
+    let [x0, y0, x1, y1] = app.edit_layout.timeline;
+    let _ = app.run("view.zoom_toggle", json!({"width_px": x1 - x0, "height_px": y1 - y0}));
+}
+
+/// Zoom Toggle scrolls the first track it fitted to the top, and back when it turns off.
+fn follow_zoom_toggle(app: &mut SoundApp) {
+    let l = &mut app.edit_layout;
+    match (&app.engine.session().edit.zoom_toggle, l.zoom_back) {
+        (Some(z), None) => {
+            l.zoom_back = Some(l.scroll_y);
+            let content_top = l.rows.first().map_or(0.0, |(_, r)| r[1]);
+            if let Some((_, r)) = l.rows.iter().find(|(id, _)| z.heights.iter().any(|(t, _)| t.0 == *id)) {
+                l.scroll_y = r[1] - content_top;
+            }
+        }
+        (None, Some(y)) => (l.scroll_y, l.zoom_back) = (y, None),
+        _ => {}
     }
 }
 
