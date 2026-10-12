@@ -114,6 +114,14 @@ fn info(args: &[String]) -> ExitCode {
 
 fn convert(args: &[String]) -> ExitCode {
     let (Some(input), Some(output)) = (args.first(), args.get(1)) else { return fail("convert IN OUT") };
+    let rate = match parse_rate(arg_value(args, "--rate").as_deref()) {
+        Ok(r) => r,
+        Err(e) => return fail(e),
+    };
+    let bit_depth = match parse_bit_depth(arg_value(args, "--bit-depth").as_deref()) {
+        Ok(b) => b,
+        Err(e) => return fail(e),
+    };
     let bytes = match std::fs::read(input) {
         Ok(b) => b,
         Err(e) => return fail(format!("{input}: {e}")),
@@ -123,7 +131,7 @@ fn convert(args: &[String]) -> ExitCode {
         Ok(x) => x,
         Err(e) => return fail(format!("{input}: {e}")),
     };
-    if let Some(rate) = arg_value(args, "--rate").and_then(|r| r.parse::<u32>().ok()) {
+    if let Some(rate) = rate {
         buf.channels = soundcraft_dsp::offline::resample(&buf.channels, buf.sample_rate, rate);
         buf.sample_rate = rate;
     }
@@ -134,11 +142,6 @@ fn convert(args: &[String]) -> ExitCode {
     let Some(format) = soundcraft_audio_io::encode_format_for(&out_ext) else {
         return fail(format!("{output}: cannot write `.{out_ext}` files (supported: {})", soundcraft_audio_io::ENCODE_EXTENSIONS));
     };
-    let bit_depth = match arg_value(args, "--bit-depth").as_deref() {
-        Some("16") => soundcraft_audio_io::BitDepth::Int16,
-        Some("32") | Some("32f") => soundcraft_audio_io::BitDepth::Float32,
-        _ => soundcraft_audio_io::BitDepth::Int24,
-    };
     let opts = soundcraft_audio_io::EncodeOptions { format, bit_depth, dither: true, bwf: None };
     match soundcraft_audio_io::encode(&buf, &opts).map_err(|e| e.to_string()).and_then(|b| std::fs::write(output, b).map_err(|e| e.to_string())) {
         Ok(()) => {
@@ -146,6 +149,25 @@ fn convert(args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => fail(e),
+    }
+}
+
+fn parse_rate(v: Option<&str>) -> Result<Option<u32>, String> {
+    match v {
+        None => Ok(None),
+        Some(r) => match r.parse::<u32>() {
+            Ok(hz) if hz > 0 => Ok(Some(hz)),
+            _ => Err(format!("--rate: expected a sample rate in Hz, got `{r}`")),
+        },
+    }
+}
+
+fn parse_bit_depth(v: Option<&str>) -> Result<soundcraft_audio_io::BitDepth, String> {
+    match v {
+        None | Some("24") => Ok(soundcraft_audio_io::BitDepth::Int24),
+        Some("16") => Ok(soundcraft_audio_io::BitDepth::Int16),
+        Some("32") | Some("32f") => Ok(soundcraft_audio_io::BitDepth::Float32),
+        Some(b) => Err(format!("--bit-depth: expected 16, 24 or 32f, got `{b}`")),
     }
 }
 
@@ -420,6 +442,18 @@ mod tests {
         for method in ["session.inspect", "engine.commands", "engine.parity", "ui.screenshot", "app.quit"] {
             assert_eq!(app_request(method, json!({})).0, method);
         }
+    }
+
+    #[test]
+    fn convert_rejects_invalid_rate_and_bit_depth() {
+        assert_eq!(parse_rate(None), Ok(None));
+        assert_eq!(parse_rate(Some("44100")), Ok(Some(44_100)));
+        assert!(parse_rate(Some("4410x")).is_err());
+        assert!(parse_rate(Some("0")).is_err());
+        assert!(matches!(parse_bit_depth(None), Ok(soundcraft_audio_io::BitDepth::Int24)));
+        assert!(matches!(parse_bit_depth(Some("16")), Ok(soundcraft_audio_io::BitDepth::Int16)));
+        assert!(matches!(parse_bit_depth(Some("32f")), Ok(soundcraft_audio_io::BitDepth::Float32)));
+        assert!(parse_bit_depth(Some("8")).is_err());
     }
 
     #[test]
