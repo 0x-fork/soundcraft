@@ -1,10 +1,11 @@
 //! The Mix window: one channel strip per track.
 
+use crate::SoundApp;
 use crate::theme::{Tokens, bold, regular, rgb};
 use crate::widgets::{
-    PannerEdit, PannerSpeaker, db_text, fader, meter, multi_meter, pan_knob, pan_text, rec_toggle, selector_box, surround_panner, text_toggle,
+    PannerEdit, PannerSpeaker, db_text, fader, meter, multi_meter, pan_knob, pan_text, rec_toggle, selector_box, selector_box_with_tooltip,
+    surround_panner, text_toggle,
 };
-use crate::{SoundApp, panels};
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
 use soundcraft_model::{ChannelFormat, Route, SurroundPan, Track, TrackId, TrackKind};
@@ -15,28 +16,19 @@ pub fn strip_width(narrow: bool) -> f32 {
 }
 
 pub fn show(app: &mut SoundApp, ui: &mut Ui) {
-    let t = Tokens::current();
-    if app.ui.show_tracks_list {
-        egui::Panel::left("mix_tracks_list")
-            .exact_size(168.0)
-            .frame(egui::Frame::NONE.fill(t.panel_bg))
-            .show(ui, |ui| panels::tracks_and_groups(app, ui));
-    }
-    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.window_bg)).show(ui, |ui| {
-        let ids: Vec<TrackId> = app.engine.session().tracks.iter().filter(|x| !x.hidden && x.kind != TrackKind::Video).map(|x| x.id).collect();
-        // Per-channel peaks for multichannel meters (read once per frame).
-        let snap = app
-            .player
-            .as_ref()
-            .filter(|_| app.engine.transport.playing || app.engine.session().tracks.iter().any(|t| t.mixer.input_monitor))
-            .map(|p| p.meters());
-        egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 1.0;
-                for id in ids {
-                    strip(app, ui, id, snap.as_ref());
-                }
-            });
+    crate::docking::show(app, ui, crate::MainWindow::Mix);
+}
+
+pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
+    let ids: Vec<TrackId> = app.engine.session().tracks.iter().filter(|x| !x.hidden && x.kind != TrackKind::Video).map(|x| x.id).collect();
+    // Per-channel peaks for multichannel meters (read once per frame).
+    let snap = app.player.as_ref().filter(|_| app.meters_live()).map(|p| p.meters());
+    egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 1.0;
+            for id in ids {
+                strip(app, ui, id, snap.as_ref());
+            }
         });
     });
 }
@@ -247,7 +239,15 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         } else {
             t.auto_write
         };
-        let resp = selector_box(&mut c, am_r.width(), am_r.height(), &format!("auto {}", mode.label()), col);
+        let full_label = format!("auto {}", mode.label());
+        let label = if mode == soundcraft_model::AutomationMode::TouchLatch {
+            if narrow { "t/l" } else { mode.label() }
+        } else if narrow {
+            mode.label()
+        } else {
+            &full_label
+        };
+        let resp = selector_box_with_tooltip(&mut c, am_r.width(), am_r.height(), label, col, &full_label);
         egui::Popup::menu(&resp).show(|ui| {
             for m in soundcraft_model::AutomationMode::ALL {
                 if ui.selectable_label(m == mode, m.label()).clicked() {
@@ -410,12 +410,12 @@ fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
     let ins = track.instrument.as_ref();
     let info = ins.and_then(|i| plugin_info(&i.plugin));
     let resp = ui.interact(r, ui.id().with(("instrument", id.0)), Sense::click());
-    let fill = if info.is_some() { Color32::from_rgb(52, 62, 80) } else { t.slot_bg };
+    let fill = if info.is_some() { t.insert_on } else { t.slot_bg };
     ui.painter().rect(
         r,
         CornerRadius::same(2),
         if resp.hovered() { fill.gamma_multiply(1.3) } else { fill },
-        Stroke::new(1.0, Color32::from_rgb(16, 16, 16)),
+        Stroke::new(1.0, t.slot_border),
         StrokeKind::Inside,
     );
     ui.painter().with_clip_rect(r).text(r.center(), Align2::CENTER_CENTER, info.map_or("no instrument", |p| p.short_name), regular(10.5), t.text);

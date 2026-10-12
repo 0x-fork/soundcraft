@@ -383,10 +383,15 @@ fn configurations(app: &mut SoundApp, ctx: &egui::Context) {
                 if ui.button(format!("{}  {name}", i + 1)).clicked()
                     && let Ok(mut st) = serde_json::from_value::<crate::UiState>(v.clone())
                 {
-                    st.configurations = app.ui.configurations.clone();
-                    st.theme = app.ui.theme;
-                    st.show_configurations = true;
-                    app.ui = st;
+                    if let Err(error) = st.docking.validate().and_then(|()| st.mix_docking.validate_mix()) {
+                        app.ui.status = format!("Window configuration could not be restored: {error}");
+                    } else {
+                        st.configurations = app.ui.configurations.clone();
+                        st.theme = app.ui.theme;
+                        st.show_configurations = true;
+                        crate::docking::cancel_replaced_state(app, &st);
+                        app.ui = st;
+                    }
                 }
                 if ui.small_button("✕").clicked() {
                     app.ui.configurations.remove(i);
