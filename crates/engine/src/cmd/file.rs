@@ -292,11 +292,15 @@ fn bounce(e: &mut Engine, p: &Value) -> Result<Value> {
     let normalize = bool_or(p, "normalize", false);
     let fold = fold_down_param(p, "file.bounce_mix")?;
     let bus = bounce_bus(e, p)?;
-    let (bytes, stats) = crate::io::bounce_source(e, r, &opts, normalize, fold, bus)?;
-    crate::io::write_file(&path, &bytes)?;
-    Ok(
-        json!({"path": path, "bytes": bytes.len(), "seconds": e.session().sample_rate.seconds(r.len()), "peak_db": stats.0, "lufs": stats.1, "true_peak_db": stats.2}),
-    )
+    let done = crate::io::Bounce::new(e.session_arc(), std::path::Path::new(&path), r, &opts, bus, normalize, fold)?.run()?;
+    Ok(json!({
+        "path": path,
+        "bytes": done.bytes,
+        "seconds": e.session().sample_rate.seconds(r.len()),
+        "peak_db": done.peak_db,
+        "lufs": done.lufs,
+        "true_peak_db": done.true_peak_db,
+    }))
 }
 
 /// Write the score of the chosen MIDI tracks as MusicXML (or SVG when `svg`).

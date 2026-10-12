@@ -52,7 +52,8 @@ fn max_len(ch: &[Vec<f32>]) -> usize {
     ch.iter().map(Vec::len).max().unwrap_or(0)
 }
 
-fn peak(ch: &[Vec<f32>]) -> f32 {
+/// The largest finite sample magnitude in any channel.
+pub fn peak(ch: &[Vec<f32>]) -> f32 {
     ch.iter().flatten().filter(|v| v.is_finite()).fold(0.0f32, |m, v| m.max(v.abs()))
 }
 

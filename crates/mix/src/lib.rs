@@ -1734,86 +1734,101 @@ fn apply_matrix(src: &[Vec<f32>], frames: usize, dst: &mut [Vec<f32>], m: &Matri
     }
 }
 
-/// Ceiling on one offline render (samples summed over channels): 2^29 f32 = 2 GiB, about 93
-/// minutes of stereo at 48 kHz. Longer requests are truncated rather than exhausting memory.
+/// Ceiling on one in-memory offline render (samples summed over channels): 2^29 f32 = 2 GiB, about
+/// 93 minutes of stereo at 48 kHz. Longer requests are truncated rather than exhausting memory;
+/// [`RangeRender`] streams any length.
 pub const MAX_RENDER_SAMPLES: usize = 1 << 29;
 
 /// Offline render of the main mix over `range` (planar, [`main_channels`] channels in SMPTE/WAV
 /// order). The mix's delay-compensation latency is removed, so the result lines up with the
 /// timeline.
 pub fn render_range(s: &Session, range: Range, block: usize) -> Vec<Vec<f32>> {
-    let nch = main_channels(s);
-    let len = usize::try_from(range.len().max(0)).unwrap_or(0).min(MAX_RENDER_SAMPLES / nch.max(1));
-    // Probe the latency with one block, then render `len + latency` and drop the head.
-    let latency = {
-        let mut probe = MixEngine::new(s.sample_rate.as_f64() as f32, block);
-        let b = probe.max_block();
-        let mut tmp = vec![vec![0.0f32; b]; nch];
-        probe.render(s, range.start, b.min(len.max(1)), &mut tmp);
-        probe.latency
-    };
-    let total = len.saturating_add(latency);
-    let mut out = vec![vec![0.0f32; total]; nch];
-    let mut eng = MixEngine::new(s.sample_rate.as_f64() as f32, block);
-    let b = eng.max_block();
-    let mut tmp = vec![vec![0.0f32; b]; nch];
-    let mut done = 0usize;
-    while done < total {
-        let n = (total - done).min(b);
-        eng.render(s, range.start + done as i64, n, &mut tmp);
-        for (o, t) in out.iter_mut().zip(tmp.iter()) {
-            if let (Some(d), Some(sr)) = (o.get_mut(done..done + n), t.get(..n)) {
-                d.copy_from_slice(sr);
-            }
-        }
-        done += n;
-    }
-    if latency > 0 {
-        for c in &mut out {
-            c.drain(..latency.min(c.len()));
-        }
-    }
-    out
+    render_in_memory(s, None, range, block)
 }
 
 /// Offline render of one bus over `range` (planar, the bus format's channel count).
 /// Track-insert compensation is removed, so a bus fed by tracks lines up with the timeline.
 /// An unknown bus is silent.
 pub fn render_bus(s: &Session, bus: BusId, range: Range, block: usize) -> Vec<Vec<f32>> {
-    let nch = s.bus(bus).map(|b| b.format.channels()).unwrap_or(0);
-    if nch == 0 {
-        return Vec::new();
-    }
-    let len = usize::try_from(range.len().max(0)).unwrap_or(0).min(MAX_RENDER_SAMPLES / nch);
-    let latency = {
-        let mut probe = MixEngine::new(s.sample_rate.as_f64() as f32, block);
-        let b = probe.max_block();
-        probe.render(s, range.start, b.min(len.max(1)), &mut []);
-        probe.track_latency
-    };
-    let total = len.saturating_add(latency);
-    let mut out = vec![vec![0.0f32; total]; nch];
-    let mut eng = MixEngine::new(s.sample_rate.as_f64() as f32, block);
-    let b = eng.max_block();
-    let mut tmp = vec![vec![0.0f32; b]; nch];
-    let mut done = 0usize;
-    while done < total {
-        let n = (total - done).min(b);
-        eng.render(s, range.start + done as i64, n, &mut []);
-        eng.copy_bus(bus, n, &mut tmp);
-        for (o, t) in out.iter_mut().zip(tmp.iter()) {
-            if let (Some(d), Some(sr)) = (o.get_mut(done..done + n), t.get(..n)) {
-                d.copy_from_slice(sr);
-            }
-        }
-        done += n;
-    }
-    if latency > 0 {
-        for c in &mut out {
-            c.drain(..latency.min(c.len()));
+    render_in_memory(s, Some(bus), range, block)
+}
+
+fn render_in_memory(s: &Session, bus: Option<BusId>, range: Range, block: usize) -> Vec<Vec<f32>> {
+    let nch = source_channels(s, bus);
+    let len = usize::try_from(range.len().max(0)).unwrap_or(0).min(MAX_RENDER_SAMPLES / nch.max(1));
+    let mut out: Vec<Vec<f32>> = (0..nch).map(|_| Vec::with_capacity(len)).collect();
+    let mut render = RangeRender::new(s, bus, Range::new(range.start, range.start + len as i64), block);
+    while let Some((chunk, n)) = render.next_block(s) {
+        for (o, c) in out.iter_mut().zip(chunk) {
+            o.extend_from_slice(c.get(..n).unwrap_or_default());
         }
     }
     out
+}
+
+/// Channels of the main mix, or of `bus` (none for an unknown bus).
+pub fn source_channels(s: &Session, bus: Option<BusId>) -> usize {
+    match bus {
+        Some(id) => s.bus(id).map_or(0, |b| b.format.channels()),
+        None => main_channels(s),
+    }
+}
+
+/// [`render_range`] or [`render_bus`] of any length, a block at a time.
+pub struct RangeRender {
+    eng: MixEngine,
+    bus: Option<BusId>,
+    tmp: Vec<Vec<f32>>,
+    start: Samples,
+    done: usize,
+    total: usize,
+    latency: usize,
+}
+
+impl RangeRender {
+    /// Renders the main mix over `range`, or `bus` when one is named.
+    pub fn new(s: &Session, bus: Option<BusId>, range: Range, block: usize) -> Self {
+        let nch = source_channels(s, bus);
+        let eng = MixEngine::new(s.sample_rate.as_f64() as f32, block);
+        let tmp = vec![vec![0.0f32; eng.max_block()]; nch];
+        let len = if nch == 0 { 0 } else { usize::try_from(range.len().max(0)).unwrap_or(0) };
+        RangeRender { eng, bus, tmp, start: range.start, done: 0, total: len, latency: 0 }
+    }
+
+    fn render(&mut self, s: &Session, pos: Samples, n: usize) {
+        match self.bus {
+            Some(id) => {
+                self.eng.render(s, pos, n, &mut []);
+                self.eng.copy_bus(id, n, &mut self.tmp);
+            }
+            None => self.eng.render(s, pos, n, &mut self.tmp),
+        }
+    }
+
+    /// The next stretch of the mix of `s` (the session given to [`RangeRender::new`]) as
+    /// `(channels, n)`: the first `n` samples of each channel. `None` once the range is done.
+    pub fn next_block(&mut self, s: &Session) -> Option<(&[Vec<f32>], usize)> {
+        while self.done < self.total {
+            let n = (self.total - self.done).min(self.eng.max_block());
+            self.render(s, self.start + self.done as i64, n);
+            if self.done == 0 {
+                // The first block tells the mix's latency: render that much more and drop the head.
+                self.latency = if self.bus.is_some() { self.eng.track_latency } else { self.eng.latency };
+                self.total = self.total.saturating_add(self.latency);
+            }
+            let skip = self.latency.saturating_sub(self.done).min(n);
+            self.done += n;
+            if skip < n {
+                if skip > 0 {
+                    for c in &mut self.tmp {
+                        c.copy_within(skip..n, 0);
+                    }
+                }
+                return Some((&self.tmp, n - skip));
+            }
+        }
+        None
+    }
 }
 
 /// ITU-R BS.775 stereo fold-down of planar audio in `fmt` (C and surrounds at -3 dB, LFE dropped;
@@ -2332,6 +2347,37 @@ mod tests {
         s.track_mut(aux).unwrap().mixer.inserts[0].as_mut().unwrap().params.insert("lookahead".into(), 0.0);
         let zero = render(&s, 0, n as i64);
         assert_eq!(impulse_at(&zero[0]), impulse_at(&control[0]));
+    }
+
+    #[test]
+    fn offline_renders_line_up_with_the_timeline_in_any_block_size() {
+        let mut s = Session::default();
+        let mut imp = vec![0.0f32; 48_000];
+        imp[1000] = 1.0;
+        s.pool.insert(SourceId(900), Arc::new(SourceAudio::new(AudioBuffer { sample_rate: 48_000, channels: vec![imp] })));
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        let bus = s.add_bus("Stem", ChannelFormat::Stereo);
+        let cid = s.new_clip_id();
+        let tr = s.track_mut(t).unwrap();
+        tr.playlist_mut().unwrap().clips.push(Clip::audio(cid, "i", SourceId(900), 0, 0, 48_000));
+        tr.mixer.inserts[0] = Some(Insert::new("maximizer"));
+        let mut send = soundcraft_model::SendSlot::new(Route::Bus(bus));
+        send.level_db = 0.0;
+        tr.mixer.sends[0] = Some(send);
+        assert!(soundcraft_dsp::create("maximizer").unwrap().latency() > 16);
+        for source in [None, Some(bus)] {
+            for block in [16, 100, 512] {
+                let mut got = Vec::new();
+                let mut render = RangeRender::new(&s, source, Range::new(900, 2900), block);
+                while let Some((chunk, n)) = render.next_block(&s) {
+                    assert!(n <= block);
+                    got.extend_from_slice(&chunk[0][..n]);
+                }
+                assert_eq!(got.len(), 2000, "{source:?} block {block}");
+                let peak = got.iter().enumerate().max_by(|a, b| a.1.abs().total_cmp(&b.1.abs())).map(|(i, _)| i);
+                assert_eq!(peak, Some(100), "{source:?} block {block}");
+            }
+        }
     }
 
     #[test]
