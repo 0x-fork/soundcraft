@@ -1308,6 +1308,10 @@ fn render_clip(s: &Session, clip: &Clip, pos: Samples, frames: usize, buf: &mut 
 /// Send note on/offs for MIDI clips overlapping the block.
 fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mut PluginSlot, held: &mut Vec<u8>) {
     let sr = s.sample_rate;
+    // MIDI Track Offsets: the track's notes sound `offset` samples later (earlier if negative), so
+    // the block looks that far back into the clips.
+    let offset = if s.edit.values.is_empty() { 0 } else { s.edit.value(&format!("midi.offset.{}", t.id.0), 0.0) as i64 };
+    let pos = pos.saturating_sub(offset);
     let end = pos.saturating_add(frames as i64);
     for clip in t.clips() {
         if clip.muted {
