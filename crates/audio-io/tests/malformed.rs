@@ -214,15 +214,20 @@ fn atom(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
     [&(8 + body.len() as u32).to_be_bytes()[..], kind, body].concat()
 }
 
-/// An MP4 of `frames` frames of 16-bit mono PCM; `swap` may replace any version-0 atom.
-fn pcm_mp4(frames: u32, swap: impl Fn(&[u8; 4], Vec<u8>) -> Vec<u8>) -> Vec<u8> {
+/// A mono 16-bit, 48 kHz audio sample entry of `version`, its version fields and codec atoms.
+fn sample_entry(kind: &[u8; 4], version: u8, fields: &[u8], codec: &[u8]) -> Vec<u8> {
+    let base = [0, 0, 0, 0, 0, 0, 0, 1, 0, version, 0, 0, 0, 0, 0, 0, 0, 1, 0, 16, 0, 0, 0, 0];
+    atom(kind, &[&base[..], &(48_000u32 << 16).to_be_bytes(), fields, codec].concat())
+}
+
+/// An MP4 of `frames` 2-byte samples described by `entry`; `swap` may replace any version-0 atom.
+fn mp4(frames: u32, entry: &[u8], swap: impl Fn(&[u8; 4], Vec<u8>) -> Vec<u8>) -> Vec<u8> {
     let full = |kind: &[u8; 4], fields: &[u32]| {
         let body: Vec<u8> = [0].iter().chain(fields).flat_map(|v: &u32| v.to_be_bytes()).collect();
         swap(kind, atom(kind, &body))
     };
-    let entry = atom(b"sowt", &[&[0u8; 6][..], &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 16, 0, 0, 0, 0], &(48_000u32 << 16).to_be_bytes()].concat());
     let moov = |offset: u32| {
-        let stsd = atom(b"stsd", &[&[0, 0, 0, 0, 0, 0, 0, 1][..], &entry].concat());
+        let stsd = atom(b"stsd", &[&[0, 0, 0, 0, 0, 0, 0, 1][..], entry].concat());
         let stbl =
             [stsd, full(b"stts", &[1, frames, 1]), full(b"stsc", &[1, 1, frames, 1]), full(b"stsz", &[2, frames]), full(b"stco", &[1, offset])];
         let minf = [full(b"smhd", &[0]), atom(b"stbl", &stbl.concat())].concat();
@@ -238,7 +243,8 @@ fn pcm_mp4(frames: u32, swap: impl Fn(&[u8; 4], Vec<u8>) -> Vec<u8>) -> Vec<u8> 
 
 #[test]
 fn mp4_sizes_beyond_the_file_are_errors_not_aborts() {
-    let (_, buf) = decode(&pcm_mp4(480, |_, a| a), None).unwrap();
+    let pcm = sample_entry(b"sowt", 0, &[], &[]);
+    let (_, buf) = decode(&mp4(480, &pcm, |_, a| a), None).unwrap();
     assert_eq!(buf.frames(), 480);
     let huge = |kind: &[u8; 4], a: Vec<u8>| [&1u32.to_be_bytes()[..], kind, &(1u64 << 60).to_be_bytes(), &a[8..]].concat();
     // The first field after version and flags: stts's entry count, stsz's sample size.
@@ -252,10 +258,10 @@ fn mp4_sizes_beyond_the_file_are_errors_not_aborts() {
     let mdia = atom(b"mdia", &1u32.to_be_bytes());
     let straddling = [&b"hdlr"[..], &(1u64 << 60).to_be_bytes(), &[0; 24]].concat();
     let files = [
-        pcm_mp4(480, |k, a| if k == b"hdlr" { huge(k, a) } else { a }),
-        pcm_mp4(480, |k, a| if k == b"stts" { first_field_max(a) } else { a }),
-        pcm_mp4(480, |k, a| if k == b"stsz" { first_field_max(a) } else { a }),
-        pcm_mp4(480, |k, a| if k == b"stsz" { per_sample.clone() } else { a }),
+        mp4(480, &pcm, |k, a| if k == b"hdlr" { huge(k, a) } else { a }),
+        mp4(480, &pcm, |k, a| if k == b"stts" { first_field_max(a) } else { a }),
+        mp4(480, &pcm, |k, a| if k == b"stsz" { first_field_max(a) } else { a }),
+        mp4(480, &pcm, |k, a| if k == b"stsz" { per_sample.clone() } else { a }),
         [atom(b"ftyp", b"M4A \0\0\0\0M4A isom"), atom(b"moov", &atom(b"trak", &mdia)), straddling].concat(),
     ];
     for f in files {
@@ -269,6 +275,20 @@ fn atoms_running_past_their_parent_are_walked_once() {
     let unit = atom(b"moov", &[&u32::MAX.to_be_bytes()[..], b"trak"].concat());
     let f = [atom(b"ftyp", b"M4A \0\0\0\0M4A isom"), unit.repeat(1 << 18)].concat();
     assert!(decode(&f, None).is_err());
+}
+
+#[test]
+fn packets_longer_than_any_codec_uses_are_refused() {
+    let be = |v: &[u32]| v.iter().flat_map(|x| x.to_be_bytes()).collect::<Vec<u8>>();
+    let v2 = |frames: u32| [&be(&[72])[..], &48_000f64.to_be_bytes(), &be(&[1, 0x7f00_0000, 16, 4, 2, frames])].concat();
+    let lpcm = |frames: u32| sample_entry(b"lpcm", 2, &v2(frames), &[]);
+    let config = |frames: u32| [&be(&[0, frames])[..], &[0, 16, 40, 10, 14, 1, 0, 255], &be(&[0, 0, 48_000])].concat();
+    let alac = |frames: u32| sample_entry(b"alac", 0, &[], &atom(b"alac", &config(frames)));
+    let (_, buf) = decode(&mp4(480, &lpcm(1), |_, a| a), None).unwrap();
+    assert_eq!(buf.frames(), 480);
+    for entry in [lpcm(1 << 21), alac(1 << 21)] {
+        assert!(matches!(decode(&mp4(480, &entry, |_, a| a), None), Err(AudioError::Malformed(m)) if m.contains("declares packets")));
+    }
 }
 
 #[test]

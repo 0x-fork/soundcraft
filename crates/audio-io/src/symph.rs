@@ -16,8 +16,12 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions, ReadBytes
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Instantiate;
 
-use crate::pcm::MAX_DECODE_SAMPLES;
+use crate::pcm::{MAX_DECODE_SAMPLES, be_u32};
 use crate::{AudioBuffer, AudioError, AudioInfo, FileFormat, Result, SampleFormat};
+
+/// The most frames a packet may declare: decoders allocate a packet's frames up front, and ALAC
+/// takes its frame length from the file (encoders use 4096).
+const MAX_PACKET_FRAMES: u64 = 1 << 20;
 
 fn map_err(e: SymError) -> AudioError {
     match e {
@@ -142,6 +146,10 @@ fn run(bytes: &[u8], detected: FileFormat, count_only: bool) -> Result<(AudioInf
         .find(|t| t.id == track_id)
         .map(|t| t.codec_params.clone())
         .ok_or_else(|| AudioError::Malformed("track vanished".into()))?;
+    let alac = params.extra_data.as_deref().filter(|_| params.codec == CODEC_TYPE_ALAC).and_then(|d| be_u32(d, 0));
+    if params.max_frames_per_packet.into_iter().chain(alac.map(u64::from)).any(|n| n > MAX_PACKET_FRAMES) {
+        return Err(AudioError::Malformed("the file declares packets far longer than any codec uses".into()));
+    }
     let mut decoder = symphonia::default::get_codecs().make(&params, &DecoderOptions::default()).map_err(map_err)?;
 
     let mut planar: Vec<Vec<f32>> = Vec::new();
