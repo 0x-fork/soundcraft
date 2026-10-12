@@ -6,11 +6,14 @@ use soundcraft_time::Samples;
 
 /// Draw a clip's audio across `body`, one band per channel, `channels` of them at most.
 pub fn draw(painter: &Painter, s: &Session, tl: Rect, clip: &Clip, audio: &SourceAudio, channels: usize, body: Rect, wave: Color32) {
-    let n = channels.min(audio.peaks.len()).max(1);
-    let h = body.height() / n as f32;
-    for ch in 0..n {
-        channel(painter, s, tl, clip, audio, ch, Rect::from_min_size(pos2(body.min.x, body.min.y + h * ch as f32), vec2(body.width(), h)), wave);
+    for (ch, band) in bands(body, channels.min(audio.peaks.len()).max(1)).enumerate() {
+        channel(painter, s, tl, clip, audio, ch, band, wave);
     }
+}
+
+fn bands(body: Rect, n: usize) -> impl Iterator<Item = Rect> {
+    let h = body.height() / n as f32;
+    (0..n).map(move |k| Rect::from_min_size(pos2(body.min.x, body.min.y + h * k as f32), vec2(body.width(), h)))
 }
 
 fn channel(painter: &Painter, s: &Session, tl: Rect, clip: &Clip, audio: &SourceAudio, ch: usize, band: Rect, wave: Color32) {
@@ -51,6 +54,26 @@ fn channel(painter: &Painter, s: &Session, tl: Rect, clip: &Clip, audio: &Source
         })
         .collect();
     g.paint(painter, &ys, wave, outlines, rectified);
+}
+
+/// Draw a take while it records across `body`, one band per channel: `blocks` holds each channel's
+/// (min, max) per block of input frames, the blocks `block_len` timeline samples long from
+/// timeline position `origin`.
+pub fn draw_live(painter: &Painter, s: &Session, tl: Rect, origin: f64, block_len: f64, blocks: &[Vec<(f32, f32)>], body: Rect, wave: Color32) {
+    let zoom = s.edit.zoom.waveform_zoom;
+    for (blocks, band) in blocks.iter().zip(bands(body, blocks.len())) {
+        let Some(g) = Grid::new(painter, s, tl, band) else { continue };
+        let ys: Vec<Option<(f32, f32)>> = (0..g.cols)
+            .map(|c| {
+                let a = g.start() + c as f64 * g.step - origin;
+                let (i, j) = ((a / block_len).floor().max(0.0) as usize, ((a + g.step + g.overlap()) / block_len).ceil().max(0.0) as usize);
+                let (lo, hi) =
+                    blocks.get(i..j.min(blocks.len()))?.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), b| (lo.min(b.0), hi.max(b.1)));
+                (lo <= hi).then(|| (g.cy - level(hi * zoom) * g.half, g.cy - level(lo * zoom) * g.half))
+            })
+            .collect();
+        g.paint(painter, &ys, wave, false, false);
+    }
 }
 
 fn level(v: f32) -> f32 {

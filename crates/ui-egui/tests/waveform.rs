@@ -7,19 +7,33 @@ use soundcraft_ui_egui::{Services, SoundApp, waveform};
 
 const WAVE: Color32 = Color32::from_rgb(12, 12, 14);
 
-fn draw(samples: Vec<f32>, samples_per_px: f64) -> Vec<Shape> {
+/// The lines and meshes `f` paints across a 400×100 band on a 2x screen.
+fn paint(samples_per_px: f64, f: impl Fn(&egui::Painter, &Session, Rect)) -> Vec<Shape> {
     let mut s = Session::new("t", SampleRate::HZ_48000);
     s.edit.zoom.samples_per_px = samples_per_px;
-    let clip = Clip::audio(ClipId(1), "c", SourceId(1), 0, 0, samples.len() as i64);
-    let audio = SourceAudio::new(AudioBuffer { sample_rate: 48_000, channels: vec![samples] });
     let band = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 100.0));
     let ctx = egui::Context::default();
     ctx.set_pixels_per_point(2.0);
-    let mut out = ctx.run_ui(RawInput { screen_rect: Some(band), ..Default::default() }, |ui| {
-        waveform::draw(ui.painter(), &s, band, &clip, &audio, 1, band, WAVE);
-    });
+    let mut out = ctx.run_ui(RawInput { screen_rect: Some(band), ..Default::default() }, |ui| f(ui.painter(), &s, band));
     out.textures_delta.clear();
     out.shapes.into_iter().map(|c| c.shape).filter(|s| matches!(s, Shape::Path(_) | Shape::Mesh(_))).collect()
+}
+
+fn draw(samples: Vec<f32>, samples_per_px: f64) -> Vec<Shape> {
+    let clip = Clip::audio(ClipId(1), "c", SourceId(1), 0, 0, samples.len() as i64);
+    let audio = SourceAudio::new(AudioBuffer { sample_rate: 48_000, channels: vec![samples] });
+    paint(samples_per_px, |p, s, band| waveform::draw(p, s, band, &clip, &audio, 1, band, WAVE))
+}
+
+#[test]
+fn a_take_draws_its_overview_while_it_records() {
+    let blocks = vec![vec![(-0.5, 0.5); 100]];
+    let shapes = paint(128.0, |p, s, band| waveform::draw_live(p, s, band, 1280.0, 128.0, &blocks, band, WAVE));
+    let [Shape::Mesh(mesh)] = shapes.as_slice() else { panic!("{shapes:?}") };
+    let span = |f: fn(&Pos2) -> f32| mesh.vertices.iter().map(|v| f(&v.pos)).fold((f32::MAX, f32::MIN), |(a, b), v| (a.min(v), b.max(v)));
+    let ((left, right), (top, bottom)) = (span(|p| p.x), span(|p| p.y));
+    assert!((left - 10.0).abs() <= 1.0 && (right - 110.0).abs() <= 1.0, "drawn from {left} to {right}");
+    assert!((top - 27.0).abs() <= 1.0 && (bottom - 73.0).abs() <= 1.0, "drawn from {top} to {bottom}");
 }
 
 #[test]

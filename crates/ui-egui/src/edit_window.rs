@@ -706,6 +706,7 @@ fn track_row(app: &mut SoundApp, ui: &mut Ui, id: TrackId, row: Rect, tl: Rect) 
         }
         draw_clip(app, &painter, &s, &track, clip, tl, lane, auto_view.is_some());
     }
+    draw_live_take(app, &painter, &s, &track, tl, lane);
     crate::video_track::draw_lane(app, &painter, &s, &track, tl, lane);
     if let Some(p) = &auto_view {
         draw_automation(&painter, &s, &track, p, tl, lane);
@@ -1141,6 +1142,24 @@ fn grid_lines(painter: &egui::Painter, s: &Session, tl: Rect, lane: Rect) {
                 painter.line_segment([pos2(x, lane.min.y), pos2(x, lane.max.y)], Stroke::new(1.0, t.grid_line));
             }
         }
+    }
+}
+
+/// The take `track` is recording, drawn in red as it grows, as in Pro Tools.
+fn draw_live_take(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track, tl: Rect, lane: Rect) {
+    let Some(rec) = &app.recorder else { return };
+    let Some(take) = rec.live_take(track.id) else { return };
+    let block_len = soundcraft_playback::record::LIVE_BLOCK as f64 * s.sample_rate.as_f64() / f64::from(rec.sample_rate.max(1));
+    let len = soundcraft_time::to_samples(take.first().map_or(0, Vec::len) as f64 * block_len);
+    let sel = s.edit.selection;
+    let (start, pass) = if s.edit.loop_record && !sel.is_empty() { (sel.start, Some(sel.len())) } else { (app.record_start, None) };
+    let Some((origin, span)) = soundcraft_engine::io::live_span(start, pass, app.punch, len) else { return };
+    let r = Rect::from_min_max(pos2(x_of(s, tl, span.start), lane.min.y + 1.0), pos2(x_of(s, tl, span.end), lane.max.y - 1.0));
+    let t = Tokens::current();
+    let (body, _, wave) = clip_colors([t.rec.r(), t.rec.g(), t.rec.b()], false);
+    painter.rect(r, CornerRadius::same(2), body, Stroke::new(1.0, Color32::from_rgb(10, 10, 10)), StrokeKind::Inside);
+    if track.view != "blocks" {
+        crate::waveform::draw_live(&painter.with_clip_rect(r.intersect(lane)), s, tl, origin as f64, block_len, &take, r, wave);
     }
 }
 
