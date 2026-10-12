@@ -42,10 +42,12 @@ fn open(bytes: &[u8]) -> Result<Box<dyn FormatReader>> {
     let mut mss = MediaSourceStream::new(Box::new(Cursor::new(bytes.to_vec())), MediaSourceStreamOptions::default());
     let fmt_opts = FormatOptions { enable_gapless: true, ..FormatOptions::default() };
     loop {
-        match symphonia::default::get_probe().next(&mut mss).map_err(map_err)? {
-            Instantiate::Format(reader) => {
-                let at = usize::try_from(mss.pos()).unwrap_or(usize::MAX);
-                match bytes.get(at..at + 4) {
+        let found = symphonia::default::get_probe().next(&mut mss).map_err(map_err)?;
+        let at = usize::try_from(mss.pos()).unwrap_or(usize::MAX);
+        let head = bytes.get(at..).unwrap_or_default();
+        match (found, head.get(..10)) {
+            (Instantiate::Format(reader), _) => {
+                match head.get(..4) {
                     Some(b"caff") => crate::caf::check(bytes, at)?,
                     Some(b"ftyp") => crate::mp4::check(bytes, at.saturating_sub(4))?,
                     Some(b"fLaC") => crate::flac::check_metadata(bytes, at)?,
@@ -53,7 +55,12 @@ fn open(bytes: &[u8]) -> Result<Box<dyn FormatReader>> {
                 }
                 return reader(mss, &fmt_opts).map_err(map_err);
             }
-            Instantiate::Metadata(tag) => {
+            // Tags aren't used, and symphonia allocates whatever an ID3v2 frame claims: skip it.
+            (Instantiate::Metadata(_), Some([b'I', b'D', b'3', _, _, _, size @ ..])) => {
+                let size = size.iter().fold(0u64, |v, &x| (v << 7) | u64::from(x & 0x7f));
+                mss.ignore_bytes(10 + size).map_err(|e| AudioError::Malformed(e.to_string()))?;
+            }
+            (Instantiate::Metadata(tag), _) => {
                 tag(&MetadataOptions::default()).read_all(&mut mss).map_err(map_err)?;
             }
         }

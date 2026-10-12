@@ -307,6 +307,14 @@ fn flac_metadata_fields_beyond_their_block_are_refused() {
 }
 
 #[test]
+fn an_id3_tag_before_the_audio_is_skipped_unread() {
+    let frame = [&b"TIT2"[..], &0x7fff_ffffu32.to_be_bytes(), &[0, 0, 3, b'h', b'i', 0]].concat();
+    let tag = [&b"ID3\x03\0\0\0\0\0"[..], &[frame.len() as u8], &frame].concat();
+    let flac = small(FileFormat::Flac, BitDepth::Int16, 1);
+    assert_eq!(decode(&[tag, flac].concat(), None).unwrap().1.frames(), 300);
+}
+
+#[test]
 fn many_tiny_chunks_terminate() {
     let mut chunks: Vec<(&[u8; 4], Vec<u8>)> = vec![(b"fmt ", fmt(1, 1, 8_000, 16))];
     for _ in 0..200_000 {
