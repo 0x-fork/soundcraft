@@ -356,7 +356,8 @@ fn select(e: &mut Engine, p: &Value) -> Result<Value> {
         p.get("sources").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).map(soundcraft_model::SourceId).collect::<Vec<_>>());
     let list_changes = clips.is_some() || sources.is_some() || st.is_some();
     let exact = bool_or(p, "exact", false);
-    let s = e.session_mut();
+    let s = e.session();
+    let mut ed = s.edit.clone();
     if let Some(mut t) = tracks {
         // Active edit groups select all their members together.
         if !exact {
@@ -370,11 +371,11 @@ fn select(e: &mut Engine, p: &Value) -> Result<Value> {
             let order: Vec<soundcraft_model::TrackId> = s.tracks.iter().map(|x| x.id).collect();
             t.sort_by_key(|x| order.iter().position(|o| o == x).unwrap_or(usize::MAX));
         }
-        s.edit.selected_tracks = t;
+        ed.selected_tracks = t;
     }
     match (st, en) {
-        (Some(a), Some(b)) => s.edit.selection = soundcraft_time::Range::new(a.max(0), b.max(0)),
-        (Some(a), None) => s.edit.selection = soundcraft_time::Range::point(a.max(0)),
+        (Some(a), Some(b)) => ed.selection = soundcraft_time::Range::new(a.max(0), b.max(0)),
+        (Some(a), None) => ed.selection = soundcraft_time::Range::point(a.max(0)),
         _ => {}
     }
     if let Some(c) = clips {
@@ -390,21 +391,25 @@ fn select(e: &mut Engine, p: &Value) -> Result<Value> {
             }
         }
         if let Some(r) = range {
-            s.edit.selection = r;
-            s.edit.selected_tracks = trs;
+            ed.selection = r;
+            ed.selected_tracks = trs;
         }
-        s.edit.selected_clips = c;
+        ed.selected_clips = c;
     } else if list_changes {
-        s.edit.selected_clips.clear();
+        ed.selected_clips.clear();
     }
     if list_changes {
         let mut known: std::collections::BTreeSet<_> = s.sources.iter().map(|f| f.id).collect();
-        s.edit.selected_sources = sources.unwrap_or_default().into_iter().filter(|id| known.remove(id)).collect();
+        ed.selected_sources = sources.unwrap_or_default().into_iter().filter(|id| known.remove(id)).collect();
     }
-    if s.edit.link_timeline_edit {
-        s.edit.timeline_selection = s.edit.selection;
+    if ed.link_timeline_edit {
+        ed.timeline_selection = ed.selection;
     }
-    Ok(json!({"selection": s.edit.selection, "tracks": s.edit.selected_tracks, "clips": s.edit.selected_clips, "sources": s.edit.selected_sources}))
+    let out = json!({"selection": ed.selection, "tracks": ed.selected_tracks, "clips": ed.selected_clips, "sources": ed.selected_sources});
+    if ed != s.edit {
+        e.session_mut().edit = ed;
+    }
+    Ok(out)
 }
 
 fn shift_selection(e: &mut Engine, dir: i64) -> Result<Value> {
@@ -759,4 +764,22 @@ fn consolidate(e: &mut Engine, p: &Value) -> Result<Value> {
         }
     }
     Ok(json!({"consolidated": n}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selecting_what_is_already_selected_leaves_the_document_alone() {
+        let mut e = Engine::default();
+        let ids = e.execute("track.new", &json!({"count": 2})).unwrap()["tracks"].clone();
+        let sel = json!({"tracks": [ids[0]], "start": 100, "end": 200});
+        e.execute("edit.select", &sel).unwrap();
+        let rev = e.revision;
+        assert_eq!(e.execute("edit.select", &sel).unwrap()["tracks"], json!([ids[0]]));
+        assert_eq!(e.revision, rev);
+        e.execute("edit.select", &json!({"tracks": [ids[0]], "start": 100, "end": 300})).unwrap();
+        assert_ne!(e.revision, rev);
+    }
 }
