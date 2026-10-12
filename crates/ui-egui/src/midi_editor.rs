@@ -105,7 +105,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         p["clips"] = json!([cid.0]);
         let _ = app.run(id, p);
     }
-    let s = app.engine.session().clone();
+    let s = app.engine.session_arc();
     let sr = s.sample_rate;
     let base_tick = s.tempo.samples_to_ticks(clip.start, sr);
     let len_ticks = (s.tempo.samples_to_ticks(clip.end(), sr) - base_tick).max(1);
