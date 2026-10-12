@@ -210,6 +210,67 @@ fn well_formed_caf_still_reads() {
     assert_eq!(probe(&aac, None).unwrap().frames, 3072);
 }
 
+fn atom(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    [&(8 + body.len() as u32).to_be_bytes()[..], kind, body].concat()
+}
+
+/// An MP4 of `frames` frames of 16-bit mono PCM; `swap` may replace any version-0 atom.
+fn pcm_mp4(frames: u32, swap: impl Fn(&[u8; 4], Vec<u8>) -> Vec<u8>) -> Vec<u8> {
+    let full = |kind: &[u8; 4], fields: &[u32]| {
+        let body: Vec<u8> = [0].iter().chain(fields).flat_map(|v: &u32| v.to_be_bytes()).collect();
+        swap(kind, atom(kind, &body))
+    };
+    let entry = atom(b"sowt", &[&[0u8; 6][..], &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 16, 0, 0, 0, 0], &(48_000u32 << 16).to_be_bytes()].concat());
+    let moov = |offset: u32| {
+        let stsd = atom(b"stsd", &[&[0, 0, 0, 0, 0, 0, 0, 1][..], &entry].concat());
+        let stbl =
+            [stsd, full(b"stts", &[1, frames, 1]), full(b"stsc", &[1, 1, frames, 1]), full(b"stsz", &[2, frames]), full(b"stco", &[1, offset])];
+        let minf = [full(b"smhd", &[0]), atom(b"stbl", &stbl.concat())].concat();
+        let mdia = [full(b"mdhd", &[0, 0, 48_000, frames, 0]), full(b"hdlr", &[0, u32::from_be_bytes(*b"soun"), 0, 0, 0, 0]), atom(b"minf", &minf)];
+        let trak = [full(b"tkhd", &[0; 20]), atom(b"mdia", &mdia.concat())].concat();
+        atom(b"moov", &[full(b"mvhd", &[[0, 0, 48_000, frames, 1 << 16].as_slice(), &[0; 18], &[2]].concat()), atom(b"trak", &trak)].concat())
+    };
+    let ftyp = atom(b"ftyp", b"M4A \0\0\0\0M4A isom");
+    let offset = (ftyp.len() + moov(0).len() + 8) as u32;
+    let pcm: Vec<u8> = (0..frames as i16).flat_map(|i| (i * 40).to_le_bytes()).collect();
+    [ftyp, moov(offset), atom(b"mdat", &pcm)].concat()
+}
+
+#[test]
+fn mp4_sizes_beyond_the_file_are_errors_not_aborts() {
+    let (_, buf) = decode(&pcm_mp4(480, |_, a| a), None).unwrap();
+    assert_eq!(buf.frames(), 480);
+    let huge = |kind: &[u8; 4], a: Vec<u8>| [&1u32.to_be_bytes()[..], kind, &(1u64 << 60).to_be_bytes(), &a[8..]].concat();
+    // The first field after version and flags: stts's entry count, stsz's sample size.
+    let first_field_max = |mut a: Vec<u8>| {
+        a[12..16].copy_from_slice(&u32::MAX.to_be_bytes());
+        a
+    };
+    let sizes: Vec<u8> = (0..480u32).flat_map(|i| if i == 479 { u32::MAX } else { 2 }.to_be_bytes()).collect();
+    let per_sample = atom(b"stsz", &[&[0; 8][..], &480u32.to_be_bytes(), &sizes].concat());
+    // A header that starts inside its container is read whole, past the container's end.
+    let mdia = atom(b"mdia", &1u32.to_be_bytes());
+    let straddling = [&b"hdlr"[..], &(1u64 << 60).to_be_bytes(), &[0; 24]].concat();
+    let files = [
+        pcm_mp4(480, |k, a| if k == b"hdlr" { huge(k, a) } else { a }),
+        pcm_mp4(480, |k, a| if k == b"stts" { first_field_max(a) } else { a }),
+        pcm_mp4(480, |k, a| if k == b"stsz" { first_field_max(a) } else { a }),
+        pcm_mp4(480, |k, a| if k == b"stsz" { per_sample.clone() } else { a }),
+        [atom(b"ftyp", b"M4A \0\0\0\0M4A isom"), atom(b"moov", &atom(b"trak", &mdia)), straddling].concat(),
+    ];
+    for f in files {
+        assert!(matches!(decode(&f, None), Err(AudioError::Malformed(m)) if m.contains("larger than the file")));
+    }
+}
+
+#[test]
+fn atoms_running_past_their_parent_are_walked_once() {
+    // Each moov holds a trak that runs to the end of the file; symphonia stops after the first.
+    let unit = atom(b"moov", &[&u32::MAX.to_be_bytes()[..], b"trak"].concat());
+    let f = [atom(b"ftyp", b"M4A \0\0\0\0M4A isom"), unit.repeat(1 << 18)].concat();
+    assert!(decode(&f, None).is_err());
+}
+
 #[test]
 fn many_tiny_chunks_terminate() {
     let mut chunks: Vec<(&[u8; 4], Vec<u8>)> = vec![(b"fmt ", fmt(1, 1, 8_000, 16))];

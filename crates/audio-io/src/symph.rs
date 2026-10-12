@@ -41,8 +41,10 @@ fn open(bytes: &[u8]) -> Result<Box<dyn FormatReader>> {
         match symphonia::default::get_probe().next(&mut mss).map_err(map_err)? {
             Instantiate::Format(reader) => {
                 let at = usize::try_from(mss.pos()).unwrap_or(usize::MAX);
-                if bytes.get(at..at + 4) == Some(b"caff") {
-                    crate::caf::check(bytes, at)?;
+                match bytes.get(at..at + 4) {
+                    Some(b"caff") => crate::caf::check(bytes, at)?,
+                    Some(b"ftyp") => crate::mp4::check(bytes, at.saturating_sub(4))?,
+                    _ => {}
                 }
                 return reader(mss, &fmt_opts).map_err(map_err);
             }
