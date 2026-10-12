@@ -12,9 +12,9 @@ use symphonia::core::codecs::{
 };
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::{FormatOptions, FormatReader};
-use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
+use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions, ReadBytes};
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
+use symphonia::core::probe::Instantiate;
 
 use crate::pcm::MAX_DECODE_SAMPLES;
 use crate::{AudioBuffer, AudioError, AudioInfo, FileFormat, Result, SampleFormat};
@@ -32,15 +32,25 @@ fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| Err(AudioError::Malformed("decoder failed on malformed input".into())))
 }
 
-fn open(bytes: &[u8], ext_hint: Option<&str>) -> Result<Box<dyn FormatReader>> {
-    let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes.to_vec())), MediaSourceStreamOptions::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = ext_hint {
-        hint.with_extension(ext.trim_start_matches('.'));
-    }
+/// Symphonia's probe loop (`Probe::format`, whose hint 0.5 ignores), checking the container it
+/// finds before its reader allocates whatever the file claims.
+fn open(bytes: &[u8]) -> Result<Box<dyn FormatReader>> {
+    let mut mss = MediaSourceStream::new(Box::new(Cursor::new(bytes.to_vec())), MediaSourceStreamOptions::default());
     let fmt_opts = FormatOptions { enable_gapless: true, ..FormatOptions::default() };
-    let probed = symphonia::default::get_probe().format(&hint, mss, &fmt_opts, &MetadataOptions::default()).map_err(map_err)?;
-    Ok(probed.format)
+    loop {
+        match symphonia::default::get_probe().next(&mut mss).map_err(map_err)? {
+            Instantiate::Format(reader) => {
+                let at = usize::try_from(mss.pos()).unwrap_or(usize::MAX);
+                if bytes.get(at..at + 4) == Some(b"caff") {
+                    crate::caf::check(bytes, at)?;
+                }
+                return reader(mss, &fmt_opts).map_err(map_err);
+            }
+            Instantiate::Metadata(tag) => {
+                tag(&MetadataOptions::default()).read_all(&mut mss).map_err(map_err)?;
+            }
+        }
+    }
 }
 
 fn format_from_codec(codec: CodecType, detected: FileFormat) -> FileFormat {
@@ -115,8 +125,8 @@ fn info_of(reader: &dyn FormatReader, detected: FileFormat) -> Result<(u32, Audi
 }
 
 /// Decode the whole first audio track. When `count_only`, samples are counted but not stored.
-fn run(bytes: &[u8], ext_hint: Option<&str>, detected: FileFormat, count_only: bool) -> Result<(AudioInfo, AudioBuffer)> {
-    let mut reader = open(bytes, ext_hint)?;
+fn run(bytes: &[u8], detected: FileFormat, count_only: bool) -> Result<(AudioInfo, AudioBuffer)> {
+    let mut reader = open(bytes)?;
     let (track_id, mut info) = info_of(reader.as_ref(), detected)?;
     if let Some(n) = reader.tracks().iter().find(|t| t.id == track_id).and_then(|t| t.codec_params.n_frames) {
         let total = n.saturating_mul(u64::from(info.channels.max(1)));
@@ -206,18 +216,18 @@ fn run(bytes: &[u8], ext_hint: Option<&str>, detected: FileFormat, count_only: b
     Ok((info, AudioBuffer { sample_rate, channels: planar }))
 }
 
-pub(crate) fn probe(bytes: &[u8], ext_hint: Option<&str>, detected: FileFormat) -> Result<AudioInfo> {
+pub(crate) fn probe(bytes: &[u8], detected: FileFormat) -> Result<AudioInfo> {
     guarded(|| {
-        let reader = open(bytes, ext_hint)?;
+        let reader = open(bytes)?;
         let (_, info) = info_of(reader.as_ref(), detected)?;
         if info.frames > 0 && info.channels > 0 {
             return Ok(info);
         }
         // Length not in the header (e.g. MP3 without a Xing frame): count by decoding.
-        run(bytes, ext_hint, detected, true).map(|(i, _)| i)
+        run(bytes, detected, true).map(|(i, _)| i)
     })
 }
 
-pub(crate) fn decode(bytes: &[u8], ext_hint: Option<&str>, detected: FileFormat) -> Result<(AudioInfo, AudioBuffer)> {
-    guarded(|| run(bytes, ext_hint, detected, false))
+pub(crate) fn decode(bytes: &[u8], detected: FileFormat) -> Result<(AudioInfo, AudioBuffer)> {
+    guarded(|| run(bytes, detected, false))
 }

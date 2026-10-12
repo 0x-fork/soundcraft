@@ -153,6 +153,63 @@ fn absurd_chunk_sizes() {
     assert_eq!(decode(&aiff, None).unwrap().1.frames(), 0);
 }
 
+fn caf(chunks: &[(&[u8; 4], i64, Vec<u8>)]) -> Vec<u8> {
+    let mut out = b"caff\0\x01\0\0".to_vec();
+    for (kind, size, body) in chunks {
+        out.extend_from_slice(*kind);
+        out.extend_from_slice(&size.to_be_bytes());
+        out.extend_from_slice(body);
+    }
+    out
+}
+
+fn caf_desc(format: &[u8; 4], bytes_per_packet: u32, frames_per_packet: u32, channels: u32, bits: u32) -> (&'static [u8; 4], i64, Vec<u8>) {
+    let mut d = 48_000f64.to_be_bytes().to_vec();
+    d.extend_from_slice(format);
+    for v in [0, bytes_per_packet, frames_per_packet, channels, bits] {
+        d.extend_from_slice(&v.to_be_bytes());
+    }
+    (b"desc", 32, d)
+}
+
+fn packet_table(packets: i64, frames: i64, entries: &[u8]) -> Vec<u8> {
+    [&packets.to_be_bytes()[..], &frames.to_be_bytes(), &[0; 8], entries].concat()
+}
+
+#[test]
+fn caf_sizes_beyond_the_file_are_errors_not_aborts() {
+    let aac = || caf_desc(b"aac ", 0, 1024, 2, 0);
+    let huge = 1i64 << 50;
+    let cookie = caf(&[aac(), (b"kuki", huge, vec![0; 8])]);
+    let files = [
+        cookie.clone(),
+        [vec![0; 100], cookie].concat(),
+        caf(&[aac(), (b"data", -1, [&[0; 4][..], b"kuki", &huge.to_be_bytes()].concat())]),
+        caf(&[aac(), (b"pakt", 24, packet_table(huge, 1024, &[])), (b"data", -1, vec![0; 16])]),
+        caf(&[aac(), (b"pakt", 32, packet_table(1, 1024, &[0x82, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0])), (b"data", -1, vec![0; 64])]),
+        caf(&[aac(), (b"pakt", 25, packet_table(1, 1024, &[0x80]))]),
+    ];
+    for f in files {
+        assert!(matches!(probe(&f, None), Err(AudioError::Malformed(m)) if m.contains("larger than the file")));
+        assert!(matches!(decode(&f, None), Err(AudioError::Malformed(m)) if m.contains("larger than the file")));
+    }
+    let constant = caf(&[caf_desc(b"lpcm", 2, 1, 1, 16), (b"pakt", 25, packet_table(1, 1, &[1])), (b"data", -1, vec![0; 16])]);
+    assert!(matches!(decode(&constant, None), Err(AudioError::Malformed(m)) if m.contains("lists packets")));
+}
+
+#[test]
+fn well_formed_caf_still_reads() {
+    let pcm: Vec<u8> = (0..480i16).flat_map(|i| (i * 50).to_be_bytes()).collect();
+    let chan = [((100u32 << 16) | 1).to_be_bytes(), [0; 4], [0; 4]].concat();
+    let data = [vec![0; 4], pcm].concat();
+    let lpcm = caf(&[caf_desc(b"lpcm", 2, 1, 1, 16), (b"chan", 12, chan), (b"free", 8, vec![0; 8]), (b"data", data.len() as i64, data)]);
+    let (info, buf) = decode(&lpcm, None).unwrap();
+    assert_eq!((info.format, buf.frames()), (FileFormat::Caf, 480));
+    let table = packet_table(3, 3072, &[10, 0x81, 0x48, 5]);
+    let aac = caf(&[caf_desc(b"aac ", 0, 1024, 2, 0), (b"pakt", table.len() as i64, table), (b"data", 219, vec![0; 219])]);
+    assert_eq!(probe(&aac, None).unwrap().frames, 3072);
+}
+
 #[test]
 fn many_tiny_chunks_terminate() {
     let mut chunks: Vec<(&[u8; 4], Vec<u8>)> = vec![(b"fmt ", fmt(1, 1, 8_000, 16))];
