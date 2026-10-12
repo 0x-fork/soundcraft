@@ -308,6 +308,9 @@ pub struct Session {
     pub midi_originals: std::collections::BTreeMap<u64, soundcraft_midi::Sequence>,
     #[serde(skip)]
     pub pool: SourcePool,
+    /// The folder relative source paths point into: where the session was opened or last saved.
+    #[serde(skip)]
+    pub folder: Option<std::path::PathBuf>,
 }
 
 impl Default for Session {
@@ -341,6 +344,7 @@ impl Session {
             comments: String::new(),
             midi_originals: std::collections::BTreeMap::new(),
             pool: SourcePool::default(),
+            folder: None,
         };
         s.edit.pre_roll = sample_rate.samples(2.0);
         s.edit.post_roll = sample_rate.samples(2.0);
