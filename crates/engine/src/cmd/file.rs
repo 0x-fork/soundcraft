@@ -42,10 +42,14 @@ pub fn specs() -> Vec<CommandSpec> {
             s.sources.clear();
             s.videos.clear();
             let text = s.to_json().map_err(|err| EngineError::Io(err.to_string()))?;
-            crate::io::replace_file(&file.with_extension("scraft.tmp"), &file, text.as_bytes())?;
+            if cfg!(target_arch = "wasm32") {
+                crate::io::write_file(&file.to_string_lossy(), text.as_bytes())?;
+            } else {
+                crate::io::replace_file(&file.with_extension("scraft.tmp"), &file, text.as_bytes())?;
+            }
             Ok(json!({"path": file}))
         }),
-        cmd!(noundo "session.revert", "Revert Session to Saved...", ["File"], None, "{}", always, |e, _| {
+        cmd!(noundo "session.revert", "Revert Session to Saved...", ["File"], None, "{}", |e| if e.path.is_some() { Ok(()) } else { Err("the session has not been saved".into()) }, |e, _| {
             let path = e.path.clone().ok_or_else(|| bad("session.revert", "the session has not been saved"))?;
             crate::io::open_session(e, &path)?;
             Ok(json!({}))
@@ -103,13 +107,13 @@ pub fn specs() -> Vec<CommandSpec> {
             let path = str_param(p, "path").ok_or_else(|| bad("file.export_midi", "`path` required"))?.to_string();
             let only = if p.get("tracks").is_some() || p.get("track").is_some() { Some(tracks_param(e, "file.export_midi", p)?) } else { None };
             let bytes = crate::io::export_midi(e, only.as_deref())?;
-            std::fs::write(&path, &bytes).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+            crate::io::write_file(&path, &bytes)?;
             Ok(json!({"path": path, "bytes": bytes.len()}))
         }),
         cmd!(noundo "file.export_session_text", "Session Info as Text...", ["File", "Export"], None, "{path?}", always, |e, p| {
             let text = crate::inspect::session_text(e);
             if let Some(path) = str_param(p, "path") {
-                std::fs::write(path, &text).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+                crate::io::write_file(path, text.as_bytes())?;
             }
             Ok(json!({"text": text}))
         }),
@@ -289,7 +293,7 @@ fn bounce(e: &mut Engine, p: &Value) -> Result<Value> {
     let fold = fold_down_param(p, "file.bounce_mix")?;
     let bus = bounce_bus(e, p)?;
     let (bytes, stats) = crate::io::bounce_source(e, r, &opts, normalize, fold, bus)?;
-    std::fs::write(&path, &bytes).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+    crate::io::write_file(&path, &bytes)?;
     Ok(
         json!({"path": path, "bytes": bytes.len(), "seconds": e.session().sample_rate.seconds(r.len()), "peak_db": stats.0, "lufs": stats.1, "true_peak_db": stats.2}),
     )
@@ -308,7 +312,7 @@ fn write_score(e: &mut Engine, p: &Value, id: &str, svg: bool) -> Result<Value> 
         Some(p) => p.to_string(),
         None => std::env::temp_dir().join(format!("{}.{ext}", crate::io::sanitize_name(&setup.title))).to_string_lossy().to_string(),
     };
-    std::fs::write(&path, &text).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+    crate::io::write_file(&path, text.as_bytes())?;
     let measures = parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
     Ok(json!({"path": path, "parts": parts.len(), "measures": measures}))
 }
@@ -466,6 +470,17 @@ mod tests {
         assert!(res["missing"].as_array().is_some_and(|m| !m.is_empty()), "{res}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn saving_a_session_without_audio_creates_its_folder() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-new-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("Song").join("Song.scraft");
+        Engine::default().execute("session.save_as", &json!({"path": path.to_string_lossy()})).unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn tone_engine() -> (Engine, u64) {
         let mut e = Engine::default();
         e.execute("track.new", &json!({"count": 1, "name": "Tone", "format": "mono"})).unwrap();

@@ -20,10 +20,19 @@ mod logging;
 mod native_menu;
 
 use soundcraft_engine::Engine;
-use soundcraft_ui_egui::{Services, SoundApp, UiState};
+use soundcraft_ui_egui::{Services, SoundApp, UiState, dialogs};
 use std::sync::Arc;
 
 struct App(SoundApp, Option<&'static logging::AppLogger>, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
+
+/// Sends the title only when it changes, remembered here as X11 and Wayland can't read it back.
+fn set_title(ctx: &egui::Context, title: String) {
+    let id = egui::Id::new("window_title");
+    if ctx.data(|d| d.get_temp::<String>(id)).as_deref() != Some(title.as_str()) {
+        ctx.data_mut(|d| d.insert_temp(id, title.clone()));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+    }
+}
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -48,6 +57,8 @@ impl eframe::App for App {
         }
         if self.0.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if ctx.input(|i| i.viewport().close_requested()) && dialogs::ask_to_save(&mut self.0, "app.quit", &serde_json::json!({})) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         soundcraft_ui_egui::fit_window_to_screen(ctx);
         let (inner, maximized) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().maximized.unwrap_or(false)));
@@ -68,7 +79,7 @@ impl eframe::App for App {
         } else {
             format!("{} — SoundCraft", self.0.engine.session().name)
         };
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        set_title(ctx, title);
     }
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         self.0.raw_input_hook(raw);
@@ -91,7 +102,7 @@ impl eframe::App for App {
 fn open_path(app: &mut SoundApp, p: &str) {
     let lower = p.to_ascii_lowercase();
     let r = if lower.ends_with(".scraft") {
-        app.run("session.open", serde_json::json!({"path": p}))
+        dialogs::run_or_ask(app, "session.open", serde_json::json!({"path": p}))
     } else if lower.ends_with(".mid") || lower.ends_with(".midi") || lower.ends_with(".smf") {
         app.run("file.import_midi", serde_json::json!({"path": p}))
     } else {
@@ -282,4 +293,22 @@ fn main() -> eframe::Result {
 /// A saved window size, or the default when the prefs file holds nonsense (NaN, negative, tiny).
 fn sane_window_size([w, h]: [f32; 2]) -> [f32; 2] {
     if w.is_finite() && h.is_finite() && w >= 960.0 && h >= 600.0 { [w.min(16_384.0), h.min(16_384.0)] } else { [1600.0, 1000.0] }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::set_title;
+
+    #[test]
+    fn the_title_is_sent_only_when_it_changes() {
+        let ctx = egui::Context::default();
+        let titles = |title: &str| {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| set_title(ui.ctx(), title.to_string()));
+            out.textures_delta.clear();
+            out.viewport_output.values().flat_map(|v| &v.commands).filter(|c| matches!(c, egui::ViewportCommand::Title(_))).count()
+        };
+        assert_eq!(titles("Song — SoundCraft"), 1);
+        assert_eq!(titles("Song — SoundCraft"), 0);
+        assert_eq!(titles("Song * — SoundCraft"), 1);
+    }
 }
