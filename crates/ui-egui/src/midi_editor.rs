@@ -330,7 +330,10 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
             let _ = app.run("midi.notes_move", json!({"clip": cid.0, "indices": app.midi.selected, "ticks": ticks, "semitones": semi}));
         }
     }
-    if !app.midi.selected.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+    if !app.midi.selected.is_empty()
+        && !ui.ctx().egui_wants_keyboard_input()
+        && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
+    {
         let _ = app.run("midi.note_delete", json!({"clip": cid.0, "indices": app.midi.selected}));
         app.midi.selected.clear();
     }
