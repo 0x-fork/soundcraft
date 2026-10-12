@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::f32::consts::TAU;
 
-use soundcraft_dsp::{Plugin, Unit, create, db_to_gain, gain_to_db, plugin_info, plugins};
+use soundcraft_dsp::{Plugin, Unit, create, db_to_gain, gain_to_db, is_generator, plugin_info, plugins};
 
 const SR: f32 = 48_000.0;
 const BLOCK: usize = 512;
@@ -45,7 +45,7 @@ fn prepared(id: &str) -> Box<dyn Plugin> {
 }
 
 fn is_source(id: &str) -> bool {
-    plugin_info(id).unwrap().is_instrument || id == "signal_generator"
+    plugin_info(id).unwrap().is_instrument || is_generator(id)
 }
 
 #[test]
