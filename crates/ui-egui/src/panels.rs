@@ -15,15 +15,28 @@ fn panel_header(ui: &mut Ui, title: &str) {
     ui.painter().line_segment([pos2(r.min.x, r.max.y), pos2(r.max.x, r.max.y)], Stroke::new(1.0, t.border));
 }
 
+/// The strip down the Tracks panel's right edge: the lists' scroll bars, and a clear line between
+/// the panel and the window beside it.
+const GUTTER_W: f32 = 10.0;
+
 pub fn tracks_and_groups(app: &mut SoundApp, ui: &mut Ui) {
     let t = Tokens::current();
+    let full = ui.max_rect();
+    let gutter = full.with_min_x(full.max.x - GUTTER_W);
+    ui.painter().rect_filled(gutter, 0.0, t.panel_bg.lerp_to_gamma(t.text_dim, 0.15));
+    ui.painter().vline(gutter.min.x + 0.5, full.y_range(), Stroke::new(1.0, t.border));
+    ui.painter().vline(gutter.max.x - 0.5, full.y_range(), Stroke::new(1.0, t.border));
+    let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(full.with_max_x(gutter.min.x)));
     let total = ui.available_height();
     panel_header(ui, "TRACKS");
     let tracks: Vec<(u64, String, bool, [u8; 3], bool)> = {
         let s = app.engine.session();
         s.tracks.iter().map(|x| (x.id.0, x.name.clone(), !x.hidden, x.color, s.edit.selected_tracks.contains(&x.id))).collect()
     };
-    egui::ScrollArea::vertical().id_salt("tracks_scroll").max_height(total * 0.62).auto_shrink([false, false]).show(ui, |ui| {
+    let hidden = egui::scroll_area::ScrollBarVisibility::AlwaysHidden;
+    let lists =
+        egui::ScrollArea::vertical().id_salt("tracks_scroll").max_height(total * 0.62).auto_shrink([false, false]).scroll_bar_visibility(hidden);
+    let out = lists.show(ui, |ui| {
         for (id, name, shown, color, sel) in tracks {
             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 17.0), Sense::click());
             if sel {
@@ -42,11 +55,12 @@ pub fn tracks_and_groups(app: &mut SoundApp, ui: &mut Ui) {
             }
         }
     });
+    gutter_scroll(ui, gutter, &out);
     ui.add_space(4.0);
     panel_header(ui, "GROUPS");
     let groups: Vec<(u64, char, String, bool, [u8; 3])> =
         app.engine.session().groups.iter().map(|g| (g.id.0, g.letter, g.name.clone(), g.active, g.color)).collect();
-    egui::ScrollArea::vertical().id_salt("groups_scroll").auto_shrink([false, false]).show(ui, |ui| {
+    let out = egui::ScrollArea::vertical().id_salt("groups_scroll").auto_shrink([false, false]).scroll_bar_visibility(hidden).show(ui, |ui| {
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 17.0), Sense::hover());
         ui.painter().text(pos2(r.min.x + 30.0, r.center().y), Align2::LEFT_CENTER, "<ALL>", regular(11.5).clone(), t.text);
         let all = ui.interact(r, ui.id().with("group_all"), Sense::click());
@@ -96,6 +110,41 @@ pub fn tracks_and_groups(app: &mut SoundApp, ui: &mut Ui) {
             });
         }
     });
+    gutter_scroll(ui, gutter, &out);
+}
+
+/// A list's scroll thumb in the gutter beside it, when the list is longer than its space: drag it,
+/// or click above or below it to page.
+fn gutter_scroll<R>(ui: &Ui, gutter: Rect, out: &egui::scroll_area::ScrollAreaOutput<R>) {
+    let t = Tokens::current();
+    let (view, content) = (out.inner_rect.height(), out.content_size.y);
+    if content <= view + 0.5 {
+        return;
+    }
+    let bar = Rect::from_x_y_ranges(gutter.x_range(), out.inner_rect.y_range());
+    let (max, h) = (content - view, (bar.height() * view / content).max(20.0));
+    let mut state = out.state;
+    let thumb = Rect::from_min_size(pos2(bar.min.x + 2.0, bar.min.y + (bar.height() - h) * state.offset.y / max), vec2(bar.width() - 4.0, h));
+    let resp = ui.interact(bar, out.id.with("gutter"), Sense::click_and_drag());
+    ui.painter().rect_filled(thumb, 3.0, if resp.hovered() || resp.dragged() { t.button_hi.lerp_to_gamma(Color32::WHITE, 0.1) } else { t.button_hi });
+    let to = if resp.dragged() {
+        Some(state.offset.y + resp.drag_delta().y * max / (bar.height() - h).max(1.0))
+    } else if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.clicked()) {
+        let page = if p.y < thumb.min.y {
+            -view
+        } else if p.y > thumb.max.y {
+            view
+        } else {
+            0.0
+        };
+        Some(state.offset.y + page)
+    } else {
+        None
+    };
+    if let Some(y) = to {
+        state.offset.y = y.clamp(0.0, max);
+        state.store(ui.ctx(), out.id);
+    }
 }
 
 pub fn clip_list(app: &mut SoundApp, ui: &mut Ui) {
