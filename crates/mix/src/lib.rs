@@ -2414,6 +2414,7 @@ mod tests {
     /// A built-in gain behind a third-party id, with a log of parameter sets.
     struct Stateful {
         inner: Box<dyn Plugin>,
+        blob: Vec<u8>,
         sets: Arc<std::sync::atomic::AtomicUsize>,
     }
 
@@ -2436,6 +2437,10 @@ mod tests {
         }
         fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
             self.inner.process(io, frames);
+        }
+        fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
+            let blob = self.blob.clone();
+            Some(Box::new(move || Some(blob.clone())))
         }
     }
 
@@ -2614,9 +2619,9 @@ mod tests {
         let sets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut gain = soundcraft_dsp::create("gain").unwrap();
         gain.prepare(48_000.0, 512, 1);
-        let fake = Stateful { inner: gain, sets: Arc::clone(&sets) };
+        let fake = Stateful { inner: gain, blob: Vec::new(), sets: Arc::clone(&sets) };
         // An instance for the wrong channel count is retired, not used.
-        let wrong = Stateful { inner: soundcraft_dsp::create("gain").unwrap(), sets: Arc::clone(&sets) };
+        let wrong = Stateful { inner: soundcraft_dsp::create("gain").unwrap(), blob: Vec::new(), sets: Arc::clone(&sets) };
         eng.adopt(vec![PreparedInstance { track: t, slot: 0, id: "clap:test.fake".into(), ch: 2, plugin: Box::new(wrong) }]);
         assert!(render_block(&mut eng, &s, 512) > 0.3);
         assert_eq!(eng.take_retired().len(), 1);
@@ -2724,11 +2729,12 @@ mod tests {
         };
         eng.adopt(vec![PreparedInstance { track: t, slot: 0, id: "clap:test.fake".into(), ch: 1, plugin: make(b"old") }]);
         render_block(&mut eng, &s, 0);
-        assert_eq!(eng.capture_states(), vec![(t, 0, b"old".to_vec())]);
+        assert!(eng.take_retired().is_empty());
         eng.adopt(vec![PreparedInstance { track: t, slot: 0, id: "clap:test.fake".into(), ch: 1, plugin: make(b"new") }]);
         render_block(&mut eng, &s, 512);
-        assert_eq!(eng.capture_states(), vec![(t, 0, b"new".to_vec())]);
-        assert_eq!(eng.take_retired().len(), 1, "the old instance is retired");
+        let mut retired = eng.take_retired();
+        assert_eq!(retired.len(), 1, "the old instance is retired");
+        assert_eq!(retired[0].save_state(), Some(b"old".to_vec()), "the new instance stays");
     }
 
     #[test]
@@ -2742,7 +2748,7 @@ mod tests {
         let mut eng = MixEngine::new(48_000.0, 512);
         eng.set_external_instances(true);
         let sets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let fake = Stateful { inner: soundcraft_dsp::create("gain").unwrap(), sets: Arc::clone(&sets) };
+        let fake = Stateful { inner: soundcraft_dsp::create("gain").unwrap(), blob: Vec::new(), sets: Arc::clone(&sets) };
         eng.adopt(vec![PreparedInstance { track: t, slot: 0, id: "vst3:00000000000000000000000000000001".into(), ch: 1, plugin: Box::new(fake) }]);
         render_block(&mut eng, &s, 0);
         assert_eq!(sets.load(std::sync::atomic::Ordering::Relaxed), 1, "session params apply once");

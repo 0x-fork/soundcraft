@@ -1118,7 +1118,7 @@ mod tests {
         let (tx, rx) = channel();
         let (gtx, grx) = channel();
         let mut st = AudioState::new(rx, shared, Arc::new(soundcraft_model::Session::default()), 48_000.0, gtx);
-        let mut side = Side { shadow: HashMap::new(), rate: 48_000.0, editors: HashMap::new(), garbage: grx, old_sessions: None };
+        let mut side = Side::new(48_000.0, grx);
         side.return_old_sessions(&tx);
         let mut out = vec![0.0f32; 256];
         let mut watched = Vec::new();
