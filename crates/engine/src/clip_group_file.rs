@@ -31,6 +31,9 @@ struct GroupFile {
 
 /// Write the clips `ids` (grouped by track) to `path`. Returns the number of clips written.
 pub fn export(e: &Engine, ids: &[ClipId], path: &str) -> Result<usize> {
+    let p = with_extension(path);
+    // First, so a refused group file leaves nothing behind and is refused whatever else is wrong.
+    crate::file_access::check_write(&p).map_err(EngineError::Io)?;
     let s = e.session();
     let mut lanes: Vec<(usize, Vec<Clip>)> = Vec::new();
     for id in ids {
@@ -47,7 +50,6 @@ pub fn export(e: &Engine, ids: &[ClipId], path: &str) -> Result<usize> {
     };
     let n = clips.len();
     lanes.sort_by_key(|(i, _)| *i);
-    let p = with_extension(path);
     let stem = p.file_stem().and_then(|x| x.to_str()).unwrap_or("Clip Group").to_string();
     let audio_dir_name = format!("{} Audio", crate::io::sanitize_name(&stem));
     let dir = p.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -62,10 +64,10 @@ pub fn export(e: &Engine, ids: &[ClipId], path: &str) -> Result<usize> {
                 && let (Some(buf), Some(src)) = (s.pool.get(source), s.sources.iter().find(|x| x.id == source))
             {
                 let rel = format!("{audio_dir_name}/{}_{}.wav", crate::io::sanitize_name(&src.name), source.0);
-                std::fs::create_dir_all(dir.join(&audio_dir_name)).map_err(|err| EngineError::Io(format!("{audio_dir_name}: {err}")))?;
+                crate::io::make_dir(dir.join(&audio_dir_name))?;
                 let opts = EncodeOptions { format: FileFormat::Wav, bit_depth: soundcraft_audio_io::BitDepth::Float32, dither: false, bwf: None };
                 let bytes = soundcraft_audio_io::encode(&buf.buffer, &opts).map_err(|err| EngineError::Io(err.to_string()))?;
-                std::fs::write(dir.join(&rel), bytes).map_err(|err| EngineError::Io(format!("{rel}: {err}")))?;
+                crate::io::write_path(dir.join(&rel), bytes)?;
                 slot.insert(rel);
             }
             lane.push(c);
@@ -74,7 +76,7 @@ pub fn export(e: &Engine, ids: &[ClipId], path: &str) -> Result<usize> {
     }
     let file = GroupFile { format: FORMAT.into(), version: 1, sample_rate: s.sample_rate.hz(), length: end - start, lanes: out_lanes, audio };
     let text = serde_json::to_string_pretty(&file).map_err(|err| EngineError::Io(err.to_string()))?;
-    std::fs::write(&p, text).map_err(|err| EngineError::Io(format!("{}: {err}", p.display())))?;
+    crate::io::write_path(&p, text)?;
     Ok(n)
 }
 
@@ -82,7 +84,7 @@ pub fn export(e: &Engine, ids: &[ClipId], path: &str) -> Result<usize> {
 /// are made when the session runs out). Returns the ids of the placed clips.
 pub fn import(e: &mut Engine, path: &str, first: Option<TrackId>, at: Samples) -> Result<Vec<ClipId>> {
     let id = "file.import_clip_groups";
-    let text = std::fs::read_to_string(path).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+    let text = crate::io::read_text(path)?;
     let file: GroupFile = serde_json::from_str(&text).map_err(|err| EngineError::BadParams(id.into(), format!("not a clip group file: {err}")))?;
     if file.format != FORMAT {
         return Err(EngineError::BadParams(id.into(), "not a SoundCraft clip group file".into()));
@@ -98,7 +100,7 @@ pub fn import(e: &mut Engine, path: &str, first: Option<TrackId>, at: Samples) -
         if !full.starts_with(&dir) || rel.contains("..") {
             return Err(EngineError::BadParams(id.into(), format!("audio path escapes the group folder: {rel}")));
         }
-        let bytes = std::fs::read(&full).map_err(|err| EngineError::Io(format!("{}: {err}", full.display())))?;
+        let bytes = crate::io::read_file(&full)?;
         let (_, buf) = soundcraft_audio_io::decode(&bytes, Some("wav")).map_err(|err| EngineError::Io(format!("{rel}: {err}")))?;
         decoded.insert(*old, (rel.clone(), buf));
     }
