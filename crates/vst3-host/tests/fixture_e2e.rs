@@ -121,6 +121,16 @@ fn synth_plays_notes_at_their_offsets() {
     p.all_notes_off();
     p.process(&mut io, 64);
     assert!(io[0].iter().all(|x| x.abs() < 1e-6));
+    // MIDI CC 7 reaches the parameter the plugin maps it to, and poly pressure arrives as an event,
+    // each at its offset; an unmapped controller is dropped.
+    p.midi(10, [0xA0, 60, 32]);
+    p.midi(20, [0xB0, 7, 64]);
+    p.midi(30, [0xB0, 1, 127]);
+    p.process(&mut io, 64);
+    assert!(io[0][9].abs() < 1e-6 && (io[0][10] - 32.0 / 127.0).abs() < 1e-6);
+    assert!((io[0][20] - 64.0 / 127.0).abs() < 1e-6 && (io[0][63] - 64.0 / 127.0).abs() < 1e-6);
+    p.midi(0, [0xB0, 7, 0]);
+    p.process(&mut io, 64);
     // Notes in a later sub-block of a chunked call land at the right frame.
     p.prepare(48_000.0, 32, 2);
     let mut io = vec![vec![0.0f32; 96], vec![0.0f32; 96]];
