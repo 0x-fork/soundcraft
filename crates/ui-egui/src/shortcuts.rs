@@ -86,6 +86,8 @@ pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
             let _ = app.run(c.0, json!({}));
         }
     }
+    // Tab moves the insertion point here, so egui must not also hand focus to the first widget: that would block every shortcut.
+    ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
 }
 
 fn command_for(key: Key, mods: Modifiers, mac: bool) -> Option<&'static str> {
