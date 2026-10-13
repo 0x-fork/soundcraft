@@ -22,7 +22,7 @@ pub fn specs() -> Vec<CommandSpec> {
             e.session_mut().tempo.scale_tempos(f).map_err(|err| bad("event.tempo_scale", err.to_string()))?;
             Ok(json!({}))
         }),
-        cmd!("event.tempo_constant", "Constant...", ["Event", "Tempo Operations"], None, "{bpm, start?, end?}", always, tempo),
+        cmd!("event.tempo_constant", "Constant...", ["Event", "Tempo Operations"], None, "{bpm, start?, end?}", always, tempo_constant),
         cmd!("event.insert_time", "Insert Time...", ["Event", "Time Operations"], None, "{start?, length | end}", has_tracks, insert_time),
         cmd!("event.cut_time", "Cut Time...", ["Event", "Time Operations"], None, "{start?, end?}", has_tracks, cut_time),
         cmd!(
@@ -108,6 +108,30 @@ fn tempo(e: &mut Engine, p: &Value) -> Result<Value> {
     let tick = s.tempo.samples_to_ticks(at, s.sample_rate);
     s.tempo.set_tempo(tick, bpm).map_err(|err| bad("event.tempo", err.to_string()))?;
     Ok(json!({"tick": tick, "bpm": bpm}))
+}
+
+fn tempo_constant(e: &mut Engine, p: &Value) -> Result<Value> {
+    let id = "event.tempo_constant";
+    let r = range_param(e, id, p)?;
+    let s = e.session();
+    let (t0, t1) = (s.tempo.samples_to_ticks(r.start, s.sample_rate), s.tempo.samples_to_ticks(r.end, s.sample_rate));
+    if t1 <= t0 {
+        return tempo(e, p);
+    }
+    let bpm = f64_or(p, "bpm", f64::NAN);
+    let s = e.session_mut();
+    // Read before the edit: the end is a musical position, and the new tempo moves it in samples.
+    let after = s.tempo.tempo_at_tick(t1);
+    let had_end = s.tempo.tempos().iter().any(|x| x.tick == t1);
+    s.tempo.set_tempo(t0, bpm).map_err(|err| bad(id, err.to_string()))?;
+    let inside: Vec<i64> = s.tempo.tempos().iter().map(|x| x.tick).filter(|t| *t > t0 && *t < t1).collect();
+    for t in inside {
+        s.tempo.remove_tempo(t);
+    }
+    if !had_end {
+        s.tempo.set_tempo(t1, after).map_err(|err| bad(id, err.to_string()))?;
+    }
+    Ok(json!({"tick": t0, "end_tick": t1, "bpm": bpm}))
 }
 
 fn meter(e: &mut Engine, p: &Value) -> Result<Value> {
@@ -400,5 +424,24 @@ mod tests {
         let s = e.session();
         let bridge = s.markers.iter().find(|m| m.id.0 == outro_id).unwrap();
         assert_eq!((bridge.name.as_str(), bridge.comments.as_str()), ("Bridge", "last"));
+    }
+
+    /// Constant replaces the tempo over [start, end) only; the tempo at the old end tick carries on after it.
+    #[test]
+    fn tempo_constant_is_bounded_by_its_range() {
+        let mut e = crate::Engine::default();
+        e.execute("event.tempo", &json!({"bpm": 100.0, "at": 0})).unwrap();
+        e.execute("event.tempo", &json!({"bpm": 140.0, "at": 48_000})).unwrap();
+        let s = e.session();
+        let (t0, t1) = (s.tempo.samples_to_ticks(24_000, s.sample_rate), s.tempo.samples_to_ticks(96_000, s.sample_rate));
+        let mid = s.tempo.samples_to_ticks(72_000, s.sample_rate);
+        let after = s.tempo.tempo_at_tick(t1);
+        e.execute("event.tempo_constant", &json!({"bpm": 90.0, "start": 24_000, "end": 96_000})).unwrap();
+        let tempo = &e.session().tempo;
+        assert_eq!(tempo.tempo_at_tick(t0 - 1), 100.0, "before the range");
+        assert_eq!(tempo.tempo_at_tick(t0), 90.0);
+        assert_eq!(tempo.tempo_at_tick(mid), 90.0, "the interior change is replaced");
+        assert_eq!(tempo.tempo_at_tick(t1), after, "the old tempo resumes at the end");
+        assert_eq!(after, 140.0);
     }
 }
