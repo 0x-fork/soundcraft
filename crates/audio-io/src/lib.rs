@@ -14,7 +14,9 @@
 
 mod aiff;
 mod buffer;
+mod caf;
 mod flac;
+mod mp4;
 mod pcm;
 pub mod peaks;
 mod symph;
@@ -187,7 +189,7 @@ fn detect_by_ext(ext: &str) -> FileFormat {
         "flac" => FileFormat::Flac,
         "mp3" | "mp2" | "mp1" => FileFormat::Mp3,
         "ogg" | "oga" => FileFormat::Ogg,
-        "aac" | "m4a" | "mp4" | "adts" => FileFormat::Aac,
+        "aac" | "m4a" | "m4b" | "mp4" | "adts" => FileFormat::Aac,
         "caf" => FileFormat::Caf,
         _ => FileFormat::Other,
     }
@@ -205,16 +207,16 @@ pub fn probe(bytes: &[u8], ext_hint: Option<&str>) -> Result<AudioInfo> {
         FileFormat::Wav if wav::is_wav(bytes) => match wav::parse(bytes)? {
             wav::WavParse::Native(l) => Ok(l.info),
             wav::WavParse::Foreign { bwf } => {
-                let mut info = symph::probe(bytes, Some("wav"), format)?;
+                let mut info = symph::probe(bytes, format)?;
                 info.bwf = bwf;
                 Ok(info)
             }
         },
         FileFormat::Aiff if aiff::is_aiff(bytes) => match aiff::parse(bytes)? {
             aiff::AiffParse::Native(l) => Ok(l.info),
-            aiff::AiffParse::Foreign => symph::probe(bytes, Some("aiff"), format),
+            aiff::AiffParse::Foreign => symph::probe(bytes, format),
         },
-        _ => symph::probe(bytes, ext_hint, format),
+        _ => symph::probe(bytes, format),
     }
 }
 
@@ -230,7 +232,7 @@ pub fn decode(bytes: &[u8], ext_hint: Option<&str>) -> Result<(AudioInfo, AudioB
                 Ok((info, buf))
             }
             wav::WavParse::Foreign { bwf } => {
-                let (mut info, buf) = symph::decode(bytes, Some("wav"), format)?;
+                let (mut info, buf) = symph::decode(bytes, format)?;
                 info.bwf = bwf;
                 Ok((info, buf))
             }
@@ -242,9 +244,9 @@ pub fn decode(bytes: &[u8], ext_hint: Option<&str>) -> Result<(AudioInfo, AudioB
                 info.frames = buf.frames() as u64;
                 Ok((info, buf))
             }
-            aiff::AiffParse::Foreign => symph::decode(bytes, Some("aiff"), format),
+            aiff::AiffParse::Foreign => symph::decode(bytes, format),
         },
-        _ => symph::decode(bytes, ext_hint, format),
+        _ => symph::decode(bytes, format),
     }
 }
 

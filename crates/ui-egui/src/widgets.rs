@@ -40,6 +40,23 @@ pub fn rounded_vgradient(p: &Painter, r: Rect, radius: f32, top: Color32, bottom
     p.add(mesh);
 }
 
+/// A raised key as Pro Tools draws them: a dark rim, a face shaded from `faces[0]` to `faces[1]`
+/// and a lit top edge. Returns the face's top colour.
+pub fn raised_key(p: &Painter, r: Rect, faces: [Color32; 2], hovered: bool) -> Color32 {
+    let [top, bottom] = if hovered { faces.map(|c| shade(c, 0.06)) } else { faces };
+    p.rect_filled(r, 3.0, shade(Tokens::current().slot_well, -0.3));
+    rounded_vgradient(p, r.shrink(1.0), 2.0, top, bottom);
+    p.hline(r.min.x + 2.0..=r.max.x - 2.0, r.min.y + 1.5, Stroke::new(1.0, shade(top, 0.17)));
+    top
+}
+
+/// A groove across a raised key whose face starts at `top`: a dark line, then a light one.
+pub fn groove(p: &Painter, x: f32, ys: impl Into<egui::Rangef>, top: Color32) {
+    let ys = ys.into();
+    p.vline(x, ys, Stroke::new(1.0, shade(top, -0.42)));
+    p.vline(x + 1.0, ys, Stroke::new(1.0, shade(top, 0.12)));
+}
+
 pub fn inset(p: &Painter, r: Rect, fill: Color32) {
     let t = Tokens::current();
     p.rect(r, 2.0, fill, Stroke::new(1.0, t.border), StrokeKind::Inside);

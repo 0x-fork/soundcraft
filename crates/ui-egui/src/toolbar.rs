@@ -6,7 +6,7 @@ use crate::{SoundApp, icons};
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
 use soundcraft_model::{EditMode, Tool};
-use soundcraft_time::{TimeFormat, format_length, format_position};
+use soundcraft_time::{TimeFormat, format_length};
 
 pub const HEIGHT: f32 = 78.0;
 
@@ -23,18 +23,23 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     let full = ui.max_rect();
     ui.painter().rect_filled(full, 0.0, t.toolbar_bg);
     ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        ui.spacing_mut().item_spacing.x = 8.0;
-        edit_modes(app, ui);
-        zoom_group(app, ui);
-        tools(app, ui);
-        counters(app, ui);
-        grid_nudge(app, ui);
-        transport(app, ui);
-        tempo_meter(app, ui);
-        output_meter(app, ui);
-    });
+    egui::ScrollArea::horizontal()
+        .id_salt("edit_toolbar_scroll")
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.spacing_mut().item_spacing.x = 8.0;
+                edit_modes(app, ui);
+                zoom_group(app, ui);
+                tools(app, ui);
+                counters(app, ui);
+                grid_nudge(app, ui);
+                transport(app, ui);
+                tempo_meter(app, ui);
+                output_meter(app, ui);
+            });
+        });
 }
 
 fn edit_modes(app: &mut SoundApp, ui: &mut Ui) {
@@ -175,7 +180,7 @@ fn tools(app: &mut SoundApp, ui: &mut Ui) {
 
 fn fmt_pos(app: &SoundApp, at: i64, f: TimeFormat) -> String {
     let s = app.engine.session();
-    format_position(at, f, s.sample_rate, &s.tempo, s.frame_rate, s.timecode_start)
+    s.format_position(at, f)
 }
 
 fn counters(app: &mut SoundApp, ui: &mut Ui) {
@@ -278,7 +283,7 @@ fn transport(app: &mut SoundApp, ui: &mut Ui) {
     let playing = app.is_playing();
     let recording = app.engine.transport.recording;
     let looped = app.engine.session().edit.loop_playback;
-    group(ui, 176.0, 64.0, |ui, _| {
+    group(ui, 176.0, 64.0, |ui, g| {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing = vec2(3.0, 4.0);
             ui.horizontal(|ui| {
@@ -301,7 +306,13 @@ fn transport(app: &mut SoundApp, ui: &mut Ui) {
                 let (r, resp) = ui.allocate_exact_size(vec2(38.0, 28.0), Sense::click());
                 key(ui.painter(), r, &resp, if recording { Color32::from_rgb(110, 30, 30) } else { key_fill(&resp) });
                 icons::draw(ui.painter(), r.shrink(5.0), "record", t.rec);
-                if resp.on_hover_text("Record (Cmd+Space)").clicked() {
+                let resp = resp.on_hover_text("Record (Cmd+Space)");
+                if let Some(why) = app.record_hint() {
+                    // Below the whole group, so the hint covers none of its buttons.
+                    let below = Rect::from_min_max(r.min, pos2(r.max.x, g.max.y));
+                    egui::Tooltip::always_open(ui.ctx().clone(), resp.layer_id, resp.id, below).show(|ui| ui.label(why));
+                }
+                if resp.clicked() {
                     let _ = app.run("transport.record", json!({}));
                 }
             });
@@ -344,12 +355,42 @@ fn tempo_meter(app: &mut SoundApp, ui: &mut Ui) {
     ui.painter().text(pos2(r.max.x - 8.0, r.min.y + 32.0), Align2::RIGHT_CENTER, meter, mono(11.0), t.counter_text);
     ui.painter().text(pos2(r.min.x + 70.0, r.min.y + 48.0), Align2::RIGHT_CENTER, "Tempo", regular(11.0), t.counter_label);
     icons::draw(ui.painter(), Rect::from_center_size(pos2(r.min.x + 82.0, r.min.y + 48.0), vec2(13.0, 13.0)), "note", t.counter_text);
-    ui.painter().text(pos2(r.max.x - 8.0, r.min.y + 48.0), Align2::RIGHT_CENTER, format!("{bpm:.4}"), mono(11.0), t.counter_text);
+    tempo_value(app, ui, r.max.x - 8.0, r.min.y + 48.0, bpm);
     let clk = Rect::from_min_size(pos2(r.min.x + 6.0, r.min.y + 40.0), vec2(18.0, 18.0));
     icons::draw(ui.painter(), clk, "click", if click { t.counter_text } else { t.text_dim });
     if ui.interact(clk, ui.id().with("click"), Sense::click()).on_hover_text("Click").clicked() {
         let _ = app.run("options.click", json!({}));
     }
+}
+
+/// The tempo in effect at the playhead, right-aligned at `right`: drag it (Shift for fine steps),
+/// or click and type.
+fn tempo_value(app: &mut SoundApp, ui: &mut Ui, right: f32, y: f32, bpm: f64) {
+    let t = Tokens::current();
+    let w = ui.painter().layout_no_wrap(format!("{bpm:.4}"), mono(11.0), t.counter_text).size().x;
+    let rect = Rect::from_min_max(pos2(right - w - 4.0, y - 8.0), pos2(right + 4.0, y + 8.0));
+    let mut c = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    c.style_mut().override_font_id = Some(mono(11.0));
+    let v = c.visuals_mut();
+    v.override_text_color = Some(t.counter_text);
+    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active] {
+        w.weak_bg_fill = Color32::TRANSPARENT;
+        w.bg_stroke = Stroke::NONE;
+    }
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, t.counter_border);
+    let mut value = bpm;
+    let resp = c.add_sized(rect.size(), egui::DragValue::new(&mut value).speed(0.1).range(5.0..=1000.0).fixed_decimals(4));
+    if resp.changed() {
+        let s = app.engine.session();
+        let tick = s.tempo.samples_to_ticks(app.position(), s.sample_rate);
+        let event = s.tempo.tempos().iter().rev().find(|e| e.tick <= tick).map_or(0, |e| e.tick);
+        let at = s.tempo.tick_to_samples(event, s.sample_rate);
+        let _ = app.engine.execute_merged("event.tempo", &json!({"bpm": value, "at": at}), "toolbar_tempo");
+    }
+    if resp.drag_stopped() || resp.lost_focus() {
+        app.engine.end_merge();
+    }
+    resp.on_hover_text("Drag to change the tempo (Shift: fine steps), or click to type it");
 }
 
 fn output_meter(app: &mut SoundApp, ui: &mut Ui) {
