@@ -1137,7 +1137,9 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
                 let name =
                     track.instrument.as_ref().and_then(|i| crate::mix_window::plugin_info(&i.plugin)).map_or("no instrument", |p| p.short_name);
                 ui.painter().with_clip_rect(field).text(pos2(field.min.x + 5.0, field.center().y), Align2::LEFT_CENTER, name, bold(10.0), t.text);
-                egui::Popup::menu(&resp.on_hover_text("Instrument")).show(|ui| crate::mix_window::instrument_menu(app, ui, id));
+                egui::Popup::menu(&resp.on_hover_text("Instrument"))
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| crate::mix_window::instrument_menu(app, ui, id));
             } else {
                 let c = pos2(field.min.x + 7.0, field.center().y);
                 ui.painter().line_segment([c + vec2(0.0, -3.5), c + vec2(0.0, 1.0)], Stroke::new(1.0, t.text));

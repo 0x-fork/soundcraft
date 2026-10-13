@@ -114,6 +114,9 @@ pub enum Vst3Error {
 mod api {
     use super::*;
 
+    pub fn cached() -> Option<Vec<Vst3Descriptor>> {
+        registry::cached()
+    }
     pub fn scan() -> Vec<Vst3Descriptor> {
         registry::scan()
     }
@@ -144,6 +147,9 @@ mod api {
 mod api {
     use super::*;
 
+    pub fn cached() -> Option<Vec<Vst3Descriptor>> {
+        Some(Vec::new())
+    }
     pub fn scan() -> Vec<Vst3Descriptor> {
         Vec::new()
     }
@@ -189,6 +195,11 @@ pub fn add_search_dir(dir: &Path) -> usize {
 /// Scans the given folders without touching the cache.
 pub fn scan_paths(dirs: &[PathBuf]) -> Vec<Vst3Descriptor> {
     api::scan_paths(dirs)
+}
+
+/// The plugins of the last scan, without scanning: `None` until something has scanned.
+pub fn cached() -> Option<Vec<Vst3Descriptor>> {
+    api::cached()
 }
 
 /// Shuts plugin hosting down: runs the module exit of every loaded binary that has no live
