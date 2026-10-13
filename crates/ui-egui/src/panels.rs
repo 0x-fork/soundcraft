@@ -174,6 +174,7 @@ pub fn floating(app: &mut SoundApp, ctx: &egui::Context) {
     transport_window(app, ctx);
     big_counter(app, ctx);
     plugin_windows(app, ctx);
+    crate::mix_window::send_window(app, ctx);
     about(app, ctx);
     session_info(app, ctx);
 }
