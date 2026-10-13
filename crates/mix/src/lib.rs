@@ -349,6 +349,10 @@ pub struct MixEngine {
     /// that lines direct outputs up with aux returns stays in `latency` and is removed
     /// only from the main mix.
     track_latency: usize,
+    /// Busses an aux returns onto, and the latency of the slowest aux return: audio written onto
+    /// such a bus waits for it, so a bounce of the bus drops it as well.
+    aux_fed: Vec<BusId>,
+    aux_latency: usize,
     /// Live input for the next block (planar), set by the audio host for input monitoring.
     pub input: Vec<Vec<f32>>,
     /// Transport stopped: only monitored inputs sound (no clips).
@@ -429,6 +433,8 @@ impl MixEngine {
             order: Vec::new(),
             latency: 0,
             track_latency: 0,
+            aux_fed: Vec::new(),
+            aux_latency: 0,
             input: Vec::new(),
             monitor_only: false,
             recording: false,
@@ -679,6 +685,19 @@ impl MixEngine {
             if pdc { self.strips.iter().filter(|(id, _)| s.track(**id).is_some_and(is_aux)).map(|(_, st)| st.latency).max().unwrap_or(0) } else { 0 };
         self.track_latency = lmax_t;
         self.latency = lmax_t + lmax_a + lmax_m;
+        // An aux that returns onto a bus delays it by the slowest aux return, so the tracks routed
+        // to that bus wait as well (as the ones routed to the main mix do) and the bus lines up.
+        self.aux_latency = lmax_a;
+        self.aux_fed.clear();
+        if pdc {
+            for t in s.tracks.iter().filter(|t| is_aux(t) && live(t)) {
+                if let Route::Bus(b) = &t.mixer.output
+                    && !self.aux_fed.contains(b)
+                {
+                    self.aux_fed.push(*b);
+                }
+            }
+        }
         for (i, st) in work.iter_mut() {
             let Some(t) = s.tracks.get(*i) else { continue };
             let ch = st.buf.len();
@@ -688,7 +707,12 @@ impl MixEngine {
                 st.align_pre.set(lmax_t.saturating_sub(st.latency), ch);
                 st.align_pre.process(&mut st.pre, frames);
             }
-            st.out_extra.set(if t.mixer.output == Route::Main { lmax_a } else { 0 }, ch);
+            let waits = match &t.mixer.output {
+                Route::Main => true,
+                Route::Bus(b) => self.aux_fed.contains(b),
+                _ => false,
+            };
+            st.out_extra.set(if waits { lmax_a } else { 0 }, ch);
         }
         for (i, st) in work.iter_mut() {
             if let Some(t) = s.tracks.get(*i) {
@@ -778,6 +802,12 @@ impl MixEngine {
         self.main_meter.measure(&self.main, frames, 0.0);
     }
 
+    /// The delay-compensation latency written onto `bus`: the slowest track insert, plus the
+    /// slowest aux return when an aux returns onto this bus.
+    fn bus_latency(&self, bus: BusId) -> usize {
+        self.track_latency + if self.aux_fed.contains(&bus) { self.aux_latency } else { 0 }
+    }
+
     /// Copy one rendered block of `bus` into `out`. A missing bus stays silent.
     fn copy_bus(&self, bus: BusId, frames: usize, out: &mut [Vec<f32>]) {
         for o in out.iter_mut() {
@@ -823,7 +853,7 @@ impl MixEngine {
             apply_matrix(src, frames, &mut dst.buf, &m, gain);
         }
         let src: &[Vec<f32>] = match &t.mixer.output {
-            Route::Main if strip.out_extra.len > 0 => {
+            Route::Main | Route::Bus(_) if strip.out_extra.len > 0 => {
                 if strip.outbuf.len() != strip.buf.len() {
                     strip.outbuf = vec![Vec::new(); strip.buf.len()];
                 }
@@ -2004,8 +2034,8 @@ pub fn render_range(s: &Session, range: Range, block: usize) -> Vec<Vec<f32>> {
 }
 
 /// Offline render of one bus over `range` (planar, the bus format's channel count).
-/// Track-insert compensation is removed, so a bus fed by tracks lines up with the timeline.
-/// An unknown bus is silent.
+/// The compensation delay written onto the bus is removed (track inserts, and the aux returns
+/// when an aux returns onto it), so the bus lines up with the timeline. An unknown bus is silent.
 pub fn render_bus(s: &Session, bus: BusId, range: Range, block: usize) -> Vec<Vec<f32>> {
     render_in_memory(s, Some(bus), range, block)
 }
@@ -2073,7 +2103,10 @@ impl RangeRender {
         self.render(s, self.start + self.done as i64, n);
         if self.done == 0 {
             // The first block tells the mix's latency: render that much more and drop the head.
-            self.latency = if self.bus.is_some() { self.eng.track_latency } else { self.eng.latency };
+            self.latency = match self.bus {
+                Some(b) => self.eng.bus_latency(b),
+                None => self.eng.latency,
+            };
             self.total = self.total.saturating_add(self.latency);
         }
         let skip = self.latency.saturating_sub(self.done).min(n);
