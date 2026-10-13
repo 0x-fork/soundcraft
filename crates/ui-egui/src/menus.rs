@@ -200,6 +200,12 @@ pub fn tree() -> Vec<MenuNode> {
         insert_path(&mut roots, line);
     }
     insert_path(&mut roots, "Window > Reset Panel Layout");
+    // Not in the incumbent catalog, but the only UI path to an empty MIDI clip (#282).
+    // It creates a clip rather than acting on the selected ones, so it leads the Clip menu.
+    insert_path(&mut roots, "Clip > New MIDI Clip");
+    if let Some(clip) = roots.iter_mut().find(|n| n.label == "Clip") {
+        clip.children.rotate_right(1);
+    }
     for (path, _) in MENU_WINDOWS {
         insert_path(&mut roots, path);
     }
