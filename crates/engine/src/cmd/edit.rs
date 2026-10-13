@@ -1,5 +1,6 @@
 //! Edit menu commands.
 
+use super::more_util::toggle_flag;
 use super::*;
 use crate::edit as ops;
 use crate::{Clipboard, cmd};
@@ -133,11 +134,33 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("edit.fade_to_start", "Fade to Start", ["Edit", "Fades"], Some("Cmd+Ctrl+D"), "{}", has_selection, |e, p| fade_to(e, p, true)),
         cmd!("edit.fade_to_end", "Fade to End", ["Edit", "Fades"], Some("Cmd+Ctrl+G"), "{}", has_selection, |e, p| fade_to(e, p, false)),
         cmd!("edit.nudge", "Nudge", [], Some("Plus/Minus"), "{direction: 1|-1, count?: n, next?: bool (next larger value)}", has_selection, nudge),
-        cmd!(noundo "edit.mode", "Edit Mode", [], Some("F1-F4"), "{mode: shuffle|slip|spot|grid|relative_grid}", always, |e, p| {
-            let m = str_param(p, "mode").and_then(EditMode::from_id).ok_or_else(|| bad("edit.mode", "mode must be shuffle|slip|spot|grid|relative_grid"))?;
-            e.session_mut().edit.edit_mode = m;
-            Ok(json!({"mode": m}))
-        }),
+        cmd!(
+            noundo "edit.mode",
+            "Edit Mode",
+            [],
+            Some("F1-F4, Alt+1-4, `"),
+            "{mode: shuffle|slip|spot|grid|relative_grid, snap_to_grid?: bool (Shuffle, Slip and Spot)}",
+            always,
+            set_mode
+        ),
+        cmd!(
+            noundo "edit.snap_to_grid",
+            "Snap to Grid",
+            [],
+            Some("Shift+F4"),
+            "{value?: bool} (toggles when omitted) — in Shuffle, Slip and Spot the Edit cursor and selections snap to the grid",
+            always,
+            snap_to_grid
+        ),
+        cmd!(
+            noundo "edit.shuffle_lock",
+            "Shuffle Lock",
+            [],
+            None,
+            "{value?: bool} (toggles when omitted) — keeps Shuffle mode from being chosen",
+            always,
+            shuffle_lock
+        ),
         cmd!(noundo "edit.tool", "Edit Tool", [], Some("F5-F10"), "{tool: zoom|trim|selector|grabber|scrubber|pencil|smart}", always, |e, p| {
             let t = str_param(p, "tool").and_then(soundcraft_model::Tool::from_id).ok_or_else(|| bad("edit.tool", "unknown tool"))?;
             e.session_mut().edit.tool = t;
@@ -148,9 +171,18 @@ pub fn specs() -> Vec<CommandSpec> {
             "Move Clips",
             [],
             None,
-            "{clips?: [id], by?: samples, to?: position (first clip start), track?: target}",
+            "{clips?: [id], by?: samples, to?: position for the first clip that can move (Grid modes snap its sync point), track?: where the first clip's track goes; the others keep their distance}",
             has_selection,
             move_clips
+        ),
+        cmd!(
+            "edit.trim_clip",
+            "Trim Clip",
+            [],
+            None,
+            "{clip: id, start?: position, end?: position} — moves the clip's edges like the Trim tool, in the current Edit mode",
+            always,
+            trim_clip
         ),
         cmd!("edit.consolidate", "Consolidate", ["Edit"], Some("Alt+Shift+3"), "{tracks?, start?, end?}", has_range, consolidate),
     ]
@@ -158,6 +190,35 @@ pub fn specs() -> Vec<CommandSpec> {
 
 fn shuffle(s: &Session) -> bool {
     s.edit.edit_mode == EditMode::Shuffle
+}
+
+fn set_mode(e: &mut Engine, p: &Value) -> Result<Value> {
+    let m = str_param(p, "mode").and_then(EditMode::from_id).ok_or_else(|| bad("edit.mode", "mode must be shuffle|slip|spot|grid|relative_grid"))?;
+    if m == EditMode::Shuffle && e.session().edit.flag(ops::SHUFFLE_LOCK) {
+        return Err(bad("edit.mode", "Shuffle is locked"));
+    }
+    let snap = bool_or(p, "snap_to_grid", false) && !m.is_grid();
+    let ed = &mut e.session_mut().edit;
+    ed.edit_mode = m;
+    ed.set_flag(ops::SNAP_TO_GRID, snap);
+    if m.is_grid() {
+        ed.set_flag(ops::RELATIVE_GRID, m == EditMode::GridRelative);
+    }
+    Ok(json!({"mode": m, "snap_to_grid": snap}))
+}
+
+fn snap_to_grid(e: &mut Engine, p: &Value) -> Result<Value> {
+    if e.session().edit.edit_mode.is_grid() {
+        return Err(bad("edit.snap_to_grid", "Grid mode always snaps"));
+    }
+    toggle_flag(e, p, ops::SNAP_TO_GRID)
+}
+
+fn shuffle_lock(e: &mut Engine, p: &Value) -> Result<Value> {
+    if shuffle(e.session()) && bool_or(p, "value", true) {
+        return Err(bad("edit.shuffle_lock", "leave Shuffle mode before locking it"));
+    }
+    toggle_flag(e, p, ops::SHUFFLE_LOCK)
 }
 
 fn has_last_selection(e: &Engine) -> std::result::Result<(), String> {
@@ -190,7 +251,7 @@ fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
     if range.is_empty() {
         return Err(bad(id, "selection is empty"));
     }
-    let mut cb = Clipboard { length: range.len(), ..Clipboard::default() };
+    let mut cb = Clipboard::of_range(e.session(), range);
     let follow = e.session().edit.automation_follows_edit;
     for t in &tracks {
         cb.tracks.push(ops::copy_range(e.session(), *t, range));
@@ -232,15 +293,7 @@ fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
         let sh = shuffle(e.session());
         let s = e.session_mut();
         for t in &tracks {
-            ops::clear_range(s, *t, range, sh);
-            if follow && let Some(tr) = s.track_mut(*t) {
-                for l in &mut tr.automation {
-                    l.clear_range(range.start, range.end);
-                    if sh {
-                        l.shift_from(range.end, -range.len());
-                    }
-                }
-            }
+            cut_track(s, *t, range, sh, follow);
         }
         s.edit.selection = soundcraft_time::Range::point(range.start);
     }
@@ -249,17 +302,39 @@ fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
     Ok(json!({"clips": n, "length": range.len()}))
 }
 
+/// Remove `r` from a track, closing the gap in Shuffle mode; automation follows when `follow`.
+fn cut_track(s: &mut Session, t: TrackId, r: soundcraft_time::Range, sh: bool, follow: bool) {
+    if follow && let Some(tr) = s.track_mut(t) {
+        for l in &mut tr.automation {
+            l.clear_range(r.start, r.end);
+        }
+    }
+    ops::clear_range(s, t, r, sh);
+}
+
 fn paste(e: &mut Engine, p: &Value) -> Result<Value> {
     let tracks = tracks_required(e, "edit.paste", p)?;
-    let at = position_param(e, "edit.paste", p, "at")?.unwrap_or(e.session().edit.selection.start);
+    let given = position_param(e, "edit.paste", p, "at")?;
     let cb = e.clipboard.clone();
-    let sh = shuffle(e.session());
-    let follow = e.session().edit.automation_follows_edit;
+    let s = e.session();
+    let at = match given {
+        Some(at) => at,
+        None if s.edit.edit_mode == EditMode::GridRelative => {
+            s.edit.grid.line_at_or_before(s.edit.selection.start, s.sample_rate, &s.tempo, s.frame_rate).saturating_add(cb.grid_offset)
+        }
+        None => s.edit.selection.start,
+    };
+    let sh = shuffle(s) && !cb.automation_only;
+    let follow = s.edit.automation_follows_edit;
+    let replace = Some(s.edit.selection).filter(|r| sh && given.is_none() && !r.is_empty());
     let s = e.session_mut();
     let mut pasted = 0;
     for (i, t) in tracks.iter().enumerate() {
         let Some(clips) = cb.tracks.get(i % cb.tracks.len().max(1)) else { continue };
-        pasted += ops::paste(s, *t, at, clips, cb.length, sh).len();
+        if let Some(r) = replace {
+            cut_track(s, *t, r, true, follow);
+        }
+        pasted += ops::paste(s, *t, at, clips, cb.length, sh).map_err(|why| bad("edit.paste", why))?.len();
         if follow && let (Some(lanes), Some(tr)) = (cb.automation.get(i % cb.automation.len().max(1)), s.track_mut(*t)) {
             for l in lanes {
                 let dst = tr.lane_mut(&l.param);
@@ -356,7 +431,7 @@ fn repeat_to_fill(e: &mut Engine, p: &Value) -> Result<Value> {
                         c
                     })
                     .collect();
-                ops::paste(s, *t, at, &trimmed, (range.end - at).min(len), false);
+                let _ = ops::paste(s, *t, at, &trimmed, (range.end - at).min(len), false);
             }
         }
         at += len;
@@ -485,12 +560,14 @@ fn duplicate(e: &mut Engine, p: &Value) -> Result<Value> {
     if range.is_empty() {
         return Err(bad("edit.duplicate", "selection is empty"));
     }
+    let sh = shuffle(e.session());
+    let follow = e.session().edit.automation_follows_edit;
     let s = e.session_mut();
     let mut n = 0;
     for t in &tracks {
         let clips = ops::copy_range(s, *t, range);
-        n += ops::paste(s, *t, range.end, &clips, range.len(), false).len();
-        if let Some(tr) = s.track_mut(*t) {
+        n += ops::paste(s, *t, range.end, &clips, range.len(), sh).map_err(|why| bad("edit.duplicate", why))?.len();
+        if follow && let Some(tr) = s.track_mut(*t) {
             for l in &mut tr.automation {
                 let pts: Vec<_> = l.points.iter().filter(|p| range.contains(p.at)).copied().collect();
                 for pt in pts {
@@ -510,11 +587,13 @@ fn repeat(e: &mut Engine, p: &Value) -> Result<Value> {
     if range.is_empty() {
         return Err(bad("edit.repeat", "selection is empty"));
     }
+    let sh = shuffle(e.session());
     let s = e.session_mut();
     for t in &tracks {
         let clips = ops::copy_range(s, *t, range);
         for k in 1..=count {
-            ops::paste(s, *t, range.start + range.len() * k, &clips, range.len(), false);
+            let at = range.start.saturating_add(range.len().saturating_mul(k));
+            ops::paste(s, *t, at, &clips, range.len(), sh).map_err(|why| bad("edit.repeat", why))?;
         }
     }
     Ok(json!({"repeats": count}))
@@ -525,19 +604,25 @@ fn shift(e: &mut Engine, p: &Value) -> Result<Value> {
     let later = bool_or(p, "later", true);
     let ids = clip_ids_param(e, p);
     let s = e.session_mut();
-    let n = ops::move_clips(s, &ids, if later { by } else { -by }, None);
+    let n = ops::move_clips(s, &ids, if later { by } else { -by }, &[]);
     Ok(json!({"moved": n}))
 }
 
 fn insert_silence(e: &mut Engine, p: &Value) -> Result<Value> {
     let tracks = tracks_required(e, "edit.insert_silence", p)?;
     let range = range_param(e, "edit.insert_silence", p)?;
+    let sh = shuffle(e.session());
+    let follow = e.session().edit.automation_follows_edit;
     let s = e.session_mut();
     for t in &tracks {
-        ops::insert_silence(s, *t, range);
-        if let Some(tr) = s.track_mut(*t) {
-            for l in &mut tr.automation {
-                l.shift_from(range.start, range.len());
+        if sh {
+            ops::make_room(s, *t, range.start, range.len()).map_err(|why| bad("edit.insert_silence", why))?;
+        } else {
+            ops::clear_range(s, *t, range, false);
+            if follow && let Some(tr) = s.track_mut(*t) {
+                for l in &mut tr.automation {
+                    l.clear_range(range.start, range.end);
+                }
             }
         }
     }
@@ -764,7 +849,7 @@ fn nudge(e: &mut Engine, p: &Value) -> Result<Value> {
     let step = value.step_samples(s.edit.selection.start, s.sample_rate, &s.tempo, s.frame_rate) * count * if dir == 0 { 1 } else { dir };
     let ids = clip_ids_param(e, p);
     let s = e.session_mut();
-    let n = if ids.is_empty() { 0 } else { ops::move_clips(s, &ids, step, None) };
+    let n = if ids.is_empty() { 0 } else { ops::move_clips(s, &ids, step, &[]) };
     s.edit.selection = s.edit.selection.shifted(step);
     if s.edit.selection.start < 0 {
         s.edit.selection = s.edit.selection.shifted(-s.edit.selection.start);
@@ -777,24 +862,46 @@ fn move_clips(e: &mut Engine, p: &Value) -> Result<Value> {
     if ids.is_empty() {
         return Err(bad("edit.move_clips", "no clips"));
     }
-    let to_track = track_param(e, "edit.move_clips", p, "track")?;
-    let first = ids.iter().filter_map(|id| e.session().find_clip(*id).map(|(_, c)| c.start)).min().unwrap_or(0);
+    let s = e.session();
+    let dest = match track_param(e, "edit.move_clips", p, "track")? {
+        Some(to) => ids
+            .iter()
+            .find_map(|c| s.find_clip(*c))
+            .and_then(|(from, _)| ops::destinations(s, &ids, from, to))
+            .ok_or_else(|| bad("edit.move_clips", "the clips can't land there: past the last track, or on a track that can't hold them"))?,
+        None => Vec::new(),
+    };
+    let first = ops::first_movable(s, &ids);
     let delta = match (position_param(e, "edit.move_clips", p, "by")?, position_param(e, "edit.move_clips", p, "to")?) {
         (Some(by), _) => by,
-        (None, Some(to)) => to - first,
+        (None, Some(to)) => to.saturating_sub(first.map_or(0, |c| c.start)),
         _ => 0,
     };
-    // Grid mode snaps the destination.
-    let s = e.session();
-    let delta = if s.edit.edit_mode.is_grid() && p.get("to").is_some() {
-        s.edit.grid.snap(first + delta, s.sample_rate, &s.tempo, s.frame_rate) - first
-    } else {
-        delta
+    let mode = s.edit.edit_mode;
+    let delta = match first {
+        Some(c) if mode.is_grid() && p.get("to").is_some() => ops::grid_delta(s, c, delta, mode == EditMode::GridRelative),
+        _ => delta,
     };
     let s = e.session_mut();
-    let n = ops::move_clips(s, &ids, delta, to_track);
+    let n = if mode == EditMode::Shuffle {
+        ops::shuffle_clips(s, &ids, delta, &dest).map_err(|why| bad("edit.move_clips", why))?
+    } else {
+        ops::move_clips(s, &ids, delta, &dest)
+    };
     s.edit.selected_clips = ids;
     Ok(json!({"moved": n, "by": delta}))
+}
+
+fn trim_clip(e: &mut Engine, p: &Value) -> Result<Value> {
+    let id = clip_id(p, "edit.trim_clip")?;
+    let start = position_param(e, "edit.trim_clip", p, "start")?;
+    let end = position_param(e, "edit.trim_clip", p, "end")?;
+    if start.is_none() && end.is_none() {
+        return Err(bad("edit.trim_clip", "pass `start` and/or `end`"));
+    }
+    let sh = shuffle(e.session());
+    let c = ops::trim_clip(e.session_mut(), id, start, end, sh).ok_or_else(|| bad("edit.trim_clip", "no such clip, or it is edit-locked"))?;
+    Ok(json!({"start": c.start, "end": c.end()}))
 }
 
 fn consolidate(e: &mut Engine, p: &Value) -> Result<Value> {

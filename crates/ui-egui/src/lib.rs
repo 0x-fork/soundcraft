@@ -22,6 +22,7 @@ pub mod panels;
 pub mod recovery;
 pub mod score_editor;
 pub mod shortcuts;
+pub mod spot;
 pub mod theme;
 pub mod toolbar;
 pub mod video_track;
