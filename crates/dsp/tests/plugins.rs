@@ -200,6 +200,44 @@ fn eq_magnitude_at_center_matches_gain() {
 }
 
 #[test]
+fn eq_switches_and_choices_apply_to_a_running_eq() {
+    // (plugin, settings, the one switch or choice changed while running, test tone)
+    let cases: [(&str, &[(&str, f32)], (&str, f32), f32); 7] = [
+        ("eq_7band", &[("hpf_freq", 2000.0), ("hpf_slope", 3.0)], ("hpf_on", 1.0), 1000.0),
+        ("eq_7band", &[("hpf_freq", 2000.0), ("hpf_slope", 3.0), ("hpf_on", 1.0)], ("hpf_on", 0.0), 1000.0),
+        ("eq_7band", &[("hpf_freq", 2000.0), ("hpf_slope", 0.0), ("hpf_on", 1.0)], ("hpf_slope", 3.0), 1000.0),
+        ("eq_7band", &[("lpf_freq", 2000.0), ("lpf_slope", 3.0)], ("lpf_on", 1.0), 4000.0),
+        ("eq_7band", &[("lpf_freq", 2000.0), ("lpf_slope", 0.0), ("lpf_on", 1.0)], ("lpf_slope", 3.0), 4000.0),
+        ("eq_1band", &[("freq", 1000.0)], ("type", 4.0), 10_000.0),
+        ("channel_strip", &[("hpf_freq", 2000.0)], ("hpf_on", 1.0), 1000.0),
+    ];
+    let mut stale = Vec::new();
+    for (id, setup, (key, value), tone) in cases {
+        let x = [sine(tone, 0.5, 24_000)];
+        let level = |p: &mut dyn Plugin| gain_to_db(rms(&run(p, &x)[0][12_000..]));
+        let build = |settings: &[(&str, f32)]| {
+            let mut p = create(id).unwrap();
+            p.prepare(SR, BLOCK, 1);
+            for &(k, v) in settings {
+                assert!(p.set_param(k, v), "{id} {k}");
+            }
+            p.reset();
+            p
+        };
+        let mut live = build(setup);
+        let before = level(live.as_mut());
+        assert!(live.set_param(key, value));
+        let after = level(live.as_mut());
+        let want = level(build(&[setup, &[(key, value)]].concat()).as_mut());
+        assert!((before - want).abs() > 3.0, "{id} {key}={value}: the tone must tell the settings apart");
+        if (after - want).abs() >= 0.1 {
+            stale.push(format!("{id} {key}={value}: live {after:.2} dB, fresh {want:.2} dB, before {before:.2} dB"));
+        }
+    }
+    assert!(stale.is_empty(), "{stale:#?}");
+}
+
+#[test]
 fn compressor_steady_state_gain_reduction() {
     let mut p = prepared("compressor");
     p.set_param("threshold", -20.0);
@@ -327,6 +365,23 @@ fn delay_repeats_at_time() {
     let out = run(p.as_mut(), &[x]);
     let pos = out[0].iter().enumerate().max_by(|a, b| a.1.abs().total_cmp(&b.1.abs())).unwrap().0;
     assert!((pos as i64 - 4800).abs() <= 2, "echo at {pos}");
+}
+
+#[test]
+fn modulation_tail_covers_feedback_echoes() {
+    for (id, delay, feedback) in [("chorus", 30.0, 90.0), ("flanger", 10.0, 95.0), ("flanger", 10.0, -95.0)] {
+        let mut p = prepared(id);
+        for (param, v) in [("delay", delay), ("feedback", feedback), ("depth", 0.0), ("mix", 100.0)] {
+            assert!(p.set_param(param, v));
+        }
+        p.reset();
+        let mut x = vec![0.0f32; 48_000 * 5];
+        x[0] = 0.5;
+        let out = run(p.as_mut(), &[x]);
+        let floor = peak(&out[0]) * 1e-3;
+        let last = out[0].iter().rposition(|v| v.abs() > floor).unwrap();
+        assert!(last < p.tail_samples(), "{id} feedback {feedback}: echo at {last}, tail {}", p.tail_samples());
+    }
 }
 
 #[test]
