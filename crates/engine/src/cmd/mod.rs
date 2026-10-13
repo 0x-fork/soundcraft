@@ -28,6 +28,7 @@ mod query;
 pub(crate) mod sampler;
 mod setup_more;
 mod surround;
+mod tab;
 mod track;
 mod track_more;
 mod transport;
@@ -115,6 +116,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(mix::specs());
         v.extend(options::specs());
         v.extend(transport::specs());
+        v.extend(tab::specs());
         v.extend(query::specs());
         v.extend(health::specs());
         v.extend(audiosuite::specs());

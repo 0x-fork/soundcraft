@@ -167,33 +167,10 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             let _ = app.run("edit.nudge", json!({"direction": dir}));
             true
         }
-        // Alt+Tab goes back; off macOS the desktop takes Alt+Tab, so Ctrl+Tab does. Cmd+Alt+Tab is Tab to Transient.
-        Key::Tab if plain || (m.alt && !m.command) || (!mac && m.ctrl && !m.alt) => {
-            // Tab to next clip boundary (or transient when enabled).
-            let s = app.engine.session();
-            let at = s.edit.selection.start;
-            let back = !plain;
-            if s.edit.tab_to_transient
-                && !back
-                && let Some(t) = s.edit.selected_tracks.first().copied()
-            {
-                let r = soundcraft_time::Range::new(at + 1, s.content_end());
-                if let Some(n) = soundcraft_engine::io::transients_in(s, t, r, 0.5).into_iter().find(|x| *x > at + 64) {
-                    let _ = app.run("transport.locate", json!({"at": n}));
-                    return true;
-                }
-            }
-            let mut edges: Vec<i64> = s
-                .tracks
-                .iter()
-                .filter(|t| s.edit.selected_tracks.contains(&t.id))
-                .flat_map(|t| t.clips().iter().flat_map(|c| [c.start, c.end()]))
-                .collect();
-            edges.sort_unstable();
-            let next = if back { edges.iter().rev().find(|e| **e < at).copied() } else { edges.iter().find(|e| **e > at).copied() };
-            if let Some(n) = next {
-                let _ = app.run("transport.locate", json!({"at": n}));
-            }
+        // Alt+Tab goes back (off macOS the desktop takes Alt+Tab, so Ctrl+Tab does) and Shift extends the selection.
+        // Cmd+Alt+Tab is Tab to Transient, and the Mac's Control+Tab is Pro Tools' Go to Next Clip.
+        Key::Tab if !(m.command && (mac || m.alt)) && !(mac && m.ctrl) => {
+            let _ = app.run("edit.tab", json!({"back": m.alt || (!mac && m.ctrl), "extend": m.shift}));
             true
         }
         // The registry's key families "Cmd+Alt+[ / ]", "Cmd+Alt+0-5" and "Cmd+Ctrl+1-5", which `parse` can't read.
