@@ -250,6 +250,7 @@ pub fn trim_to(s: &mut Session, track: TrackId, range: Range) -> usize {
             n += 1;
         }
     }
+    pl.sort();
     n
 }
 

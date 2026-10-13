@@ -10,16 +10,15 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(noundo "edit.undo", "Undo", ["Edit"], Some("Cmd+Z"), "{}", can_undo, |e, _| Ok(json!({"undone": e.undo()}))),
         cmd!(noundo "edit.redo", "Redo", ["Edit"], Some("Cmd+Shift+Z"), "{}", can_redo, |e, _| Ok(json!({"redone": e.redo()}))),
-        cmd!("edit.restore_last_selection", "Restore Last Selection", ["Edit"], Some("Cmd+Alt+Z"), "{}", always, restore_selection),
+        cmd!(noundo "edit.restore_last_selection", "Restore Last Selection", ["Edit"], Some("Cmd+Alt+Z"), "{}", has_last_selection, restore_selection),
         cmd!("edit.cut", "Cut", ["Edit"], Some("Cmd+X"), "{tracks?, start?, end?}", has_range, |e, p| cut_copy(e, p, true, "edit.cut")),
         cmd!(noundo "edit.copy", "Copy", ["Edit"], Some("Cmd+C"), "{tracks?, start?, end?}", has_range, |e, p| cut_copy(e, p, false, "edit.copy")),
         cmd!("edit.paste", "Paste", ["Edit"], Some("Cmd+V"), "{tracks?, at?}", has_clipboard, paste),
         cmd!("edit.clear", "Clear", ["Edit"], Some("Cmd+B"), "{tracks?, start?, end?}", has_range, clear),
-        cmd!("edit.cut_clip_gain", "Clip Gain", ["Edit", "Cut Special"], Some("Cmd+Ctrl+X"), "{}", has_range, |e, p| reset_clip_gain(
-            e,
-            p,
-            "edit.cut_clip_gain"
-        )),
+        cmd!("edit.cut_clip_gain", "Clip Gain", ["Edit", "Cut Special"], Some("Cmd+Ctrl+X"), "{}", has_range, |e, p| {
+            super::edit_more::copy_clip_gain(e, p)?;
+            reset_clip_gain(e, p, "edit.cut_clip_gain")
+        }),
         cmd!("edit.clear_clip_gain", "Clip Gain", ["Edit", "Clear Special"], Some("Cmd+Ctrl+B"), "{}", has_range, |e, p| reset_clip_gain(
             e,
             p,
@@ -103,7 +102,15 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("edit.trim_to_file_boundaries", "To File Boundaries", ["Edit", "Trim"], None, "{clips?}", has_selection, trim_to_file),
         cmd!("edit.trim_to_fill_selection", "To Fill Selection", ["Edit", "Trim"], None, "{}", has_range, trim_to_fill),
         cmd!("edit.mute_clips", "Mute", ["Edit"], Some("Cmd+M"), "{clips?}", has_selection, mute_clips),
-        cmd!("edit.copy_to_new_playlist", "New Playlist", ["Edit", "Copy Selection to..."], None, "{}", has_range, copy_to_new_playlist),
+        cmd!(
+            "edit.copy_to_new_playlist",
+            "New Playlist",
+            ["Edit", "Copy Selection to..."],
+            Some("Alt+Shift+Down"),
+            "{}",
+            has_range,
+            copy_to_new_playlist
+        ),
         cmd!(
             "edit.strip_silence",
             "Strip Silence",
@@ -125,7 +132,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("edit.fades_delete", "Delete", ["Edit", "Fades"], None, "{tracks?, start?, end?}", has_selection, fades_delete),
         cmd!("edit.fade_to_start", "Fade to Start", ["Edit", "Fades"], Some("Cmd+Ctrl+D"), "{}", has_selection, |e, p| fade_to(e, p, true)),
         cmd!("edit.fade_to_end", "Fade to End", ["Edit", "Fades"], Some("Cmd+Ctrl+G"), "{}", has_selection, |e, p| fade_to(e, p, false)),
-        cmd!("edit.nudge", "Nudge", [], Some("Plus/Minus"), "{direction: 1|-1, count?: n}", has_selection, nudge),
+        cmd!("edit.nudge", "Nudge", [], Some("Plus/Minus"), "{direction: 1|-1, count?: n, next?: bool (next larger value)}", has_selection, nudge),
         cmd!(noundo "edit.mode", "Edit Mode", [], Some("F1-F4"), "{mode: shuffle|slip|spot|grid|relative_grid}", always, |e, p| {
             let m = str_param(p, "mode").and_then(EditMode::from_id).ok_or_else(|| bad("edit.mode", "mode must be shuffle|slip|spot|grid|relative_grid"))?;
             e.session_mut().edit.edit_mode = m;
@@ -153,8 +160,28 @@ fn shuffle(s: &Session) -> bool {
     s.edit.edit_mode == EditMode::Shuffle
 }
 
+fn has_last_selection(e: &Engine) -> std::result::Result<(), String> {
+    if e.last_selection.is_some() { Ok(()) } else { Err("no previous selection to restore".into()) }
+}
+
+/// Remember the selection `before` had when a command changed it, for Restore Last Selection.
+pub(crate) fn remember_selection(e: &mut Engine, before: &Session) {
+    let (old, new) = (&before.edit, &e.session().edit);
+    if old.selection == new.selection && old.selected_tracks == new.selected_tracks {
+        return;
+    }
+    e.last_selection = Some((old.selection, old.selected_tracks.clone()));
+}
+
+/// Swaps in the previous selection; `remember_selection` then keeps the one replaced, so
+/// invoking it again goes back.
 fn restore_selection(e: &mut Engine, _: &Value) -> Result<Value> {
-    Ok(json!({"selection": e.session().edit.selection}))
+    let (range, mut tracks) = e.last_selection.clone().ok_or_else(|| bad("edit.restore_last_selection", "no previous selection to restore"))?;
+    tracks.retain(|t| e.session().track(*t).is_some());
+    let ed = &mut e.session_mut().edit;
+    ed.selection = range;
+    ed.selected_tracks = tracks;
+    Ok(json!({"selection": range}))
 }
 
 fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
@@ -429,20 +456,25 @@ fn scale_selection(e: &mut Engine, f: f64) -> Result<Value> {
     Ok(json!({"selection": s.edit.selection}))
 }
 
+/// Adds the nearest track above (`dir` < 0) or below the selected ones that the Edit window shows.
 fn extend_tracks(e: &mut Engine, dir: i64) -> Result<Value> {
-    let s = e.session_mut();
+    let s = e.session();
+    let shown = |t: &&soundcraft_model::Track| !t.hidden && t.folder.and_then(|f| s.track(f)).is_none_or(|f| f.folder_open);
     let idxs: Vec<usize> = s.edit.selected_tracks.iter().filter_map(|t| s.track_index(*t)).collect();
-    let next = if dir < 0 { idxs.iter().min().and_then(|i| i.checked_sub(1)) } else { idxs.iter().max().map(|i| i + 1) };
-    if let Some(t) = next.and_then(|i| s.tracks.get(i)).map(|t| t.id) {
+    let next = match (idxs.iter().min(), idxs.iter().max()) {
+        (Some(&top), _) if dir < 0 => s.tracks.iter().take(top).rev().find(shown),
+        (_, Some(&bottom)) if dir > 0 => s.tracks.iter().skip(bottom + 1).find(shown),
+        (None, _) => s.tracks.iter().find(shown),
+        _ => None,
+    }
+    .map(|t| t.id);
+    let s = e.session_mut();
+    if let Some(t) = next {
         if dir < 0 {
             s.edit.selected_tracks.insert(0, t);
         } else {
             s.edit.selected_tracks.push(t);
         }
-    } else if idxs.is_empty()
-        && let Some(t) = s.tracks.first()
-    {
-        s.edit.selected_tracks.push(t.id);
     }
     Ok(json!({"tracks": s.edit.selected_tracks}))
 }
@@ -591,13 +623,13 @@ fn trim_to_file(e: &mut Engine, p: &Value) -> Result<Value> {
     let s = e.session_mut();
     let mut n = 0;
     for id in ids {
-        let frames =
-            s.find_clip(id).and_then(|(_, c)| c.source()).and_then(|src| s.source(src)).map(|src| i64::try_from(src.frames).unwrap_or(i64::MAX));
-        if let (Some(frames), Some(c)) = (frames, s.find_clip_mut(id)) {
+        if let Some((frames, lo, hi)) = trim_limits(s, id)
+            && let Some(c) = s.find_clip_mut(id)
+        {
             let off = c.source_offset();
             let new_start = c.start - off;
-            c.trim_start_to(new_start);
-            c.trim_end_to(new_start + frames);
+            c.trim_start_to(new_start.max(lo));
+            c.trim_end_to((new_start + frames).min(hi));
             n += 1;
         }
     }
@@ -610,16 +642,29 @@ fn trim_to_fill(e: &mut Engine, p: &Value) -> Result<Value> {
     let s = e.session_mut();
     let mut n = 0;
     for id in ids {
-        let frames =
-            s.find_clip(id).and_then(|(_, c)| c.source()).and_then(|src| s.source(src)).map(|src| i64::try_from(src.frames).unwrap_or(i64::MAX));
-        if let (Some(frames), Some(c)) = (frames, s.find_clip_mut(id)) {
+        if let Some((frames, lo, hi)) = trim_limits(s, id)
+            && let Some(c) = s.find_clip_mut(id)
+        {
             let file_start = c.start - c.source_offset();
-            c.trim_start_to(r.start.max(file_start));
-            c.trim_end_to(r.end.min(file_start + frames));
+            c.trim_start_to(r.start.max(file_start).max(lo));
+            c.trim_end_to(r.end.min(file_start + frames).min(hi));
             n += 1;
         }
     }
     Ok(json!({"trimmed": n}))
+}
+
+/// How far a trim may extend an audio clip: its source length in frames, and the earliest
+/// start and latest end before it would run over the clip before or after it on the playlist
+/// (an extension never overwrites, like the trim tool). An overlap the clip already has with
+/// a neighbour (a crossfade) is kept rather than trimmed away.
+fn trim_limits(s: &Session, id: ClipId) -> Option<(Samples, Samples, Samples)> {
+    let (track, c) = s.find_clip(id)?;
+    let frames = c.source().and_then(|src| s.source(src)).map(|src| i64::try_from(src.frames).unwrap_or(i64::MAX))?;
+    let others = || s.track(track).into_iter().flat_map(|t| t.clips()).filter(|x| x.id != id);
+    let lo = others().filter(|x| x.start < c.start).map(|x| x.end()).max().map_or(Samples::MIN, |end| end.min(c.start));
+    let hi = others().filter(|x| x.start > c.start).map(|x| x.start).min().map_or(Samples::MAX, |start| start.max(c.end()));
+    Some((frames, lo, hi))
 }
 
 fn mute_clips(e: &mut Engine, p: &Value) -> Result<Value> {
@@ -665,7 +710,7 @@ fn strip_silence(e: &mut Engine, p: &Value) -> Result<Value> {
     let s = e.session_mut();
     let mut kept = 0;
     for t in &tracks {
-        kept += crate::io::strip_silence(s, *t, r, thr, min_len, pre, post);
+        kept += crate::io::strip_silence(s, *t, r, thr, min_len, pre, post)?;
     }
     Ok(json!({"clips": kept}))
 }
@@ -715,7 +760,8 @@ fn nudge(e: &mut Engine, p: &Value) -> Result<Value> {
     let dir = i64_or(p, "direction", 1).signum();
     let count = i64_or(p, "count", 1).clamp(1, 1000);
     let s = e.session();
-    let step = s.edit.nudge.step_samples(s.edit.selection.start, s.sample_rate, &s.tempo, s.frame_rate) * count * if dir == 0 { 1 } else { dir };
+    let value = if bool_or(p, "next", false) { s.edit.nudge.stepped(true) } else { s.edit.nudge };
+    let step = value.step_samples(s.edit.selection.start, s.sample_rate, &s.tempo, s.frame_rate) * count * if dir == 0 { 1 } else { dir };
     let ids = clip_ids_param(e, p);
     let s = e.session_mut();
     let n = if ids.is_empty() { 0 } else { ops::move_clips(s, &ids, step, None) };
@@ -760,7 +806,7 @@ fn consolidate(e: &mut Engine, p: &Value) -> Result<Value> {
     let midi = tracks.iter().filter(|&&t| crate::edit::consolidate_midi(e.session_mut(), t, r)).count();
     let mut n = 0;
     for t in tracks {
-        if crate::io::consolidate(e, t, r)? {
+        if crate::io::consolidate(e, "edit.consolidate", t, r)? {
             n += 1;
         }
     }
@@ -828,5 +874,75 @@ mod tests {
         let ClipContent::Midi { sequence } = &clips[1].content else { panic!("not MIDI") };
         assert_eq!(sequence.notes, vec![note(1, 1, 62), note(7, 1, 65)]);
         assert_eq!(sequence.ctrls, vec![soundcraft_midi::CtrlEvent { tick: 6 * soundcraft_time::TICKS_PER_QUARTER, ..cc }]);
+    }
+
+    /// A 60,000-frame source with `clips` placed on one track as (start, length, source offset).
+    fn trim_session(clips: &[(Samples, Samples, Samples)]) -> (Engine, TrackId, Vec<ClipId>) {
+        use soundcraft_model::{ChannelFormat, Clip, TrackKind};
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        let buf = soundcraft_audio_io::AudioBuffer { sample_rate: s.sample_rate.hz(), channels: vec![vec![0.25; 60_000]] };
+        let src = crate::io::add_source(&mut s, "src", buf, None, soundcraft_audio_io::FileFormat::Wav);
+        let mut ids = Vec::new();
+        for &(start, len, off) in clips {
+            let id = s.new_clip_id();
+            ops::place_clip(&mut s, t, Clip::audio(id, "c", src, off, start, len));
+            ids.push(id);
+        }
+        (Engine::new(s), t, ids)
+    }
+
+    fn bounds(e: &Engine, t: TrackId) -> Vec<(Samples, Samples, Samples)> {
+        e.session().track(t).unwrap().clips().iter().map(|c| (c.start, c.end(), c.source_offset())).collect()
+    }
+
+    #[test]
+    fn trim_to_file_boundaries_stops_at_the_neighbours() {
+        let (mut e, t, ids) = trim_session(&[(0, 10_000, 0), (20_000, 10_000, 20_000), (40_000, 5_000, 0)]);
+        e.execute("edit.trim_to_file_boundaries", &json!({"clips": [ids[1].0]})).unwrap();
+        assert_eq!(bounds(&e, t), vec![(0, 10_000, 0), (10_000, 40_000, 10_000), (40_000, 45_000, 0)]);
+    }
+
+    #[test]
+    fn trim_to_fill_selection_stops_at_the_neighbours() {
+        let (mut e, t, ids) = trim_session(&[(0, 10_000, 0), (20_000, 10_000, 20_000), (40_000, 5_000, 0)]);
+        e.execute("edit.trim_to_fill_selection", &json!({"clips": [ids[1].0], "start": 5_000, "end": 45_000})).unwrap();
+        assert_eq!(bounds(&e, t), vec![(0, 10_000, 0), (10_000, 40_000, 10_000), (40_000, 45_000, 0)]);
+    }
+
+    #[test]
+    fn trims_without_neighbours_expand_fully() {
+        let (mut e, t, ids) = trim_session(&[(20_000, 10_000, 20_000)]);
+        e.execute("edit.trim_to_file_boundaries", &json!({"clips": [ids[0].0]})).unwrap();
+        assert_eq!(bounds(&e, t), vec![(0, 60_000, 0)]);
+        let (mut e, t, ids) = trim_session(&[(20_000, 10_000, 20_000)]);
+        e.execute("edit.trim_to_fill_selection", &json!({"clips": [ids[0].0], "start": 5_000, "end": 45_000})).unwrap();
+        assert_eq!(bounds(&e, t), vec![(5_000, 45_000, 5_000)]);
+    }
+
+    #[test]
+    fn trim_to_file_boundaries_keeps_an_existing_crossfade() {
+        let (mut e, t, ids) = trim_session(&[(0, 10_000, 0), (10_000, 10_000, 10_000)]);
+        e.execute("edit.fades_create", &json!({"tracks": [t], "start": 9_500, "end": 10_500})).unwrap();
+        let faded = bounds(&e, t);
+        assert_eq!((faded[0].1, faded[1].0), (10_500, 9_500), "the fixture needs an overlapping crossfade");
+        e.execute("edit.trim_to_file_boundaries", &json!({"clips": [ids[1].0]})).unwrap();
+        assert_eq!(bounds(&e, t), vec![faded[0], (9_500, 60_000, 9_500)]);
+    }
+
+    #[test]
+    fn restore_last_selection_swaps_back_to_the_previous_range_and_tracks() {
+        let mut e = Engine::default();
+        assert!(e.execute("edit.restore_last_selection", &json!({})).is_err(), "nothing to restore yet");
+        let ids = e.execute("track.new", &json!({"count": 2})).unwrap()["tracks"].clone();
+        e.execute("edit.select", &json!({"tracks": [ids[0]], "start": 1_000, "end": 4_000})).unwrap();
+        e.execute("edit.select", &json!({"tracks": [ids[1]], "start": 7_000, "end": 9_000})).unwrap();
+        let tracks = |e: &Engine| e.session().edit.selected_tracks.iter().map(|t| t.0).collect::<Vec<_>>();
+        e.execute("edit.restore_last_selection", &json!({})).unwrap();
+        assert_eq!(e.session().edit.selection, soundcraft_time::Range::new(1_000, 4_000));
+        assert_eq!(json!(tracks(&e)), json!([ids[0]]));
+        e.execute("edit.restore_last_selection", &json!({})).unwrap();
+        assert_eq!(e.session().edit.selection, soundcraft_time::Range::new(7_000, 9_000));
+        assert_eq!(json!(tracks(&e)), json!([ids[1]]));
     }
 }
