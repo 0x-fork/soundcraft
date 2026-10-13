@@ -153,7 +153,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "track.designate_target_playlist",
             "Designate as Target Playlist",
             ["Track"],
-            None,
+            Some("Cmd+Shift+Right"),
             "{tracks?, index?} — the active playlist (or `index`) becomes the target for Copy/Move Selection to",
             has_selection,
             designate_target
@@ -162,7 +162,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "track.show_target_playlist",
             "Show Target Playlist",
             ["Track"],
-            None,
+            Some("Shift+Right"),
             "{tracks?} — makes the target playlist the main playlist",
             has_selection,
             show_target

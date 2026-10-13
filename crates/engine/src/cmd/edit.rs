@@ -102,7 +102,15 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("edit.trim_to_file_boundaries", "To File Boundaries", ["Edit", "Trim"], None, "{clips?}", has_selection, trim_to_file),
         cmd!("edit.trim_to_fill_selection", "To Fill Selection", ["Edit", "Trim"], None, "{}", has_range, trim_to_fill),
         cmd!("edit.mute_clips", "Mute", ["Edit"], Some("Cmd+M"), "{clips?}", has_selection, mute_clips),
-        cmd!("edit.copy_to_new_playlist", "New Playlist", ["Edit", "Copy Selection to..."], None, "{}", has_range, copy_to_new_playlist),
+        cmd!(
+            "edit.copy_to_new_playlist",
+            "New Playlist",
+            ["Edit", "Copy Selection to..."],
+            Some("Alt+Shift+Down"),
+            "{}",
+            has_range,
+            copy_to_new_playlist
+        ),
         cmd!(
             "edit.strip_silence",
             "Strip Silence",
@@ -124,7 +132,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("edit.fades_delete", "Delete", ["Edit", "Fades"], None, "{tracks?, start?, end?}", has_selection, fades_delete),
         cmd!("edit.fade_to_start", "Fade to Start", ["Edit", "Fades"], Some("Cmd+Ctrl+D"), "{}", has_selection, |e, p| fade_to(e, p, true)),
         cmd!("edit.fade_to_end", "Fade to End", ["Edit", "Fades"], Some("Cmd+Ctrl+G"), "{}", has_selection, |e, p| fade_to(e, p, false)),
-        cmd!("edit.nudge", "Nudge", [], Some("Plus/Minus"), "{direction: 1|-1, count?: n}", has_selection, nudge),
+        cmd!("edit.nudge", "Nudge", [], Some("Plus/Minus"), "{direction: 1|-1, count?: n, next?: bool (next larger value)}", has_selection, nudge),
         cmd!(noundo "edit.mode", "Edit Mode", [], Some("F1-F4"), "{mode: shuffle|slip|spot|grid|relative_grid}", always, |e, p| {
             let m = str_param(p, "mode").and_then(EditMode::from_id).ok_or_else(|| bad("edit.mode", "mode must be shuffle|slip|spot|grid|relative_grid"))?;
             e.session_mut().edit.edit_mode = m;
@@ -448,20 +456,25 @@ fn scale_selection(e: &mut Engine, f: f64) -> Result<Value> {
     Ok(json!({"selection": s.edit.selection}))
 }
 
+/// Adds the nearest track above (`dir` < 0) or below the selected ones that the Edit window shows.
 fn extend_tracks(e: &mut Engine, dir: i64) -> Result<Value> {
-    let s = e.session_mut();
+    let s = e.session();
+    let shown = |t: &&soundcraft_model::Track| !t.hidden && t.folder.and_then(|f| s.track(f)).is_none_or(|f| f.folder_open);
     let idxs: Vec<usize> = s.edit.selected_tracks.iter().filter_map(|t| s.track_index(*t)).collect();
-    let next = if dir < 0 { idxs.iter().min().and_then(|i| i.checked_sub(1)) } else { idxs.iter().max().map(|i| i + 1) };
-    if let Some(t) = next.and_then(|i| s.tracks.get(i)).map(|t| t.id) {
+    let next = match (idxs.iter().min(), idxs.iter().max()) {
+        (Some(&top), _) if dir < 0 => s.tracks.iter().take(top).rev().find(shown),
+        (_, Some(&bottom)) if dir > 0 => s.tracks.iter().skip(bottom + 1).find(shown),
+        (None, _) => s.tracks.iter().find(shown),
+        _ => None,
+    }
+    .map(|t| t.id);
+    let s = e.session_mut();
+    if let Some(t) = next {
         if dir < 0 {
             s.edit.selected_tracks.insert(0, t);
         } else {
             s.edit.selected_tracks.push(t);
         }
-    } else if idxs.is_empty()
-        && let Some(t) = s.tracks.first()
-    {
-        s.edit.selected_tracks.push(t.id);
     }
     Ok(json!({"tracks": s.edit.selected_tracks}))
 }
@@ -747,7 +760,8 @@ fn nudge(e: &mut Engine, p: &Value) -> Result<Value> {
     let dir = i64_or(p, "direction", 1).signum();
     let count = i64_or(p, "count", 1).clamp(1, 1000);
     let s = e.session();
-    let step = s.edit.nudge.step_samples(s.edit.selection.start, s.sample_rate, &s.tempo, s.frame_rate) * count * if dir == 0 { 1 } else { dir };
+    let value = if bool_or(p, "next", false) { s.edit.nudge.stepped(true) } else { s.edit.nudge };
+    let step = value.step_samples(s.edit.selection.start, s.sample_rate, &s.tempo, s.frame_rate) * count * if dir == 0 { 1 } else { dir };
     let ids = clip_ids_param(e, p);
     let s = e.session_mut();
     let n = if ids.is_empty() { 0 } else { ops::move_clips(s, &ids, step, None) };

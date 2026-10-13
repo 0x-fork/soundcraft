@@ -120,6 +120,16 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             let _ = app.run("markers.add", json!({}));
             true
         }
+        // Shift+=/- step the Grid value and Alt+Shift+=/- the Nudge value; macOS sends Alt+Shift+= as =, not +.
+        Key::Plus | Key::Equals | Key::Minus if m.shift && !m.command && !m.ctrl && app.ui.window == MainWindow::Edit => {
+            let step = if key == Key::Minus { -1 } else { 1 };
+            let _ = app.run(if m.alt { "view.nudge" } else { "view.grid" }, json!({"step": step}));
+            true
+        }
+        Key::F12 if plain => {
+            let _ = app.run("transport.record", json!({}));
+            true
+        }
         Key::F1 | Key::F2 | Key::F3 | Key::F4 if plain => {
             let mode = match key {
                 Key::F1 => "shuffle",
@@ -147,11 +157,12 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             let _ = app.run("edit.nudge", json!({"direction": dir}));
             true
         }
-        Key::Tab if plain || m.alt => {
+        // Alt+Tab goes back; off macOS the desktop takes Alt+Tab, so Ctrl+Tab does. Cmd+Alt+Tab is Tab to Transient.
+        Key::Tab if plain || (m.alt && !m.command) || (!mac && m.ctrl && !m.alt) => {
             // Tab to next clip boundary (or transient when enabled).
             let s = app.engine.session();
             let at = s.edit.selection.start;
-            let back = m.alt;
+            let back = !plain;
             if s.edit.tab_to_transient
                 && !back
                 && let Some(t) = s.edit.selected_tracks.first().copied()
@@ -187,7 +198,15 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             true
         }
         // Commands Keyboard Focus: single-key editing (Edit window only).
-        k if plain && app.ui.window == MainWindow::Edit && app.engine.session().edit.keyboard_focus == "commands" && commands_focus(app, k) => true,
+        k if !m.command
+            && !m.alt
+            && !m.ctrl
+            && app.ui.window == MainWindow::Edit
+            && app.engine.session().edit.keyboard_focus == "commands"
+            && commands_focus(app, k, m.shift) =>
+        {
+            true
+        }
         Key::R | Key::T if plain => {
             // Zoom out / in on the timeline (Commands Focus style).
             let id = if key == Key::T { "view.zoom_in" } else { "view.zoom_out" };
@@ -199,13 +218,26 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
 }
 
 /// Single-key commands. Returns true when `key` was handled.
-fn commands_focus(app: &mut SoundApp, key: Key) -> bool {
+fn commands_focus(app: &mut SoundApp, key: Key, shift: bool) -> bool {
     let id = match key {
+        Key::Z if shift => "edit.redo",
+        Key::P if shift => "edit.extend_selection_up",
+        Key::Semicolon | Key::Colon if shift => "edit.extend_selection_down",
+        _ if shift => return false,
         Key::A => "edit.trim_start_to_insertion",
         Key::S => "edit.trim_end_to_insertion",
         Key::D => "edit.fade_to_start",
         Key::G => "edit.fade_to_end",
         Key::F => "edit.fades_create",
+        Key::Comma | Key::Period | Key::M | Key::Slash => {
+            let direction = if matches!(key, Key::Period | Key::Slash) { 1 } else { -1 };
+            let _ = app.run("edit.nudge", json!({"direction": direction, "next": matches!(key, Key::M | Key::Slash)}));
+            return true;
+        }
+        Key::Num0 => "edit.timeline_to_selection",
+        Key::O => "edit.selection_to_timeline",
+        Key::OpenBracket => "transport.play_selection",
+        Key::CloseBracket => "edit.play_timeline",
         Key::B => "edit.separate",
         Key::X => "edit.cut",
         Key::C => "edit.copy",

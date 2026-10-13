@@ -178,7 +178,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "edit.copy_to_target_playlist",
             "Target Playlist",
             ["Edit", "Copy Selection to..."],
-            None,
+            Some("Alt+Shift+Up"),
             "{tracks?, start?, end?} — copies the selection into each track's target playlist",
             has_range,
             |e, p| to_playlist(e, p, Dest::Target, false, "edit.copy_to_target_playlist")
@@ -196,14 +196,20 @@ pub fn specs() -> Vec<CommandSpec> {
             "edit.move_to_target_playlist",
             "Target Playlist",
             ["Edit", "Move Selection to..."],
-            None,
+            Some("Alt+Shift+T"),
             "{tracks?, start?, end?} — copies to the target playlist and clears it from the main",
             has_range,
             |e, p| to_playlist(e, p, Dest::Target, true, "edit.move_to_target_playlist")
         ),
-        cmd!("edit.move_to_new_playlist", "New Playlist", ["Edit", "Move Selection to..."], None, "{tracks?, start?, end?}", has_range, |e, p| {
-            to_playlist(e, p, Dest::New, true, "edit.move_to_new_playlist")
-        }),
+        cmd!(
+            "edit.move_to_new_playlist",
+            "New Playlist",
+            ["Edit", "Move Selection to..."],
+            Some("Alt+Shift+N"),
+            "{tracks?, start?, end?}",
+            has_range,
+            |e, p| to_playlist(e, p, Dest::New, true, "edit.move_to_new_playlist")
+        ),
         cmd!(
             "edit.move_to_duplicate_playlist",
             "Duplicate of Main Playlist",
