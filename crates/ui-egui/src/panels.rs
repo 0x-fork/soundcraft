@@ -6,6 +6,28 @@ use egui::{Align2, Color32, Rect, Sense, Stroke, Ui, pos2, vec2};
 use serde_json::json;
 use soundcraft_model::{ClipId, SourceId};
 
+/// Drag a Tracks list row to reorder the tracks: a line marks the gap it will land in.
+fn drag_track(app: &mut SoundApp, ui: &Ui, row: Rect, id: u64, dropped: bool) {
+    let s = app.engine.session();
+    let (Some(from), Some(p)) = (s.track_index(soundcraft_model::TrackId(id)), ui.ctx().pointer_latest_pos()) else { return };
+    let spacing = ui.spacing().item_spacing.y;
+    let pitch = row.height() + spacing;
+    let gap = (from as f32 + ((p.y - row.center().y) / pitch).floor() + 1.0).clamp(0.0, s.tracks.len() as f32);
+    if dropped {
+        let to = gap as usize;
+        let to = if to > from { to - 1 } else { to };
+        if to != from {
+            let _ = app.run("track.move", json!({"track": id, "to": to}));
+        }
+    } else {
+        let y = row.min.y + (gap - from as f32) * pitch - spacing / 2.0;
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        ui.ctx()
+            .layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("track_list_reorder")))
+            .line_segment([pos2(row.min.x, y), pos2(row.max.x, y)], Stroke::new(2.0, Tokens::current().accent));
+    }
+}
+
 fn panel_header(ui: &mut Ui, title: &str) {
     let t = Tokens::current();
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
@@ -37,7 +59,7 @@ pub fn tracks_and_groups(app: &mut SoundApp, ui: &mut Ui) {
         egui::ScrollArea::vertical().id_salt("tracks_scroll").max_height(total * 0.62).auto_shrink([false, false]).scroll_bar_visibility(hidden);
     let out = lists.show(ui, |ui| {
         for (id, name, shown, color, sel) in tracks {
-            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 17.0), Sense::click());
+            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 17.0), Sense::click_and_drag());
             if sel {
                 ui.painter().rect_filled(r, 0.0, t.row_selected);
             }
@@ -51,6 +73,9 @@ pub fn tracks_and_groups(app: &mut SoundApp, ui: &mut Ui) {
             ui.painter().text(pos2(r.min.x + 30.0, r.center().y), Align2::LEFT_CENTER, &name, regular(11.5), if shown { t.text } else { t.text_dim });
             if resp.clicked() {
                 crate::edit_window::click_track(app, soundcraft_model::TrackId(id), ui.input(|i| i.modifiers), |_, _| true);
+            }
+            if resp.dragged() || resp.drag_stopped() {
+                drag_track(app, ui, r, id, resp.drag_stopped());
             }
         }
     });
