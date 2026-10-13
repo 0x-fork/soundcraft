@@ -354,6 +354,10 @@ fn commands_focus(app: &mut SoundApp, key: Key, shift: bool) -> bool {
             tab_clip(app, key == Key::L);
             return true;
         }
+        Key::E => {
+            crate::edit_window::zoom_toggle(app);
+            return true;
+        }
         _ => return false,
     };
     let _ = app.run(id, json!({}));
