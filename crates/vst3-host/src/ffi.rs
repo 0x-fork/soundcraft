@@ -1530,6 +1530,48 @@ fn rect_size(r: &sb::ViewRect) -> (f64, f64) {
     (f64::from(w), f64::from(h))
 }
 
+/// Normalized values the host set (automation, the session) that the edit controller hasn't been
+/// told yet, one slot per parameter. The audio thread fills a slot without locking or allocating;
+/// [`EditorLink::save_state`] sends what is waiting before it reads the controller's state, so
+/// values the controller keeps in its own state are saved as set.
+pub(crate) struct ControllerPending {
+    ids: Vec<u32>,
+    slots: Vec<AtomicU64>,
+}
+
+/// An empty slot: a NaN bit pattern, which `set` never stores.
+const NO_VALUE: u64 = u64::MAX;
+
+impl ControllerPending {
+    pub fn new(ids: &[u32]) -> ControllerPending {
+        ControllerPending { ids: ids.to_vec(), slots: ids.iter().map(|_| AtomicU64::new(NO_VALUE)).collect() }
+    }
+
+    /// Notes the value of parameter `i` (index into the plugin's parameter list).
+    pub fn set(&self, i: usize, n: f64) {
+        if let Some(s) = self.slots.get(i)
+            && n.is_finite()
+        {
+            s.store(n.clamp(0.0, 1.0).to_bits(), Ordering::Release);
+        }
+    }
+
+    /// Forgets every waiting value (a loaded state replaces them).
+    pub fn clear(&self) {
+        for s in &self.slots {
+            s.store(NO_VALUE, Ordering::Release);
+        }
+    }
+
+    /// Takes the waiting values as `(ParamID, normalized)`.
+    fn take(&self) -> impl Iterator<Item = (u32, f64)> + '_ {
+        self.ids.iter().zip(&self.slots).filter_map(|(&id, s)| {
+            let b = s.swap(NO_VALUE, Ordering::AcqRel);
+            (b != NO_VALUE).then(|| (id, f64::from_bits(b)))
+        })
+    }
+}
+
 #[derive(Default)]
 struct EditorInner {
     /// `None` once the instance is gone.
@@ -1539,6 +1581,8 @@ struct EditorInner {
     view: Option<ComPtr<sb::IPlugView>>,
     frame: Option<ComWrapper<PlugFrame>>,
     window: Option<window::HostWindow>,
+    /// Host-set values for the controller, sent before its state is read.
+    pending: Option<Arc<ControllerPending>>,
 }
 
 /// The link between an instance and its editor and state handles. The instance may process on
@@ -1653,6 +1697,13 @@ impl EditorLink {
     pub fn save_state(&self) -> Option<Vec<u8>> {
         let g = self.lock();
         let component = g.component.as_ref()?;
+        if let (Some(c), Some(p)) = (&g.controller, &g.pending) {
+            for (id, n) in p.take() {
+                // SAFETY: valid controller (cleared under this lock before the instance
+                // terminates); UI thread, as `getState` below.
+                unsafe { c.setParamNormalized(id, n) };
+            }
+        }
         // SAFETY: valid component (the instance clears it under this lock before it terminates);
         // the stream lives in `read_state` for the whole call.
         let comp = Instance::read_state(|s| unsafe { component.getState(s) })?;
@@ -1668,6 +1719,11 @@ impl EditorLink {
         out.extend_from_slice(&u32::try_from(ctrl.len()).ok()?.to_le_bytes());
         out.extend_from_slice(&ctrl);
         Some(out)
+    }
+
+    /// Shares the instance's table of host-set values with the state reader.
+    pub fn set_controller_pending(&self, p: Arc<ControllerPending>) {
+        self.lock().pending = Some(p);
     }
 
     /// Closes the editor. Main thread only (no-op elsewhere).

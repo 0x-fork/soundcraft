@@ -1,6 +1,6 @@
 //! `Vst3Plugin`: a loaded VST3 instance behind the safe `soundcraft_dsp::Plugin` trait.
 
-use crate::ffi::{BusBuffers, EVENT_CAP, EditorLink, HostContext, Instance, NoteEvent, PARAM_QUEUE_CAP};
+use crate::ffi::{BusBuffers, ControllerPending, EVENT_CAP, EditorLink, HostContext, Instance, NoteEvent, PARAM_QUEUE_CAP};
 use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, Unit};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -33,6 +33,10 @@ pub struct Vst3Plugin {
     values: Vec<f32>,
     /// Normalized values waiting for the next block (coalesced per id; bounded).
     pending: Vec<(u32, f64)>,
+    /// Normalized values the host set that the edit controller hasn't been told yet, shared with
+    /// the state link, which tells it before reading its state on the UI thread. `set_param` may
+    /// run on the audio thread, so it never calls the controller itself.
+    controller_pending: Arc<ControllerPending>,
     /// Pending notes, kept sorted by time. Never grows past `EVENT_CAP`.
     notes: Vec<NoteEvent>,
     inputs: BusBuffers,
@@ -76,6 +80,7 @@ impl Vst3Plugin {
             info,
             values: Vec::with_capacity(ids.len()),
             pending: Vec::with_capacity(ids.len().min(PARAM_QUEUE_CAP)),
+            controller_pending: Arc::new(ControllerPending::new(&ids)),
             notes: Vec::with_capacity(EVENT_CAP),
             inputs: BusBuffers::new(&[], 0),
             outputs: BusBuffers::new(&[], 0),
@@ -99,6 +104,7 @@ impl Vst3Plugin {
             })
             .collect();
         p.values = values;
+        p.inst.state_link().set_controller_pending(Arc::clone(&p.controller_pending));
         p
     }
 
@@ -145,6 +151,7 @@ impl Vst3Plugin {
             }
         }
         self.pending.clear();
+        self.controller_pending.clear();
     }
 
     /// Inserts keeping the queue time-sorted; drops the event when the queue is full (never
@@ -211,6 +218,7 @@ impl Plugin for Vst3Plugin {
         } else if self.pending.len() < self.pending.capacity() {
             self.pending.push((vid, n));
         }
+        self.controller_pending.set(i, n);
         true
     }
 
