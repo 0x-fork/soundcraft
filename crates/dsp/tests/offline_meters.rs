@@ -66,6 +66,21 @@ fn loudness_full_scale_mono_and_44k() {
 }
 
 #[test]
+fn loudness_stays_bounded_at_low_sample_rates() {
+    // The K-weighting shelf corner (~1.7 kHz) sits at or above Nyquist below ~3.4 kHz; the
+    // filter must stay stable there instead of reading hundreds of LUFS (issue #240).
+    for sr in [1000.0f32, 1200.0, 1600.0, 2000.0, 3000.0, 3400.0, 8000.0, 48_000.0] {
+        let len = sr as usize;
+        let mut m = LoudnessMeter::new(sr, 1);
+        assert_eq!(m.sample_rate(), sr);
+        m.process(&[sine(100.0, 0.5, sr, len)], len);
+        for level in [m.integrated_lufs(), m.momentary_lufs(), m.short_term_lufs()] {
+            assert!(level.is_finite() && (-30.0..=0.0).contains(&level), "{sr}: {level}");
+        }
+    }
+}
+
+#[test]
 fn loudness_gating_ignores_silence() {
     let sr = 48_000.0;
     let mut x = sine(997.0, db_to_gain(-20.0), sr, 48_000 * 5);
