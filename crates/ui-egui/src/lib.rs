@@ -21,6 +21,7 @@ pub mod palette;
 pub mod panels;
 mod recent;
 pub mod recovery;
+pub mod sampler_window;
 pub mod score_editor;
 pub mod shortcuts;
 pub mod spot;
@@ -285,6 +286,9 @@ pub struct SoundApp {
     pub extra: extra_windows::ExtraState,
     pub palette: palette::PaletteState,
     pub synthetic: Vec<egui::Event>,
+    /// Where a dropped audio file loads into a track's sampler (last frame's rects).
+    pub sample_drop_targets: Vec<(egui::Rect, TrackId)>,
+    sample_reads: Vec<sampler_window::SampleRead>,
     synthetic_grace: u32,
     control_rx: Option<Receiver<ControlRequest>>,
     pending_shots: Vec<control::PendingShot>,
@@ -365,6 +369,8 @@ impl SoundApp {
             extra: extra_windows::ExtraState::default(),
             palette: palette::PaletteState::default(),
             synthetic: Vec::new(),
+            sample_drop_targets: Vec::new(),
+            sample_reads: Vec::new(),
             synthetic_grace: 0,
             control_rx: None,
             pending_shots: Vec::new(),
@@ -1171,6 +1177,7 @@ impl SoundApp {
             ctx.memory_mut(|m| m.reset_areas());
         }
         shortcuts::handle(self, &ctx);
+        self.sample_drop_targets.clear();
         if !self.native_menu_bar {
             menus::menu_bar(self, ui);
         }

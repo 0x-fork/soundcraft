@@ -25,7 +25,7 @@ mod more_util;
 mod options;
 mod plugin_state;
 mod query;
-mod sampler;
+pub(crate) mod sampler;
 mod setup_more;
 mod surround;
 mod track;

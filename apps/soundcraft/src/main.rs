@@ -49,9 +49,10 @@ impl eframe::App for App {
         if let Some(menu) = &mut self.2 {
             menu.sync(&self.0);
         }
-        // Files dropped on the window: sessions open, audio/MIDI import.
+        // Files dropped on the window: audio on an instrument track or a Sampler window loads
+        // the sampler; otherwise sessions open and audio/MIDI import.
         let dropped: Vec<String> =
-            ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_string_lossy().into_owned()).filter(|s| !s.is_empty()).collect());
+            self.0.take_dropped_files(ctx).iter().map(|f| f.path().to_string_lossy().into_owned()).filter(|s| !s.is_empty()).collect();
         for p in dropped {
             open_path(&mut self.0, &p);
         }
