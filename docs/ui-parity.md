@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (first interaction checklist against Pro Tools 2026.4.1) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (drag across checkboxes, #399) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
@@ -33,6 +33,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 | Scroll/zoom: wheel, trackpad pinch | 🟡 | Anchored trackpad zoom in open PRs #112, #137 |
 | Drag and drop: Clip List → tracks, files → tracks | ✅ macOS/Windows; 🟡 Wayland (PR #150) | |
 | Context menus (clip, track name, ruler, Clip List) | 🟡 | Clip and track menus exist; depth lower than Pro Tools'; Clip List delete (#4) |
+| Drag across checkboxes to check or uncheck several | ✅ | #399; every checkbox, as in the other Craft apps |
 
 ## Windows and panels
 
@@ -65,3 +66,4 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-10 | major | Created: tools, modes, shortcuts, windows and meters checklist against Pro Tools 2026.4.1 |
+| 2026-10-13 | minor | Drag across checkboxes (#399) |

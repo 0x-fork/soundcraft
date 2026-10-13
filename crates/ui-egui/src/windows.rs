@@ -111,7 +111,7 @@ fn automation(app: &mut SoundApp, ctx: &egui::Context) {
         for f in ["volume", "pan", "mute", "send level", "send pan", "send mute", "plugin"] {
             let id = format!("automation.enable.{}", f.replace(' ', "_"));
             let mut on = !app.engine.session().edit.flag(&format!("{id}.off"));
-            if ui.checkbox(&mut on, f).changed() {
+            if crate::widgets::checkbox(ui, &mut on, f).changed() {
                 app.engine.session_mut().edit.set_flag(&format!("{id}.off"), !on);
             }
         }
@@ -427,7 +427,7 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
             ui.end_row();
         });
         let mut dc = app.engine.session().edit.delay_compensation;
-        if ui.checkbox(&mut dc, "Delay compensation").changed() {
+        if crate::widgets::checkbox(ui, &mut dc, "Delay compensation").changed() {
             let _ = app.run("options.delay_compensation", json!({"value": dc}));
         }
         if ui.button("Reconnect audio device").clicked() {

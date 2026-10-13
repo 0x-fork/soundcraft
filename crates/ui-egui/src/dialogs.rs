@@ -335,7 +335,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                             ui.selectable_value(sample_rate, r, format!("{r} Hz"));
                         }
                     });
-                    ui.checkbox(demo, "Start from the demo session");
+                    crate::widgets::checkbox(ui, demo, "Start from the demo session");
                     if buttons(ui, "Create", enter) {
                         action = Some((
                             "session.new".into(),
@@ -360,7 +360,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                             }
                         });
                     });
-                    ui.checkbox(normalize, "Normalize to -0.1 dBFS");
+                    crate::widgets::checkbox(ui, normalize, "Normalize to -0.1 dBFS");
                     ui.label(
                         egui::RichText::new("Bounces the edit selection, or the whole session when nothing is selected.")
                             .small()
@@ -484,13 +484,13 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         ui.text_edit_singleline(name);
                     });
                     ui.horizontal(|ui| {
-                        ui.checkbox(edit, "Edit group");
-                        ui.checkbox(mix, "Mix group");
+                        crate::widgets::checkbox(ui, edit, "Edit group");
+                        crate::widgets::checkbox(ui, mix, "Mix group");
                     });
                     ui.label("Tracks");
                     egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
                         for (_, n, on) in members.iter_mut() {
-                            ui.checkbox(on, n.as_str());
+                            crate::widgets::checkbox(ui, on, n.as_str());
                         }
                     });
                     if buttons(ui, "OK", enter) {
@@ -525,7 +525,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         ui.add(egui::DragValue::new(bars_per_system).range(1..=16));
                         ui.end_row();
                     });
-                    ui.checkbox(show_track_names, "Show track names");
+                    crate::widgets::checkbox(ui, show_track_names, "Show track names");
                     if buttons(ui, "OK", enter) {
                         action = Some((
                             "file.score_setup".into(),
