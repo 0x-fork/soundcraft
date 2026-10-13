@@ -95,7 +95,8 @@ pub enum TrackHeight {
     Large,
     Jumbo,
     Extreme,
-    Fit,
+    /// Fit To Window: this many points.
+    Fit(u16),
 }
 
 impl TrackHeight {
@@ -118,7 +119,7 @@ impl TrackHeight {
             TrackHeight::Large => 132.0,
             TrackHeight::Jumbo => 220.0,
             TrackHeight::Extreme => 440.0,
-            TrackHeight::Fit => 88.0,
+            TrackHeight::Fit(points) => f32::from(points.max(16)),
         }
     }
     pub fn label(self) -> &'static str {
@@ -131,7 +132,7 @@ impl TrackHeight {
             TrackHeight::Large => "large",
             TrackHeight::Jumbo => "jumbo",
             TrackHeight::Extreme => "extreme",
-            TrackHeight::Fit => "fit to window",
+            TrackHeight::Fit(_) => "fit to window",
         }
     }
     pub fn from_id(s: &str) -> Option<TrackHeight> {
