@@ -547,11 +547,8 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
     if refresh {
         audio_systems(ctx, true);
     }
-    if apply {
-        app.ui.audio = draft.clone();
-        if let Err(e) = app.apply_audio_config() {
-            app.ui.status = e;
-        }
+    if apply && let Err(e) = app.apply_audio_config(draft.clone()) {
+        app.ui.status = e;
     }
     if open {
         ctx.data_mut(|d| d.insert_temp(draft_id, draft));
@@ -588,8 +585,7 @@ pub fn audio_device_command(app: &mut SoundApp, p: &serde_json::Value) -> Result
         }
     }
     if changed {
-        app.ui.audio = cfg;
-        app.apply_audio_config()?;
+        app.apply_audio_config(cfg)?;
     }
     let device = app.player.as_ref().map(|pl| {
         json!({"name": pl.device_name, "sample_rate": pl.device_rate, "channels": pl.device_channels, "buffer_size": pl.device_buffer, "silent": pl.silent})

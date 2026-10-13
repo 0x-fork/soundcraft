@@ -558,13 +558,15 @@ impl SoundApp {
             || (self.recorder.is_some() && self.engine.session().tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm))
     }
 
-    /// Reopens the audio devices with `ui.audio` (Setup › Playback Engine › Apply), keeping the
-    /// transport position. Plugin instances and their editors are recreated with the new player.
-    /// Refused while recording, which would lose the take.
-    pub fn apply_audio_config(&mut self) -> Result<(), String> {
+    /// Reopens the audio devices with `cfg` (Setup › Playback Engine › Apply), keeping the
+    /// transport position, and keeps it as `ui.audio`. Plugin instances and their editors are
+    /// recreated with the new player. Refused while recording, which would lose the take; `ui.audio`
+    /// then stays the configuration of the open device.
+    pub fn apply_audio_config(&mut self, cfg: soundcraft_playback::AudioConfig) -> Result<(), String> {
         if self.engine.transport.recording {
             return Err("stop recording before changing the audio device".into());
         }
+        self.ui.audio = cfg;
         let at = self.position();
         if let Some(p) = &self.player {
             p.stop();
