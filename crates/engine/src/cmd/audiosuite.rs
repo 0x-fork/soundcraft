@@ -136,11 +136,16 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
 /// whatever was there, like Pro Tools' Signal Generator.
 fn generate(e: &mut Engine, p: &Value, name: &str, params: &[(String, f32)], r: Range) -> Result<Value> {
     let sr = e.session().sample_rate;
+    let tracks = tracks_param(e, "audiosuite.process", p)?;
+    // Refuse before generating anything, rather than cut the clip short.
+    for t in tracks.iter().filter_map(|t| e.session().track(*t)).filter(|t| t.kind == TrackKind::Audio) {
+        crate::io::refuse_longer(e.session(), "audiosuite.process", &t.name, "generate on", r.len(), crate::io::render_limit(t.channels()))?;
+    }
     let mut clips = Vec::new();
-    for track in tracks_param(e, "audiosuite.process", p)? {
+    for track in tracks {
         let Some(t) = e.session().track(track).filter(|t| t.kind == TrackKind::Audio) else { continue };
         let channels = t.channels().max(1);
-        let frames = usize::try_from(r.len()).unwrap_or(0).min(soundcraft_mix::MAX_RENDER_SAMPLES / channels);
+        let frames = usize::try_from(r.len()).unwrap_or(0).min(crate::io::render_limit(channels));
         let clip_name = format!("{}-{}", t.name, short(name));
         let mut audio = vec![vec![0.0; frames]; channels];
         apply(name, params, &mut audio, sr.as_f64() as f32)?;
