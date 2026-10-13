@@ -251,6 +251,9 @@ impl DelayLine {
         }
         self.idx = (start + frames) % self.len.max(1);
     }
+    fn clear(&mut self) {
+        self.bufs.iter_mut().for_each(|b| b.fill(0.0));
+    }
 }
 
 /// Clip Effects: an EQ and a compressor per clip, configured from `edit.values`
@@ -481,6 +484,9 @@ impl MixEngine {
                 i.plugin.reset();
             }
             s.held.clear();
+            s.align.clear();
+            s.align_pre.clear();
+            s.out_extra.clear();
         }
         self.meters.clear();
         self.main_meter = StripMeter::default();
@@ -2361,6 +2367,27 @@ mod tests {
         s.edit.delay_compensation = false;
         let out = render_range(&s, Range::new(0, 8000), 512);
         assert_ne!(argmax(&out[0]), argmax(&out[1]));
+    }
+
+    /// A reset (stop, locate) must not leave the previous position's audio in the alignment delay.
+    #[test]
+    fn reset_clears_delay_compensation_history() {
+        let (mut s, t) = session_with_dc(0.5, 4800);
+        s.edit.click = false;
+        s.track_mut(t).unwrap().mixer.pan = vec![1.0];
+        let latent = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        let mut comp = Insert::new("compressor");
+        comp.params.insert("lookahead".into(), 5.0);
+        s.track_mut(latent).unwrap().mixer.inserts[0] = Some(comp);
+        let mut eng = MixEngine::new(48_000.0, 512);
+        let mut out = vec![vec![0.0f32; 512]; 2];
+        for b in 0..9 {
+            eng.render(&s, b * 512, 512, &mut out);
+        }
+        assert!(eng.latency > 0 && out[1][500] > 0.3, "the fixture plays through the alignment delay");
+        eng.reset();
+        eng.render(&s, 1_000_000, 512, &mut out);
+        assert!(out.iter().flatten().all(|x| *x == 0.0), "old aligned audio after a reset");
     }
 
     fn impulse_at(ch: &[f32]) -> Vec<usize> {
