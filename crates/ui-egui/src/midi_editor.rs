@@ -4,7 +4,7 @@ use crate::SoundApp;
 use crate::theme::{Tokens, bold, regular};
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
-use soundcraft_model::{ClipContent, ClipId};
+use soundcraft_model::{ClipContent, ClipId, Tool};
 use soundcraft_time::TICKS_PER_QUARTER;
 
 const KEY_W: f32 = 48.0;
@@ -93,7 +93,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         pos2(header.min.x + 110.0, header.center().y),
         Align2::LEFT_CENTER,
         format!(
-            "{} · {} notes · {} selected · click: add · drag: move/select · arrows: move · Delete: remove",
+            "{} · {} notes · {} selected · Pencil: add · drag: move/select · arrows: move · Delete: remove",
             clip.name,
             sequence.notes.len(),
             app.midi.selected.len()
@@ -303,7 +303,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
                 }
                 // Audition on the instrument would go here (needs a live MIDI input path).
             }
-            None => {
+            None if s.edit.tool == Tool::Pencil => {
                 let pitch = pitch_at(p.y).clamp(0, 127);
                 let start = (((p.x - roll.min.x) / px_per_tick) as i64 / grid_ticks) * grid_ticks;
                 let _ = app.run(
@@ -312,6 +312,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
                 );
                 app.midi.selected.clear();
             }
+            None => app.midi.selected.clear(),
         }
     }
     // Keyboard: Cmd+A select all; arrows transpose (Shift = octave) and move by the grid.
