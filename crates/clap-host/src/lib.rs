@@ -88,6 +88,9 @@ pub enum ClapError {
 mod api {
     use super::*;
 
+    pub fn cached() -> Option<Vec<ClapDescriptor>> {
+        registry::cached()
+    }
     pub fn scan() -> Vec<ClapDescriptor> {
         registry::scan()
     }
@@ -115,6 +118,9 @@ mod api {
 mod api {
     use super::*;
 
+    pub fn cached() -> Option<Vec<ClapDescriptor>> {
+        Some(Vec::new())
+    }
     pub fn scan() -> Vec<ClapDescriptor> {
         Vec::new()
     }
@@ -159,6 +165,11 @@ pub fn add_search_dir(dir: &Path) -> usize {
 /// Scans the given folders without touching the cache.
 pub fn scan_paths(dirs: &[PathBuf]) -> Vec<ClapDescriptor> {
     api::scan_paths(dirs)
+}
+
+/// The plugins of the last scan, without scanning: `None` until something has scanned.
+pub fn cached() -> Option<Vec<ClapDescriptor>> {
+    api::cached()
 }
 
 /// The plugins in one `.clap` file or bundle.
