@@ -209,6 +209,31 @@ fn state_saves_component_and_controller_and_restores_them() {
 }
 
 #[test]
+fn host_set_controller_param_survives_state_round_trip() {
+    // Freq lives only in the controller (the processor ignores it), so processing never carries
+    // the host's value there: the state save has to.
+    let id = id_of("Fixture Gain");
+    let mut p = soundcraft_vst3_host::create(&id).unwrap();
+    p.prepare(48_000.0, 64, 2);
+    assert!(p.set_param("7", 1.5));
+    assert!(p.set_param("12", 200.0));
+    let mut p = std::thread::spawn(move || {
+        let mut io = vec![vec![0.5f32; 64]; 2];
+        p.process(&mut io, 64);
+        assert!(io.iter().flatten().all(|&x| (x - 0.75).abs() < 1e-4));
+        p
+    })
+    .join()
+    .unwrap();
+    assert!((p.param("12").unwrap() - 200.0).abs() < 0.01);
+    let blob = p.save_state().expect("state");
+    let mut q = soundcraft_vst3_host::create(&id).unwrap();
+    assert!(q.load_state(&blob));
+    assert!((q.param("7").unwrap() - 1.5).abs() < 1e-4, "{:?}", q.param("7"));
+    assert!((q.param("12").unwrap() - 200.0).abs() < 0.01, "{:?}", q.param("12"));
+}
+
+#[test]
 fn editor_view_is_probed_and_edits_come_back_as_plain_values() {
     let id = id_of("Fixture Gain");
     let mut p = soundcraft_vst3_host::instantiate_plugin(&id).unwrap();
