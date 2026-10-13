@@ -211,6 +211,8 @@ pub struct MeterDisplay {
     pub hold_age: f32,
     pub clip: bool,
     pub gr: f32,
+    /// [`soundcraft_mix::PluginFailures::count`] as last seen.
+    pub plugin_failures: u32,
 }
 
 /// An in-progress mouse gesture in the Edit window.
@@ -571,8 +573,8 @@ impl SoundApp {
         Ok(takes)
     }
 
-    /// Reads every live third-party plugin's state from the audio engine and stores it on its
-    /// insert (`mix.insert_state`), so saves and bounces include it.
+    /// Reads every live third-party plugin's state and stores it on its insert
+    /// (`mix.insert_state`), so saves and bounces include it.
     pub fn capture_plugin_states(&mut self) {
         let Some(p) = &self.player else { return };
         for (t, slot, data) in p.capture_states() {
@@ -1011,6 +1013,12 @@ impl SoundApp {
             for (id, m) in &snap.tracks {
                 let d = self.meters.entry(*id).or_default();
                 feed_meter(d, m.peak, m.gain_reduction_db, dt);
+                if m.plugin_failures.count != d.plugin_failures {
+                    d.plugin_failures = m.plugin_failures.count;
+                    if let Some(msg) = failed_plugin_status(self.engine.session(), *id, m.plugin_failures.last) {
+                        self.ui.status = msg;
+                    }
+                }
             }
             let main = snap.main.peak;
             feed_meter(&mut self.main_meter, main, 0.0, dt);
@@ -1217,6 +1225,15 @@ fn feed_meter(d: &mut MeterDisplay, peak: [f32; 2], gr: f32, dt: f32) {
     d.gr = if gr > d.gr { gr } else { d.gr * fall };
 }
 
+/// The status line naming the plugin in `slot` (an insert index or
+/// [`soundcraft_mix::INSTRUMENT_SLOT`]), which the engine took out of the signal path.
+fn failed_plugin_status(s: &soundcraft_model::Session, track: TrackId, slot: usize) -> Option<String> {
+    let t = s.track(track)?;
+    let ins = if slot == soundcraft_mix::INSTRUMENT_SLOT { t.instrument.as_ref() } else { t.mixer.inserts.get(slot)?.as_ref() }?;
+    let name = crate::mix_window::plugin_info(&ins.plugin).map_or(ins.plugin.as_str(), |p| p.name);
+    Some(format!("{name} on {} put out invalid audio, so it is bypassed until playback stops or starts again.", t.name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Services, SoundApp, automation_step_due};
@@ -1247,6 +1264,18 @@ mod tests {
             assert!(app.is_playing());
             assert_eq!(app.position(), insertion + i64::from(app.engine.session().sample_rate.hz()) / 4);
         }
+    }
+
+    #[test]
+    fn the_status_names_a_plugin_the_engine_took_out() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let mut s = soundcraft_model::Session::default();
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, Some("Vox"));
+        s.track_mut(t).unwrap().mixer.inserts[3] = Some(Insert::new("gain"));
+        let msg = super::failed_plugin_status(&s, t, 3).unwrap();
+        assert!(msg.starts_with("Gain on Vox put out invalid audio"), "{msg}");
+        assert_eq!(super::failed_plugin_status(&s, t, 0), None);
+        assert_eq!(super::failed_plugin_status(&s, t, soundcraft_mix::INSTRUMENT_SLOT), None);
     }
 
     #[test]
