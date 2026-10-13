@@ -1324,9 +1324,27 @@ fn render_clip(s: &Session, clip: &Clip, pos: Samples, frames: usize, buf: &mut 
     }
 }
 
+/// The track's MIDI Track Offset (`midi.offset.<id>` in the edit values), in samples. Looked up
+/// without formatting the key, since this runs on the audio thread every block.
+fn midi_offset(s: &Session, t: &Track) -> i64 {
+    const PREFIX: &str = "midi.offset.";
+    s.edit
+        .values
+        .range::<str, _>((std::ops::Bound::Included(PREFIX), std::ops::Bound::Unbounded))
+        .take_while(|(k, _)| k.starts_with(PREFIX))
+        .find(|(k, _)| k.get(PREFIX.len()..).and_then(|id| id.parse::<u64>().ok()) == Some(t.id.0))
+        .map(|(_, v)| *v)
+        .filter(|v| v.is_finite())
+        .map_or(0, |v| v as i64)
+}
+
 /// Send note on/offs for MIDI clips overlapping the block.
 fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mut PluginSlot, held: &mut Vec<u8>) {
     let sr = s.sample_rate;
+    // MIDI Track Offsets: the track's notes sound `offset` samples later (earlier if negative), so
+    // the block looks that far back into the clips.
+    let offset = midi_offset(s, t);
+    let pos = pos.saturating_sub(offset);
     let end = pos.saturating_add(frames as i64);
     for clip in t.clips() {
         if clip.muted {
