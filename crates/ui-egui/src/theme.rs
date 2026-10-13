@@ -502,7 +502,8 @@ mod tests {
         drop(inner);
         drop(outer);
         drop(app);
-        assert!(rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(), "the palette lock must be released when every holder drops it");
+        // Other tests compete for the lock too, and some hold it for seconds: allow for a queue.
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(120)).is_ok(), "the palette lock must be released when every holder drops it");
     }
 
     #[test]

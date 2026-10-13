@@ -3042,7 +3042,8 @@ mod tests {
             .shapes
             .iter()
             .filter_map(|shape| match &shape.shape {
-                Shape::Mesh(mesh) if !mesh.vertices.is_empty() && mesh.vertices.iter().all(|vertex| clip_rect.contains(vertex.pos)) => {
+                // The waveform's columns snap to physical pixels and fade out over half of one.
+                Shape::Mesh(mesh) if !mesh.vertices.is_empty() && mesh.vertices.iter().all(|vertex| clip_rect.expand(1.0).contains(vertex.pos)) => {
                     Some(mesh.vertices.iter().map(|vertex| vertex.pos).collect())
                 }
                 _ => None,
