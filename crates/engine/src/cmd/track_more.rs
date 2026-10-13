@@ -455,7 +455,9 @@ pub(super) fn clear_trim(e: &mut Engine, p: &Value) -> Result<Value> {
         let Some(tr) = s.track_mut(*t) else { continue };
         let before = tr.automation.len();
         tr.automation.retain(|l| l.param != trim_param());
-        n += before - tr.automation.len();
+        if tr.automation.len() < before {
+            n += 1;
+        }
     }
     Ok(json!({"tracks": n}))
 }
