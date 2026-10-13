@@ -200,6 +200,12 @@ pub fn tree() -> Vec<MenuNode> {
         insert_path(&mut roots, line);
     }
     insert_path(&mut roots, "Window > Reset Panel Layout");
+    // Not in the incumbent catalog, but the only UI path to an empty MIDI clip (#282).
+    // It creates a clip rather than acting on the selected ones, so it leads the Clip menu.
+    insert_path(&mut roots, "Clip > New MIDI Clip");
+    if let Some(clip) = roots.iter_mut().find(|n| n.label == "Clip") {
+        clip.children.rotate_right(1);
+    }
     for (path, _) in MENU_WINDOWS {
         insert_path(&mut roots, path);
     }
@@ -490,7 +496,11 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
             toggle(&mut app.ui.show_audio_health)
         }
         "window.about" => toggle(&mut app.ui.show_about),
-        "window.midi_editor" | "window.midi_front" => toggle(&mut app.ui.show_midi_editor),
+        "window.midi_editor" => toggle(&mut app.ui.show_midi_editor),
+        "window.midi_front" => {
+            app.ui.show_midi_editor = true;
+            json!({"value": true})
+        }
         "window.midi_back" => {
             app.ui.show_midi_editor = false;
             json!({})
@@ -557,6 +567,7 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
             app.ui.show_undo_history = false;
             app.ui.show_session_info = false;
             app.ui.show_audio_health = false;
+            app.ui.show_automation = false;
             app.ui.plugin_windows.clear();
             app.ui.audiosuite = None;
             json!({})

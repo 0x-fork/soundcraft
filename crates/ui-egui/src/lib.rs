@@ -270,6 +270,10 @@ pub struct SoundApp {
     last_meter_poll: f64,
     /// Movies for the Video window and Video track (decoded in the background).
     pub video: video_track::VideoPool,
+    /// Test-only: owns the process-wide palette lock while this app exists, so frames painted
+    /// and colour assertions in one test can never straddle another test's palette change.
+    #[cfg(test)]
+    _palette_lock: theme::TestPaletteGuard,
 }
 
 /// Whether another automation-write pass is due: the transport moved at least
@@ -326,6 +330,8 @@ impl SoundApp {
             last_frame: None,
             last_meter_poll: f64::NEG_INFINITY,
             video: video_track::VideoPool::default(),
+            #[cfg(test)]
+            _palette_lock: theme::lock_test_palette(),
         }
     }
 
