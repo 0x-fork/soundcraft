@@ -402,6 +402,22 @@ mod tests {
         assert!((s.tempo.tempo_at_tick(tick) - 133.5).abs() < 1e-9);
     }
 
+    /// Changing the initial meter keeps a later meter change at its bar (issue #250).
+    #[test]
+    fn earlier_meter_change_keeps_later_meter_on_its_bar() {
+        use soundcraft_time::BarBeat;
+        let mut e = crate::Engine::default();
+        assert_eq!(e.session().sample_rate.hz(), 48_000);
+        e.execute("event.meter", &json!({"numerator": 3, "denominator": 4, "at": 192_000})).unwrap();
+        e.execute("event.meter", &json!({"numerator": 6, "denominator": 4, "at": 0})).unwrap();
+        let map = &e.session().tempo;
+        let later = map.meters().get(1).copied().unwrap();
+        assert_eq!((later.numerator, later.denominator), (3, 4));
+        assert_eq!(map.bar_beat_at_tick(later.tick), BarBeat { bar: 3, beat: 1, tick: 0 });
+        let bar2_beat3 = BarBeat { bar: 2, beat: 3, tick: 0 };
+        assert_eq!(map.bar_beat_at_tick(map.tick_at_bar_beat(bar2_beat3)), bar2_beat3);
+    }
+
     fn marker_name(e: &crate::Engine, id: u64) -> String {
         e.session().markers.iter().find(|m| m.id.0 == id).map(|m| m.name.clone()).unwrap_or_default()
     }

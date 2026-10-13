@@ -96,13 +96,31 @@ impl TempoMap {
     }
 
     /// Insert or replace the meter at `tick` (snapped to the bar line at or before it).
+    /// Later meter changes keep their bar numbers, so they stay on bar lines.
     pub fn set_meter(&mut self, tick: i64, numerator: u32, denominator: u32) -> Result<(), TimeError> {
         if !(1..=64).contains(&numerator) || ![1, 2, 4, 8, 16, 32, 64].contains(&denominator) {
             return Err(TimeError::Meter(numerator, denominator));
         }
         let tick = if tick <= 0 { 0 } else { self.bar_start_tick(self.bar_beat_at_tick(tick).bar) };
-        let ev = MeterEvent { tick, numerator, denominator };
-        match self.meters.binary_search_by(|e| e.tick.cmp(&tick)) {
+        let later = self.take_meters_after(tick);
+        self.put_meter(MeterEvent { tick, numerator, denominator });
+        self.restore_meters_at_bars(later);
+        Ok(())
+    }
+
+    /// Remove a meter event (the one at tick 0 is kept). Later meter changes keep their bar numbers.
+    pub fn remove_meter(&mut self, tick: i64) -> bool {
+        if tick == 0 || !self.meters.iter().any(|e| e.tick == tick) {
+            return false;
+        }
+        let later = self.take_meters_after(tick);
+        self.meters.retain(|e| e.tick != tick);
+        self.restore_meters_at_bars(later);
+        true
+    }
+
+    fn put_meter(&mut self, ev: MeterEvent) {
+        match self.meters.binary_search_by(|e| e.tick.cmp(&ev.tick)) {
             Ok(i) => {
                 if let Some(e) = self.meters.get_mut(i) {
                     *e = ev;
@@ -110,16 +128,21 @@ impl TempoMap {
             }
             Err(i) => self.meters.insert(i, ev),
         }
-        Ok(())
     }
 
-    pub fn remove_meter(&mut self, tick: i64) -> bool {
-        if tick == 0 {
-            return false;
+    /// Remove the meters after `tick`, returning each with the bar it starts.
+    fn take_meters_after(&mut self, tick: i64) -> Vec<(i64, MeterEvent)> {
+        let later: Vec<_> = self.meters.iter().filter(|e| e.tick > tick).map(|e| (self.bar_beat_at_tick(e.tick).bar, *e)).collect();
+        self.meters.retain(|e| e.tick <= tick);
+        later
+    }
+
+    /// Put meters back at the start of their bars under the current earlier meters, in bar order.
+    fn restore_meters_at_bars(&mut self, later: Vec<(i64, MeterEvent)>) {
+        for (bar, ev) in later {
+            let tick = self.bar_start_tick(bar);
+            self.put_meter(MeterEvent { tick, ..ev });
         }
-        let before = self.meters.len();
-        self.meters.retain(|e| e.tick != tick);
-        before != self.meters.len()
     }
 
     /// Tempo in effect at `tick`.
