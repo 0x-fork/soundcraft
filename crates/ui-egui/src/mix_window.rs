@@ -32,10 +32,15 @@ pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
         }
         show(app, ui);
         if ui.ctx().input(|i| i.viewport().close_requested()) {
-            app.ui.mix_separate = false;
-            app.ui.window = crate::MainWindow::Mix;
+            separate_closed(app);
         }
     });
+}
+
+/// The separate Mix window was closed: Mix goes back into the main window.
+pub fn separate_closed(app: &mut SoundApp) {
+    app.ui.mix_separate = false;
+    app.ui.window = crate::MainWindow::Mix;
 }
 
 pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
