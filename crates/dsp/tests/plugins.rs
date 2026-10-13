@@ -450,6 +450,34 @@ fn synth_note_on_sounds_and_note_off_decays() {
 }
 
 #[test]
+fn synth_follows_the_sustain_pedal_and_pitch_bend() {
+    let mut p = prepared("subtractive_synth");
+    p.midi(0, [0xB0, 64, 127]);
+    p.note_on(0, 60, 100);
+    run(p.as_mut(), &vec![vec![0.0; 4800]; 2]);
+    p.note_off(0, 60);
+    let out = run(p.as_mut(), &vec![vec![0.0; 96_000]; 2]);
+    assert!(rms(&out[0][72_000..]) > 0.01, "the pedal holds the note");
+    p.midi(0, [0xB0, 64, 0]);
+    let out = run(p.as_mut(), &vec![vec![0.0; 96_000]; 2]);
+    assert!(peak(&out[0][72_000..]) < 1e-6, "lifting the pedal releases it");
+
+    let rises = |x: &[f32]| x.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count() as f64;
+    let mut p = prepared("subtractive_synth");
+    p.set_param("osc1_wave", 2.0);
+    p.set_param("osc_mix", 0.0);
+    p.note_on(0, 69, 100);
+    let plain = run(p.as_mut(), &[vec![0.0; 48_000]]);
+    p.midi(0, [0xE0, 0x7F, 0x7F]);
+    let bent = run(p.as_mut(), &[vec![0.0; 48_000]]);
+    let ratio = rises(&bent[0][4800..]) / rises(&plain[0][4800..]);
+    assert!((ratio - 2f64.powf(2.0 / 12.0)).abs() < 0.01, "{ratio}");
+    p.midi(0, [0xB0, 121, 0]);
+    let reset = run(p.as_mut(), &[vec![0.0; 48_000]]);
+    assert!((rises(&reset[0][4800..]) / rises(&plain[0][4800..]) - 1.0).abs() < 0.01);
+}
+
+#[test]
 fn synth_event_offsets_are_sample_accurate() {
     let mut p = prepared("subtractive_synth");
     p.set_param("amp_attack", 0.5);
