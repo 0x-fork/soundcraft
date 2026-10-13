@@ -44,7 +44,7 @@ impl eframe::App for App {
         if let Some(menu) = &mut self.2 {
             menu.process(&mut self.0);
         }
-        self.0.logic(ctx);
+        self.0.guarded(|app| app.logic(ctx));
         #[cfg(target_os = "macos")]
         if let Some(menu) = &mut self.2 {
             menu.sync(&self.0);
@@ -89,9 +89,10 @@ impl eframe::App for App {
         self.0.raw_input_hook(raw);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.0.ui(ui);
+        self.0.guarded(|app| app.ui(ui));
     }
     fn on_exit(&mut self) {
+        self.0.close_autosave();
         save_prefs(&self.0.ui);
         if let Some(logger) = self.1 {
             logger.report_audio_thread();
@@ -166,14 +167,20 @@ fn services() -> Services {
                 "file.import_midi" => d.add_filter("MIDI", &["mid", "midi", "smf"]),
                 _ => d.add_filter(
                     "Audio",
-                    &["wav", "wave", "bwf", "aif", "aiff", "aifc", "flac", "mp3", "ogg", "oga", "m4a", "aac", "mp4", "caf", "mkv", "webm"],
+                    &["wav", "wave", "bwf", "aif", "aiff", "aifc", "flac", "mp3", "ogg", "oga", "m4a", "m4b", "aac", "mp4", "caf", "mkv", "webm"],
                 ),
             };
             d.pick_file().map(|p| p.to_string_lossy().into_owned())
         })),
-        pick_save: Some(Box::new(|_purpose: &str, default: &str| {
+        pick_save: Some(Box::new(|purpose: &str, default: &str| {
             let path = std::path::Path::new(default);
-            let mut d = rfd::FileDialog::new().add_filter("SoundCraft Session", &["scraft"]);
+            let mut d = match purpose {
+                "file.bounce_mix" => rfd::FileDialog::new().add_filter("Audio", &["wav", "aif", "aiff", "flac"]),
+                _ => rfd::FileDialog::new().add_filter("SoundCraft Session", &["scraft"]),
+            };
+            if let Some(dir) = path.parent().filter(|dir| dir.is_dir()) {
+                d = d.set_directory(dir);
+            }
             if let Some(n) = path.file_name().and_then(|n| n.to_str()) {
                 d = d.set_file_name(n);
             }
@@ -262,6 +269,7 @@ fn main() -> eframe::Result {
             let player = if no_audio { None } else { Some(soundcraft_playback::Player::new(Arc::new(engine.session().clone()))) };
             let mut app = SoundApp::new(engine, player, services());
             app.autosave_dir = prefs_path().and_then(|p| p.parent().map(|d| d.join("Autosave")));
+            app.leftovers = app.autosave_dir.as_deref().map(soundcraft_engine::autosave::leftovers).unwrap_or_default();
             app.preset_dir = prefs_path().and_then(|p| p.parent().map(|d| d.join("Presets")));
             app.extra.ui_scale = prefs.ui_scale;
             app.ui = prefs;

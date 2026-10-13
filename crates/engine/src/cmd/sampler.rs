@@ -55,16 +55,15 @@ fn load(e: &mut Engine, p: &Value) -> Result<Value> {
             values.push((k.clone(), pi.clamp(x as f32)));
         }
     }
-    let bytes = std::fs::read(&path).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+    let bytes = crate::io::read_file(&path)?;
     let name = Path::new(&path).file_name().and_then(|n| n.to_str()).unwrap_or("Sample").to_string();
     let ext = Path::new(&name).extension().and_then(|x| x.to_str()).map(str::to_ascii_lowercase);
     let (format, buf) = soundcraft_audio_io::decode(&bytes, ext.as_deref()).map_err(|err| EngineError::Io(format!("{name}: {err}")))?;
     if buf.frames() == 0 || buf.num_channels() == 0 {
         return Err(EngineError::Io(format!("{name}: no audio")));
     }
-    if buf.frames().saturating_mul(buf.num_channels()) > MAX_SAMPLE_VALUES {
-        return Err(EngineError::Io(format!("{name}: too long for a sample (ten minutes of 192 kHz stereo at most)")));
-    }
+    let buf = crate::io::at_rate(buf, e.session().sample_rate.hz(), MAX_SAMPLE_VALUES)
+        .ok_or_else(|| EngineError::Io(format!("{name}: too long for a sample (ten minutes of 192 kHz stereo at most)")))?;
     let channels = buf.num_channels();
     let s = e.session_mut();
     let src = crate::io::add_source(s, &name, buf, Some(&path), format.format);
