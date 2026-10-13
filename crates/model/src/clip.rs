@@ -219,6 +219,10 @@ impl Clip {
         // MIDI note ticks are re-anchored by the engine, which knows the tempo map.
         self.length -= delta;
         self.start = new_start;
+        if self.sync_point != 0 {
+            self.sync_point = self.sync_point.saturating_sub(delta);
+        }
+        self.drop_stray_sync();
         self.clamp_fades();
         // Keep the gain at the cut when earlier breakpoints are dropped.
         if self.gain_env.iter().any(|&(t, _)| t < delta) && self.gain_env.iter().all(|&(t, _)| t != delta) {
@@ -232,6 +236,7 @@ impl Clip {
     pub fn trim_end_to(&mut self, new_end: Samples) {
         let new_end = new_end.max(self.start + 1);
         self.length = new_end - self.start;
+        self.drop_stray_sync();
         self.clamp_fades();
     }
 
@@ -239,6 +244,13 @@ impl Clip {
     pub fn clamp_fades(&mut self) {
         self.fade_in.len = self.fade_in.len.clamp(0, self.length);
         self.fade_out.len = self.fade_out.len.clamp(0, self.length);
+    }
+
+    /// A sync point (0 means none) that a trim left outside the clip no longer marks anything.
+    fn drop_stray_sync(&mut self) {
+        if !(0..self.length).contains(&self.sync_point) {
+            self.sync_point = 0;
+        }
     }
 }
 

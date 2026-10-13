@@ -98,6 +98,15 @@ pub fn add_source(s: &mut Session, name: &str, mut buf: AudioBuffer, path: Optio
     id
 }
 
+/// A BWF time stamp (samples at the file's rate) at the session's rate, as the audio is resampled.
+fn stamp_at_rate(stamp: u64, file_rate: u32, session_rate: u32) -> u64 {
+    if file_rate == 0 || file_rate == session_rate {
+        return stamp;
+    }
+    let (from, to) = (u128::from(file_rate), u128::from(session_rate));
+    u64::try_from((u128::from(stamp) * to + from / 2) / from).unwrap_or(u64::MAX)
+}
+
 /// Decode and place an audio file. With no target track, a new track of matching width is made.
 pub fn import_audio_bytes(e: &mut Engine, name: &str, bytes: &[u8], path: Option<&str>, target: Option<TrackId>, at: Samples) -> Result<Value> {
     let ext = Path::new(name).extension().and_then(|x| x.to_str()).map(str::to_ascii_lowercase);
@@ -109,10 +118,12 @@ pub fn import_audio_bytes(e: &mut Engine, name: &str, bytes: &[u8], path: Option
         return Err(EngineError::Io(format!("{name}: no audio")));
     }
     let channels = buf.num_channels();
+    let file_rate = info.sample_rate;
     let s = e.session_mut();
+    let session_rate = s.sample_rate.hz();
     let src = add_source(s, name, buf, path, info.format);
     if let (Some(bwf), Some(sx)) = (info.bwf.as_ref(), s.sources.last_mut()) {
-        sx.time_reference = bwf.time_reference;
+        sx.time_reference = stamp_at_rate(bwf.time_reference, file_rate, session_rate);
     }
     let frames = s.source(src).map_or(0, |x| i64::try_from(x.frames).unwrap_or(0));
     let track = match target {

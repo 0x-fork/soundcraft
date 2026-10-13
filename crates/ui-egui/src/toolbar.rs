@@ -5,6 +5,7 @@ use crate::widgets::{icon_button, key, key_fill};
 use crate::{SoundApp, icons};
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
+use soundcraft_engine::edit::{SHUFFLE_LOCK, SNAP_TO_GRID};
 use soundcraft_model::{EditMode, Tool};
 use soundcraft_time::{TimeFormat, format_length};
 
@@ -44,7 +45,9 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
 
 fn edit_modes(app: &mut SoundApp, ui: &mut Ui) {
     let t = Tokens::current();
-    let cur = app.engine.session().edit.edit_mode;
+    let ed = &app.engine.session().edit;
+    let (cur, snap, locked) = (ed.edit_mode, ed.flag(SNAP_TO_GRID), ed.flag(SHUFFLE_LOCK));
+    let cmd = crate::shortcuts::shortcut_label("Cmd", ui.ctx().os() == egui::os::OperatingSystem::Mac);
     let modes = [
         (EditMode::Shuffle, 0, 0, "SHUFFLE", "F1"),
         (EditMode::Spot, 1, 0, "SPOT", "F3"),
@@ -62,21 +65,47 @@ fn edit_modes(app: &mut SoundApp, ui: &mut Ui) {
             let resp = ui.interact(cell, ui.id().with(("mode", label)), Sense::click());
             let on = cur == m || (m == EditMode::Grid && cur == EditMode::GridRelative);
             key(ui.painter(), cell, &resp, if on { t.mode_on } else { t.mode_off });
-            let txt = if m == EditMode::Grid && cur == EditMode::GridRelative { "REL GRID" } else { label };
-            ui.painter().text(cell.center(), Align2::CENTER_CENTER, txt, bold(10.5), if on { t.mode_on_text } else { t.mode_off_text });
-            if resp.clicked() {
-                let id = match m {
-                    EditMode::Grid if cur == EditMode::Grid => "relative_grid",
-                    EditMode::Shuffle => "shuffle",
-                    EditMode::Spot => "spot",
-                    EditMode::Slip => "slip",
-                    _ => "grid",
-                };
-                let _ = app.run("edit.mode", json!({"mode": id}));
+            let fg = if on { t.mode_on_text } else { t.mode_off_text };
+            if m == EditMode::Grid && snap {
+                ui.painter().rect_stroke(cell, 1.0, Stroke::new(1.5, t.mode_on), StrokeKind::Inside);
             }
-            resp.on_hover_text(format!("{} mode ({fkey})", label.to_lowercase()));
+            if m == EditMode::Shuffle && locked {
+                icons::draw(ui.painter(), Rect::from_center_size(cell.center(), vec2(15.0, 15.0)), "lock", fg);
+            } else {
+                let txt = if m == EditMode::Grid && cur == EditMode::GridRelative { "REL GRID" } else { label };
+                ui.painter().text(cell.center(), Align2::CENTER_CENTER, txt, bold(10.5), fg);
+            }
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, label));
+            if resp.clicked() {
+                mode_click(app, m, ui.input(|i| i.modifiers));
+            }
+            resp.on_hover_text(match m {
+                EditMode::Shuffle if locked => format!("Shuffle is locked ({cmd}-click to unlock)"),
+                EditMode::Shuffle => format!("Shuffle mode ({fkey}); {cmd}-click locks it out"),
+                EditMode::Grid => format!("Grid mode ({fkey}; again for Relative); Shift-click: Snap to Grid in the other modes"),
+                _ => format!("{} mode ({fkey}); Shift-click adds Snap to Grid", if m == EditMode::Slip { "Slip" } else { "Spot" }),
+            });
         }
     });
+}
+
+/// Shift adds Snap to Grid to Shuffle, Slip and Spot (on Grid it toggles it for the current mode);
+/// Cmd/Ctrl on Shuffle toggles Shuffle Lock.
+fn mode_click(app: &mut SoundApp, m: EditMode, mods: egui::Modifiers) {
+    let cur = app.engine.session().edit.edit_mode;
+    let _ = if m == EditMode::Shuffle && mods.command {
+        app.run("edit.shuffle_lock", json!({}))
+    } else if m == EditMode::Grid && mods.shift && !cur.is_grid() {
+        app.run("edit.snap_to_grid", json!({}))
+    } else {
+        let id = match m {
+            EditMode::Shuffle => "shuffle",
+            EditMode::Spot => "spot",
+            EditMode::Slip => "slip",
+            _ => crate::shortcuts::grid_mode(app),
+        };
+        app.run("edit.mode", json!({"mode": id, "snap_to_grid": mods.shift}))
+    };
 }
 
 fn zoom_group(app: &mut SoundApp, ui: &mut Ui) {
