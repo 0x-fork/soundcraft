@@ -1,8 +1,8 @@
 //! A small pure-Rust FLAC encoder (RFC 9639): fixed blocksize, independent channels, and per
 //! subframe the cheapest of CONSTANT, VERBATIM or FIXED (orders 0–4) prediction with
-//! partitioned Rice-coded residuals.
+//! partitioned Rice-coded residuals. Decoding is symphonia's, after [`check_metadata`].
 
-use crate::pcm::{Quantizer, validate_buffer};
+use crate::pcm::{Quantizer, be_u32, le_u32, validate_buffer};
 use crate::{AudioBuffer, AudioError, BitDepth, Result};
 use std::io::{Cursor, Seek, SeekFrom, Write};
 
@@ -428,6 +428,54 @@ pub(crate) fn encode(buf: &AudioBuffer, depth: BitDepth, dither: bool) -> Result
     let mut w = Writer::new(Cursor::new(out), buf.channels.len(), buf.sample_rate, depth, dither)?;
     w.write(&buf.channels, frames)?;
     Ok(w.finish()?.into_inner())
+}
+
+/// Refuse the FLAC stream at `at` if a comment or picture field claims more bytes than its
+/// metadata block holds: symphonia allocates each field's length before reading it.
+pub(crate) fn check_metadata(b: &[u8], at: usize) -> Result<()> {
+    let mut pos = at + 4;
+    while let Some(head) = be_u32(b, pos) {
+        let (body, len) = (pos + 4, (head & 0x00ff_ffff) as usize);
+        let end = (body + len).min(b.len());
+        let overruns = match (head >> 24) & 0x7f {
+            4 => comments_overrun(b, body, end),
+            // Picture: type, MIME type, description, four size fields, data.
+            6 => overruns(b, body + 4, end, be_u32, [0, 0, 16]),
+            _ => false,
+        };
+        if overruns {
+            return Err(AudioError::Malformed("a FLAC metadata field is larger than its block".into()));
+        }
+        if head >> 31 == 1 {
+            break;
+        }
+        pos = body + len;
+    }
+    Ok(())
+}
+
+/// Whether a comment in a (little-endian) Vorbis comment block claims more than the block holds.
+/// The vendor string is skipped unread.
+fn comments_overrun(b: &[u8], body: usize, end: usize) -> bool {
+    let Some(vendor) = le_u32(b, body) else { return false };
+    let at = (body + 4).saturating_add(vendor as usize);
+    let Some(count) = le_u32(b, at).filter(|_| at.saturating_add(4) <= end) else { return false };
+    overruns(b, at + 4, end, le_u32, std::iter::repeat_n(0, count as usize))
+}
+
+/// Whether one of the length-prefixed fields from `at` claims more than `end` leaves; `gaps` are
+/// the bytes skipped before each length, which `read` reads.
+fn overruns(b: &[u8], mut at: usize, end: usize, read: fn(&[u8], usize) -> Option<u32>, gaps: impl IntoIterator<Item = usize>) -> bool {
+    for gap in gaps {
+        at = at.saturating_add(gap);
+        let Some(n) = read(b, at).filter(|_| at.saturating_add(4) <= end) else { return false };
+        at += 4;
+        if n as usize > end - at {
+            return true;
+        }
+        at += n as usize;
+    }
+    false
 }
 
 #[cfg(test)]
