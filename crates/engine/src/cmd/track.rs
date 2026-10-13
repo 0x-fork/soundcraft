@@ -58,7 +58,21 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("track.rename", "Rename Track", [], None, "{track, name}", has_tracks, rename),
         cmd!("track.comments", "Track Comments", [], None, "{track, comments}", has_tracks, comments),
         cmd!("track.color", "Track Color", [], None, "{tracks?, color: [r,g,b] | palette index}", has_selection, color),
-        cmd!("track.height", "Track Height", [], None, "{tracks?, height: micro|mini|small|medium|large|jumbo|extreme}", has_selection, height),
+        cmd!(
+            "track.height",
+            "Track Height",
+            [],
+            None,
+            "{tracks?, height: micro|mini|small|medium|large|jumbo|extreme | points}",
+            has_selection,
+            height
+        ),
+        cmd!("track.height_up", "Increase Track Height", [], Some("Ctrl+Up"), "{tracks?} — one preset taller", has_selection, |e, p| height_step(
+            e, p, true
+        )),
+        cmd!("track.height_down", "Decrease Track Height", [], Some("Ctrl+Down"), "{tracks?} — one preset shorter", has_selection, |e, p| {
+            height_step(e, p, false)
+        }),
         cmd!("track.view", "Track View", [], None, "{tracks?, view: waveform|blocks|notes|volume|pan|mute|<automation id>}", has_selection, view),
         cmd!("track.hide", "Hide Track", [], None, "{tracks?, hidden?: bool}", has_selection, |e, p| flag(
             e,
@@ -98,7 +112,7 @@ pub fn specs() -> Vec<CommandSpec> {
             Ok(json!({"track": t}))
         }),
         cmd!("track.clear_clip_indicators", "Clear All Clip Indicators", ["Track"], Some("Alt+C"), "{}", always, |_, _| Ok(json!({"cleared": true}))),
-        cmd!("track.clear_trim_automation", "Clear Trim Automation", ["Track"], None, "{tracks?}", has_selection, |_, _| Ok(json!({}))),
+        cmd!("track.clear_trim_automation", "Clear Trim Automation", ["Track"], None, "{tracks?}", has_selection, super::track_more::clear_trim),
         cmd!("track.create_click", "Create Click Track", ["Track"], None, "{}", always, create_click),
         cmd!("track.playlist_new", "New Playlist", [], None, "{track?, name?}", has_selection, |e, p| new_playlist(e, p, false)),
         cmd!("track.playlist_duplicate", "Duplicate Playlist", [], None, "{track?, name?}", has_selection, |e, p| new_playlist(e, p, true)),
@@ -128,7 +142,10 @@ pub fn specs() -> Vec<CommandSpec> {
         }),
         cmd!("track.vca", "Assign to VCA", [], None, "{tracks?, vca: VCA track id|name | null}", has_selection, |e, p| {
             let tracks = tracks_required(e, "track.vca", p)?;
-            let vca = track_param(e, "track.vca", p, "vca")?;
+            let vca = match p.get("vca") {
+                Some(Value::Null) => None,
+                _ => track_param(e, "track.vca", p, "vca")?,
+            };
             if let Some(v) = vca
                 && e.session().track(v).is_none_or(|t| t.kind != TrackKind::Vca)
             {
@@ -174,7 +191,7 @@ pub fn specs() -> Vec<CommandSpec> {
                     tr.active_playlist = active;
                 }
                 let _ = src;
-                let ids = crate::edit::paste(s, t, r.start, &clips, r.len(), false);
+                let ids = crate::edit::paste(s, t, r.start, &clips, r.len(), false).unwrap_or_default();
                 Ok(json!({"clips": ids}))
             }
         ),
@@ -485,7 +502,10 @@ fn color(e: &mut Engine, p: &Value) -> Result<Value> {
 
 fn height(e: &mut Engine, p: &Value) -> Result<Value> {
     let tracks = tracks_required(e, "track.height", p)?;
-    let h = str_param(p, "height").and_then(TrackHeight::from_id).ok_or_else(|| bad("track.height", "unknown height"))?;
+    let h = match p.get("height").and_then(Value::as_f64) {
+        Some(points) => TrackHeight::from_points(points as f32),
+        None => str_param(p, "height").and_then(TrackHeight::from_id).ok_or_else(|| bad("track.height", "unknown height"))?,
+    };
     let s = e.session_mut();
     for t in &tracks {
         if let Some(tr) = s.track_mut(*t) {
@@ -493,6 +513,26 @@ fn height(e: &mut Engine, p: &Value) -> Result<Value> {
         }
     }
     Ok(json!({"height": h}))
+}
+
+fn height_step(e: &mut Engine, p: &Value, taller: bool) -> Result<Value> {
+    let tracks = tracks_required(e, if taller { "track.height_up" } else { "track.height_down" }, p)?;
+    let mut steps = Vec::new();
+    for tr in tracks.iter().filter_map(|t| e.session().track(*t)) {
+        let h = tr.height.step(taller);
+        if h != tr.height {
+            steps.push((tr.id, h));
+        }
+    }
+    if !steps.is_empty() {
+        let s = e.session_mut();
+        for (t, h) in &steps {
+            if let Some(tr) = s.track_mut(*t) {
+                tr.height = *h;
+            }
+        }
+    }
+    Ok(json!({"changed": steps.len()}))
 }
 
 fn view(e: &mut Engine, p: &Value) -> Result<Value> {
@@ -679,5 +719,41 @@ mod tests {
         let kick = s.track_by_name("Kick").unwrap();
         assert!(matches!(kick.mixer.output, Route::Bus(_)));
         assert!(s.tracks.iter().any(|t| t.kind == TrackKind::Folder && t.mixer.input == kick.mixer.output));
+    }
+
+    #[test]
+    fn heights_take_points_and_step_through_the_presets() {
+        let mut e = crate::demo::demo_engine();
+        let height = |e: &Engine, name: &str| e.session().track_by_name(name).map(|t| t.height);
+        e.execute("track.height", &json!({"tracks": ["Kick"], "height": 57})).unwrap();
+        assert_eq!(height(&e, "Kick"), Some(TrackHeight::Custom(57)));
+        e.execute("track.height_up", &json!({"tracks": ["Kick", "Snare"]})).unwrap();
+        assert_eq!((height(&e, "Kick"), height(&e, "Snare")), (Some(TrackHeight::Medium), Some(TrackHeight::Large)));
+        e.execute("track.height", &json!({"tracks": ["Kick"], "height": "extreme"})).unwrap();
+        let steps = e.undo_history().len();
+        assert_eq!(e.execute("track.height_up", &json!({"tracks": ["Kick"]})).unwrap()["changed"], 0);
+        assert_eq!(e.undo_history().len(), steps);
+        e.execute("track.height_down", &json!({"tracks": ["Kick"]})).unwrap();
+        assert_eq!(height(&e, "Kick"), Some(TrackHeight::Jumbo));
+    }
+
+    #[test]
+    fn vca_null_clears_the_assignment() {
+        let mut e = Engine::default();
+        e.execute("track.new", &json!({"name": "Member"})).unwrap();
+        e.execute("track.new", &json!({"kind": "vca", "name": "Master"})).unwrap();
+        let (member, master) = (e.session().tracks[0].id, e.session().tracks[1].id);
+        let vca = |e: &Engine| e.session().track(member).unwrap().mixer.vca;
+        e.execute("track.vca", &json!({"tracks": [member.0], "vca": master.0})).unwrap();
+        assert_eq!(vca(&e), Some(master.0));
+        // #237: null is documented as "no VCA"; anything else that is not a VCA is still an error.
+        for invalid in [json!(true), json!(999), json!("Missing"), json!(member.0)] {
+            assert!(e.execute("track.vca", &json!({"tracks": [member.0], "vca": invalid})).is_err());
+            assert_eq!(vca(&e), Some(master.0));
+        }
+        e.execute("track.vca", &json!({"tracks": [member.0], "vca": null})).unwrap();
+        assert_eq!(vca(&e), None);
+        assert!(e.undo());
+        assert_eq!(vca(&e), Some(master.0));
     }
 }
