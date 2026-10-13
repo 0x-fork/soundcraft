@@ -97,6 +97,8 @@ pub struct UiState {
     pub show_workspace: bool,
     pub show_configurations: bool,
     pub show_playback_engine: bool,
+    /// The audio device choice (Setup › Playback Engine), kept with the preferences: per machine.
+    pub audio: soundcraft_playback::AudioConfig,
     /// The Mix window lives in its own native window (Window › Mix in Separate Window); the main
     /// window then always shows Edit.
     pub mix_separate: bool,
@@ -162,6 +164,7 @@ impl Default for UiState {
             show_workspace: false,
             show_configurations: false,
             show_playback_engine: false,
+            audio: soundcraft_playback::AudioConfig::default(),
             mix_separate: false,
             show_io_setup: false,
             show_shortcuts: false,
@@ -765,12 +768,37 @@ impl SoundApp {
             || (self.recorder.is_some() && self.engine.session().tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm))
     }
 
+    /// Reopens the audio devices with `cfg` (Setup › Playback Engine › Apply), keeping the
+    /// transport position, and keeps it as `ui.audio`. Plugin instances and their editors are
+    /// recreated with the new player. Refused while recording, which would lose the take; `ui.audio`
+    /// then stays the configuration of the open device.
+    pub fn apply_audio_config(&mut self, cfg: soundcraft_playback::AudioConfig) -> Result<(), String> {
+        if self.engine.transport.recording {
+            return Err("stop recording before changing the audio device".into());
+        }
+        self.ui.audio = cfg;
+        let at = self.position();
+        if let Some(p) = &self.player {
+            p.stop();
+            // The old player's plugin instances go away with it; their editor windows must be
+            // closed here, on the main thread, or they would stay on screen orphaned.
+            p.close_editors();
+        }
+        // The input reopens on the next record or monitor with the new choice.
+        self.recorder = None;
+        self.recorder_failed = false;
+        let player = soundcraft_playback::Player::with_config(self.engine.session_arc(), &self.ui.audio);
+        player.locate(at);
+        self.player = Some(player);
+        Ok(())
+    }
+
     /// Open the input device once (for recording and input monitoring) and feed the player.
     fn ensure_input(&mut self) {
         if self.recorder.is_some() || self.recorder_failed || self.player.is_none() {
             return;
         }
-        match soundcraft_playback::record::Recorder::open() {
+        match soundcraft_playback::record::Recorder::open_with(&self.ui.audio) {
             Ok(r) => {
                 if let Some(p) = &self.player {
                     p.set_input(std::sync::Arc::clone(&r.monitor));
@@ -848,9 +876,13 @@ impl SoundApp {
         if self.is_playing() || self.engine.transport.recording {
             self.stop_play();
         }
+        if let Some(p) = &self.player {
+            // Its plugin editors go with it; closed here, on the main thread (see `apply_audio_config`).
+            p.close_editors();
+        }
         self.recorder = None;
         self.recorder_failed = false;
-        self.player = Some(Player::new(self.engine.session_arc()));
+        self.player = Some(Player::with_config(self.engine.session_arc(), &self.ui.audio));
     }
 
     fn finish_recording(&mut self) {
