@@ -453,7 +453,7 @@ fn nice_step(spp: f64, sr: f64, min_px: f64) -> i64 {
 
 fn draw_rulers(app: &mut SoundApp, ui: &mut Ui, area: Rect, tl: Rect, rulers: &[String]) {
     let t = Tokens::current();
-    let s = app.engine.session().clone();
+    let s = app.engine.session_arc();
     ui.painter().rect_filled(area, 0.0, t.ruler_bg);
     let view = Range::new(sample_at(&s, tl, tl.min.x), sample_at(&s, tl, tl.max.x));
     let sr = s.sample_rate;
@@ -538,9 +538,7 @@ fn draw_rulers(app: &mut SoundApp, ui: &mut Ui, area: Rect, tl: Rect, rulers: &[
                 } else {
                     soundcraft_time::FrameRate::Fps25
                 };
-                let mut s2 = s.clone();
-                s2.frame_rate = alt;
-                timebase_ruler(ui, &painter, &s2, tl, row, view, TimeFormat::Timecode, i + 1 == rulers.len());
+                timebase_ruler(ui, &painter, &s, tl, row, view, TimeFormat::Timecode, alt, i + 1 == rulers.len());
             }
             "markers" | "markers2" | "markers3" | "markers4" | "markers5" | "chords" => {
                 let lane: u8 = match id.as_str() {
@@ -595,7 +593,7 @@ fn draw_rulers(app: &mut SoundApp, ui: &mut Ui, area: Rect, tl: Rect, rulers: &[
             }
             _ => {
                 if let Some(f) = fmt {
-                    timebase_ruler(ui, &painter, &s, tl, row, view, f, i + 1 == rulers.len());
+                    timebase_ruler(ui, &painter, &s, tl, row, view, f, s.frame_rate, i + 1 == rulers.len());
                     // Clicking a timebase ruler locates.
                     let resp = ui.interact(row, ui.id().with(("ruler", id.as_str())), Sense::click_and_drag());
                     if (resp.clicked() || resp.dragged())
@@ -617,7 +615,17 @@ fn draw_rulers(app: &mut SoundApp, ui: &mut Ui, area: Rect, tl: Rect, rulers: &[
     ui.painter().line_segment([pos2(area.min.x, area.max.y - 1.0), pos2(area.max.x, area.max.y - 1.0)], Stroke::new(1.0, t.border));
 }
 
-fn timebase_ruler(_ui: &Ui, painter: &egui::Painter, s: &Session, tl: Rect, row: Rect, view: Range, f: TimeFormat, bottom: bool) {
+fn timebase_ruler(
+    _ui: &Ui,
+    painter: &egui::Painter,
+    s: &Session,
+    tl: Rect,
+    row: Rect,
+    view: Range,
+    f: TimeFormat,
+    rate: soundcraft_time::FrameRate,
+    bottom: bool,
+) {
     let t = Tokens::current();
     let sr = s.sample_rate;
     let spp = s.edit.zoom.samples_per_px;
@@ -627,7 +635,7 @@ fn timebase_ruler(_ui: &Ui, painter: &egui::Painter, s: &Session, tl: Rect, row:
             // Bars every n so labels are ≥ 60 px apart.
             let bar_px = {
                 let b = GridValue::Note { value: NoteValue::Bar, dotted: false, triplet: false };
-                b.step_samples(view.start.max(0), sr, &s.tempo, s.frame_rate) as f64 / spp
+                b.step_samples(view.start.max(0), sr, &s.tempo, rate) as f64 / spp
             };
             let every = [1i64, 2, 4, 8, 16, 32, 64, 128].into_iter().find(|n| bar_px * *n as f64 >= 60.0).unwrap_or(256);
             let first = s.tempo.bar_beat_at(view.start.max(0), sr).bar;
@@ -696,9 +704,13 @@ fn timebase_ruler(_ui: &Ui, painter: &egui::Painter, s: &Session, tl: Rect, row:
                 TimeFormat::BarsBeats => s.tempo.bar_beat_at(at, sr).bar.to_string(),
                 TimeFormat::MinSecs => {
                     let secs = sr.seconds(at);
-                    if secs.fract().abs() < 1e-9 { format!("{}:{:02}", (secs / 60.0) as i64, (secs as i64) % 60) } else { s.format_position(at, f) }
+                    if secs.fract().abs() < 1e-9 {
+                        format!("{}:{:02}", (secs / 60.0) as i64, (secs as i64) % 60)
+                    } else {
+                        format_position(at, f, sr, &s.tempo, rate, s.timecode_start, s.feet_frames_start())
+                    }
                 }
-                _ => s.format_position(at, f),
+                _ => format_position(at, f, sr, &s.tempo, rate, s.timecode_start, s.feet_frames_start()),
             };
             painter.text(pos2(x + 3.0, row.center().y), Align2::LEFT_CENTER, label, regular(11.0), t.ruler_text);
         } else {
@@ -759,28 +771,28 @@ fn views_button(app: &mut SoundApp, ui: &mut Ui, rulers: Rect) {
 
 fn track_row(app: &mut SoundApp, ui: &mut Ui, id: TrackId, row: Rect, tl: Rect, cols: &[Column]) {
     let t = Tokens::current();
-    let s = app.engine.session();
-    let Some(track) = s.track(id).cloned() else { return };
+    let s = app.engine.session_arc();
+    let Some(track) = s.track(id) else { return };
     let selected = s.edit.selected_tracks.contains(&id);
     let head = Rect::from_min_max(row.min, pos2(row.min.x + HEADER_W, row.max.y));
     let (head_bg, lane_bg) = crate::theme::track_backgrounds(track.color, selected, app.ui.track_tint);
     let mut x = head.max.x;
     for &(col, _, _, w) in cols {
-        header_column(app, ui, &track, col, Rect::from_min_size(pos2(x, row.min.y), vec2(w, row.height())), head_bg);
+        header_column(app, ui, track, col, Rect::from_min_size(pos2(x, row.min.y), vec2(w, row.height())), head_bg);
         x += w;
     }
     let main_h = track.height.points();
-    let lane = lane_rect(&track, row, tl);
+    let lane = lane_rect(track, row, tl);
     ui.painter().rect_filled(head, 0.0, head_bg);
     ui.painter().rect_filled(Rect::from_min_size(head.min, vec2(STRIP_W, head.height())), 0.0, rgb(track.color));
     ui.painter().line_segment([pos2(head.min.x, row.max.y + 0.5), pos2(tl.max.x, row.max.y + 0.5)], Stroke::new(1.0, t.border));
     ui.painter().hline(head.min.x + STRIP_W..=head.max.x, head.min.y + 0.5, Stroke::new(1.0, t.edge_light));
-    track_header(app, ui, &track, head, selected, head_bg);
+    track_header(app, ui, track, head, selected, head_bg);
     // Lane.
     ui.painter().vline(tl.min.x - 0.5, row.y_range(), Stroke::new(1.0, t.border));
     let painter = ui.painter().with_clip_rect(lane.intersect(ui.clip_rect()));
     painter.rect_filled(lane, 0.0, lane_bg);
-    let s = app.engine.session().clone();
+    let s = app.engine.session_arc();
     // Shown grid lines go over the clips; otherwise the bar lines stay behind them.
     if !s.edit.grid_lines {
         grid_lines(&painter, &s, tl, lane);
@@ -791,19 +803,19 @@ fn track_row(app: &mut SoundApp, ui: &mut Ui, id: TrackId, row: Rect, tl: Rect, 
         if !clip.range().overlaps(&view) {
             continue;
         }
-        draw_clip(app, &painter, &s, &track, clip, tl, lane, auto_view.is_some());
+        draw_clip(app, &painter, &s, track, clip, tl, lane, auto_view.is_some());
     }
-    draw_live_take(app, &painter, &s, &track, tl, lane);
-    crate::video_track::draw_lane(app, &painter, &s, &track, tl, lane);
+    draw_live_take(app, &painter, &s, track, tl, lane);
+    crate::video_track::draw_lane(app, &painter, &s, track, tl, lane);
     if s.edit.grid_lines {
         grid_lines(&painter, &s, tl, lane);
     }
     if let Some(p) = &auto_view {
-        draw_automation(&painter, &s, &track, p, tl, lane);
+        draw_automation(&painter, &s, track, p, tl, lane);
     }
     if track.kind == TrackKind::Master || track.kind == TrackKind::Aux || track.kind == TrackKind::Vca {
         let p = auto_view.clone().unwrap_or(AutoParam::Volume);
-        draw_automation(&painter, &s, &track, &p, tl, lane);
+        draw_automation(&painter, &s, track, &p, tl, lane);
     }
     // Selection highlight on this track.
     let sel = s.edit.selection;
@@ -814,16 +826,16 @@ fn track_row(app: &mut SoundApp, ui: &mut Ui, id: TrackId, row: Rect, tl: Rect, 
             painter.rect_filled(Rect::from_min_max(pos2(x0, lane.min.y), pos2(x1, lane.max.y)), 0.0, t.selection);
         }
     }
-    lane_interaction(app, ui, &track, lane, tl);
+    lane_interaction(app, ui, track, lane, tl);
     if track.view == "playlists" {
-        playlist_lanes(app, ui, &track, row, main_h, tl);
+        playlist_lanes(app, ui, track, row, main_h, tl);
     }
 }
 
 /// Alternate playlists as lanes under the main one; clicking a clip promotes it (comping).
 fn playlist_lanes(app: &mut SoundApp, ui: &mut Ui, track: &Track, row: Rect, main_h: f32, tl: Rect) {
     let t = Tokens::current();
-    let s = app.engine.session().clone();
+    let s = app.engine.session_arc();
     let mut y = row.min.y + main_h;
     for (i, pl) in track.playlists.iter().enumerate() {
         if i == track.active_playlist {
@@ -1781,7 +1793,7 @@ fn lane_interaction(app: &mut SoundApp, ui: &mut Ui, track: &Track, lane: Rect, 
     if resp.dnd_hover_payload::<crate::DragSource>().is_some() {
         ui.painter().rect_stroke(lane, 0.0, Stroke::new(2.0, Tokens::current().accent), StrokeKind::Inside);
     }
-    let s = app.engine.session().clone();
+    let s = app.engine.session_arc();
     let tool = s.edit.tool;
     let mods = ui.input(|i| i.modifiers);
     let Some(p) = resp.interact_pointer_pos().or_else(|| resp.hover_pos()) else { return };

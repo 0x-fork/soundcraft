@@ -122,7 +122,8 @@ pub(crate) fn route_popup(app: &mut SoundApp, resp: &egui::Response, id: TrackId
 
 fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapshot>) {
     let t = Tokens::current();
-    let Some(track) = app.engine.session().track(id).cloned() else { return };
+    let session = app.engine.session_arc();
+    let Some(track) = session.track(id) else { return };
     let narrow = app.ui.narrow_mix;
     let w = strip_width(narrow);
     let h = ui.available_height().max(560.0);
@@ -166,8 +167,8 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         let sr = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 16.0), vec2(inner_w - 4.0, 15.0));
         let slot = track.mixer.inserts.iter().position(|i| i.as_ref().is_some_and(|i| plugin_info(&i.plugin).is_some_and(|p| p.is_instrument)));
         match slot {
-            _ if track.kind == TrackKind::Instrument => instrument_slot(app, ui, &track, sr),
-            Some(k) => insert_slot(app, ui, &track, k, sr),
+            _ if track.kind == TrackKind::Instrument => instrument_slot(app, ui, track, sr),
+            Some(k) => insert_slot(app, ui, track, k, sr),
             None if track.kind == TrackKind::Midi => {
                 ui.painter().text(sr.center(), Align2::CENTER_CENTER, "MIDI in: all", regular(9.0), t.text_dim);
             }
@@ -202,9 +203,9 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         for k in 0..5 {
             let sr = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 15.0 + k as f32 * 17.0), vec2(inner_w - 4.0, 15.0));
             if is_send {
-                send_slot(app, ui, &track, off + k, sr);
+                send_slot(app, ui, track, off + k, sr);
             } else {
-                insert_slot(app, ui, &track, off + k, sr);
+                insert_slot(app, ui, track, off + k, sr);
             }
         }
         y = sec.max.y + 4.0;
@@ -255,7 +256,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         let in_r = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 15.0), vec2(inner_w - 4.0, 16.0));
         let out_r = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 33.0), vec2(inner_w - 4.0, 16.0));
         let mut c = ui.new_child(egui::UiBuilder::new().id_salt(("mix-input", id.0)).max_rect(in_r));
-        let resp = selector_box(&mut c, in_r.width(), in_r.height(), &input_name(app, &track), t.text);
+        let resp = selector_box(&mut c, in_r.width(), in_r.height(), &input_name(app, track), t.text);
         route_popup(app, &resp, id, true);
         let mut c = ui.new_child(egui::UiBuilder::new().id_salt(("mix-output", id.0)).max_rect(out_r));
         let resp = selector_box(&mut c, out_r.width(), out_r.height(), &route_name(app, &track.mixer.output), t.text);
@@ -298,7 +299,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
     let _ = selector_box(&mut c, gr.width(), gr.height(), &gname, t.text_dim);
     y += 22.0;
     // Pan: a surround panner when the output is multichannel, else the stereo knobs.
-    let out_fmt = output_format(app, &track);
+    let out_fmt = output_format(app, track);
     let surround_out =
         out_fmt.channels() > 2 && !out_fmt.is_ambisonic() && !matches!(track.kind, TrackKind::Master | TrackKind::Vca) && track.channels() <= 2;
     if surround_out {
