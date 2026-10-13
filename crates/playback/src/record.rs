@@ -188,52 +188,6 @@ where
     )
 }
 
-/// The input stream: device samples are converted to f32 in a scratch buffer allocated here (so
-/// the callback never allocates), then feed the monitor ring and, while armed, the capture.
-#[cfg(not(target_os = "freebsd"))]
-fn build_input<T>(
-    device: &cpal::Device,
-    config: &cpal::StreamConfig,
-    shared: &Arc<Shared>,
-    monitor: &Arc<InputRing>,
-) -> Result<cpal::Stream, cpal::BuildStreamError>
-where
-    T: cpal::SizedSample,
-    f32: cpal::FromSample<T>,
-{
-    use cpal::Sample;
-    use cpal::traits::DeviceTrait;
-    let sh = Arc::clone(shared);
-    let mon = Arc::clone(monitor);
-    let mut scratch = vec![0.0f32; 8192 * usize::from(config.channels).max(1)];
-    let chunk = scratch.len();
-    let mut owed = 0;
-    device.build_input_stream(
-        config,
-        move |data: &[T], _: &cpal::InputCallbackInfo| {
-            crate::mark_audio_thread();
-            for part in data.chunks(chunk) {
-                let Some(s) = scratch.get_mut(..part.len()) else { return };
-                for (o, x) in s.iter_mut().zip(part) {
-                    *o = f32::from_sample(*x);
-                }
-                mon.push(s);
-                if sh.armed.load(Ordering::Acquire) {
-                    sh.capture(s, &mut owed);
-                } else {
-                    owed = 0;
-                }
-            }
-        },
-        |e| {
-            // Possibly the audio thread (see `crate::mark_audio_thread`).
-            crate::mark_audio_thread();
-            log::warn!("input stream error: {e}");
-        },
-        None,
-    )
-}
-
 impl Recorder {
     /// Open the default input device. Errors when there is none (the caller shows a message).
     pub fn open() -> Result<Recorder, String> {
