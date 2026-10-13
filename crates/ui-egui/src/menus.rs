@@ -238,6 +238,9 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                     ui.menu_button(&root.label, |ui| {
                         for c in &root.children {
                             menu_node(app, ui, c, &extra);
+                            if c.path == "File > Open" {
+                                crate::recent::menu(app, ui);
+                            }
                         }
                         if root.label == "AudioSuite" {
                             ui.separator();
