@@ -151,6 +151,9 @@ impl WebShell {
     }
 
     fn handle(&mut self, purpose: Purpose, name: &str, bytes: &[u8]) {
+        if matches!(purpose, Purpose::Session) && soundcraft_ui_egui::bounce::refuses_session_switch(&mut self.app) {
+            return;
+        }
         let e = &mut self.app.engine;
         let at = e.session().edit.selection.start.max(0);
         let result = match purpose {

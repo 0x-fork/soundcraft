@@ -282,61 +282,260 @@ pub fn export_midi(e: &Engine, only: Option<&[TrackId]>) -> Result<Vec<u8>> {
     soundcraft_midi::write_smf(&smf).map_err(|err| EngineError::Io(err.to_string()))
 }
 
-/// Render the main mix. Returns the encoded file and (peak dBFS, integrated LUFS).
-pub fn bounce_bytes(e: &Engine, r: Range, opts: &EncodeOptions, normalize: bool) -> Result<(Vec<u8>, (f32, f32, f32))> {
-    bounce_bytes_with(e, r, opts, normalize, false)
-}
-
-/// Render the main mix in its own format (every main channel, SMPTE/WAV order, with the WAV
-/// speaker mask of the main format), or an ITU stereo fold-down when `fold_stereo`.
-pub fn bounce_bytes_with(e: &Engine, r: Range, opts: &EncodeOptions, normalize: bool, fold_stereo: bool) -> Result<(Vec<u8>, (f32, f32, f32))> {
-    bounce_source(e, r, opts, normalize, fold_stereo, None)
-}
-
-/// [`bounce_bytes_with`] for the main mix, or for `bus` when one is named.
-pub fn bounce_source(
-    e: &Engine,
-    r: Range,
-    opts: &EncodeOptions,
-    normalize: bool,
-    fold_stereo: bool,
+/// A bounce of the main mix, or of one bus, over a range, written to its file block by block so no
+/// bounce has to fit in memory, and rendered a slice at a time ([`Bounce::step`]) so a UI can show
+/// progress. The file appears at its path only once complete; a bounce that fails, or is dropped
+/// unfinished, leaves any older file there alone.
+pub struct Bounce {
+    session: Arc<Session>,
+    path: PathBuf,
+    part: PathBuf,
+    range: Range,
     bus: Option<BusId>,
-) -> Result<(Vec<u8>, (f32, f32, f32))> {
-    let s = e.session();
-    if r.len() > s.sample_rate.samples(4.0 * 3600.0) {
-        return Err(EngineError::BadParams("file.bounce_mix".into(), "bounces are limited to 4 hours".into()));
-    }
-    let (mut ch, fmt) = render_bounce(s, r, fold_stereo, bus);
-    if normalize {
-        soundcraft_dsp::offline::normalize(&mut ch, -0.1, false);
-    }
-    let peak = soundcraft_dsp::offline::peak_db(&ch);
-    let mut lm = soundcraft_dsp::meter::LoudnessMeter::new(s.sample_rate.as_f64() as f32, ch.len());
-    let frames = ch.first().map_or(0, Vec::len);
-    lm.process(&ch, frames);
-    let lufs = lm.integrated_lufs();
-    let true_peak = lm.true_peak_db();
-    let buf = AudioBuffer { sample_rate: s.sample_rate.hz(), channels: ch };
-    let bytes = soundcraft_audio_io::encode_with_channel_mask(&buf, opts, fmt.channel_mask()).map_err(|err| EngineError::Io(err.to_string()))?;
-    Ok((bytes, (peak, lufs, true_peak)))
+    fold: Option<ChannelFormat>,
+    normalize: bool,
+    /// Measuring the peak to normalize to, the first of two passes.
+    measuring: bool,
+    render: soundcraft_mix::RangeRender,
+    block: Vec<Vec<f32>>,
+    done: usize,
+    gain: f32,
+    peak: f32,
+    meter: soundcraft_dsp::meter::LoudnessMeter,
+    enc: Option<soundcraft_audio_io::FileEncoder<Out>>,
 }
 
-/// The main mix over `r` and its format (folded to stereo on request).
-fn render_main(s: &Session, r: Range, fold_stereo: bool) -> (Vec<Vec<f32>>, ChannelFormat) {
-    render_bounce(s, r, fold_stereo, None)
+/// A finished bounce: the size of its file and its levels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bounced {
+    pub bytes: u64,
+    pub peak_db: f32,
+    pub lufs: f32,
+    pub true_peak_db: f32,
 }
 
-/// The main mix, or one bus, over `r`.
-fn render_bounce(s: &Session, r: Range, fold_stereo: bool, bus: Option<BusId>) -> (Vec<Vec<f32>>, ChannelFormat) {
-    let (ch, fmt) = if let Some(id) = bus {
-        let fmt = s.bus(id).map(|b| b.format).unwrap_or(ChannelFormat::Stereo);
-        (soundcraft_mix::render_bus(s, id, r, 1024), fmt)
-    } else {
-        let ch = soundcraft_mix::render_range(s, r, 1024);
-        let fmt = if ch.len() <= 2 { ChannelFormat::Stereo } else { s.main_format() };
-        (ch, fmt)
+impl Bounce {
+    /// Starts a bounce of `s`'s main mix, or of `bus`, over `r` to `path`: every channel (SMPTE/WAV
+    /// order, with the WAV speaker mask of its format), or an ITU stereo fold-down when
+    /// `fold_stereo`, peak-normalized to -0.1 dBFS when `normalize` (which renders twice).
+    pub fn new(
+        s: Arc<Session>,
+        path: &Path,
+        r: Range,
+        opts: &EncodeOptions,
+        bus: Option<BusId>,
+        normalize: bool,
+        fold_stereo: bool,
+    ) -> Result<Bounce> {
+        if r.len() > s.sample_rate.samples(MAX_BOUNCE_SECS) {
+            return Err(EngineError::BadParams("file.bounce_mix".into(), "bounces are limited to 4 hours".into()));
+        }
+        let (fmt, channels, fold) = bounce_layout(&s, bus, fold_stereo);
+        let name = path.file_name().map_or_else(|| "bounce".into(), |n| n.to_string_lossy().into_owned());
+        let part = path.with_file_name(format!("{name}.part"));
+        crate::file_access::check_write(path).map_err(EngineError::Io)?;
+        crate::file_access::check_write(&part).map_err(EngineError::Io)?;
+        let enc = (|| -> std::result::Result<_, soundcraft_audio_io::AudioError> {
+            let enc = soundcraft_audio_io::FileEncoder::new(Out::create(&part)?, opts, channels, s.sample_rate.hz(), Some(fmt.channel_mask()))?;
+            enc.check_room(u64::try_from(r.len()).unwrap_or(0))?;
+            Ok(enc)
+        })()
+        .map_err(|err| {
+            let _ = std::fs::remove_file(&part);
+            EngineError::Io(format!("{}: {err}", path.display()))
+        })?;
+        let render = soundcraft_mix::RangeRender::new(&s, bus, r, 1024);
+        let meter = soundcraft_dsp::meter::LoudnessMeter::new(s.sample_rate.as_f64() as f32, channels);
+        Ok(Bounce {
+            session: s,
+            path: path.to_path_buf(),
+            part,
+            range: r,
+            bus,
+            fold,
+            normalize,
+            measuring: normalize,
+            render,
+            block: Vec::new(),
+            done: 0,
+            gain: 1.0,
+            peak: 0.0,
+            meter,
+            enc: Some(enc),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn range(&self) -> Range {
+        self.range
+    }
+
+    /// How far along the bounce is, from 0 to 1.
+    pub fn progress(&self) -> f32 {
+        let pass = (self.done as f64 / self.range.len().max(1) as f64).min(1.0) as f32;
+        match (self.normalize, self.measuring) {
+            (false, _) => pass,
+            (true, true) => pass / 2.0,
+            (true, false) => 0.5 + pass / 2.0,
+        }
+    }
+
+    /// Renders blocks until `more` returns false (at least one per call). Returns the finished
+    /// bounce once its file is complete.
+    pub fn step(&mut self, mut more: impl FnMut() -> bool) -> Result<Option<Bounced>> {
+        loop {
+            match self.render.next_block(&self.session) {
+                Some((chunk, n)) => {
+                    fill(&mut self.block, chunk, n, self.fold, self.gain);
+                    self.done += n;
+                    self.peak = self.peak.max(soundcraft_dsp::offline::peak(&self.block));
+                    if !self.measuring {
+                        self.meter.process(&self.block, n);
+                        if let Some(enc) = &mut self.enc {
+                            enc.write(&self.block, n).map_err(|err| EngineError::Io(format!("{}: {err}", self.path.display())))?;
+                        }
+                    }
+                }
+                None if self.measuring => {
+                    self.gain = if self.peak > 0.0 { soundcraft_dsp::db_to_gain(-0.1) / self.peak } else { 1.0 };
+                    self.peak = 0.0;
+                    self.done = 0;
+                    self.measuring = false;
+                    self.render = soundcraft_mix::RangeRender::new(&self.session, self.bus, self.range, 1024);
+                }
+                None => return self.finish().map(Some),
+            }
+            if !more() {
+                return Ok(None);
+            }
+        }
+    }
+
+    /// Renders the whole bounce (see [`Bounce::step`]).
+    pub fn run(mut self) -> Result<Bounced> {
+        loop {
+            if let Some(done) = self.step(|| true)? {
+                return Ok(done);
+            }
+        }
+    }
+
+    fn finish(&mut self) -> Result<Bounced> {
+        let bytes = match self.enc.take() {
+            Some(enc) => enc.finish().map_err(|err| EngineError::Io(format!("{}: {err}", self.path.display())))?.complete(&self.part, &self.path)?,
+            None => 0,
+        };
+        Ok(Bounced {
+            bytes,
+            peak_db: soundcraft_dsp::gain_to_db(self.peak),
+            lufs: self.meter.integrated_lufs(),
+            true_peak_db: self.meter.true_peak_db(),
+        })
+    }
+}
+
+impl Drop for Bounce {
+    /// Removes the part file unless the bounce completed (which renamed it).
+    fn drop(&mut self) {
+        drop(self.enc.take());
+        let _ = std::fs::remove_file(&self.part);
+    }
+}
+
+/// Where a bounce is written: its part file, or memory in the browser, which has no file system.
+enum Out {
+    File(std::io::BufWriter<std::fs::File>),
+    Memory(std::io::Cursor<Vec<u8>>),
+}
+
+impl Out {
+    fn create(part: &Path) -> std::io::Result<Out> {
+        if cfg!(target_arch = "wasm32") {
+            return Ok(Out::Memory(std::io::Cursor::new(Vec::new())));
+        }
+        Ok(Out::File(std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(part)?)))
+    }
+
+    /// Puts the finished file at `path` and returns its size: the part file is synced and renamed
+    /// over it; in the browser the bytes are delivered ([`write_file`]).
+    fn complete(self, part: &Path, path: &Path) -> Result<u64> {
+        match self {
+            Out::File(out) => {
+                let mut len = 0;
+                let synced = out.into_inner().map_err(std::io::IntoInnerError::into_error).and_then(|f| {
+                    f.sync_all()?;
+                    len = f.metadata()?.len();
+                    Ok(())
+                });
+                replace_with(part, path, synced).map(|()| len)
+            }
+            Out::Memory(m) => {
+                let bytes = m.into_inner();
+                write_file(&path.to_string_lossy(), &bytes)?;
+                Ok(bytes.len() as u64)
+            }
+        }
+    }
+}
+
+impl std::io::Write for Out {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Out::File(f) => f.write(buf),
+            Out::Memory(m) => {
+                // A long bounce may not fit in the browser's memory: fail instead of aborting.
+                let end = usize::try_from(m.position()).unwrap_or(usize::MAX).saturating_add(buf.len());
+                let v = m.get_mut();
+                v.try_reserve(end.saturating_sub(v.len())).map_err(|_| std::io::ErrorKind::OutOfMemory)?;
+                m.write(buf)
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Out::File(f) => f.flush(),
+            Out::Memory(_) => Ok(()),
+        }
+    }
+}
+
+impl std::io::Seek for Out {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        match self {
+            Out::File(f) => f.seek(pos),
+            Out::Memory(m) => m.seek(pos),
+        }
+    }
+}
+
+const MAX_BOUNCE_SECS: f64 = 4.0 * 3600.0;
+
+/// The format, channel count and fold-down source of a bounce of the main mix or `bus`: every
+/// channel (a mono or stereo main mix as stereo), or an ITU stereo fold-down of a surround source
+/// when `fold_stereo`.
+fn bounce_layout(s: &Session, bus: Option<BusId>, fold_stereo: bool) -> (ChannelFormat, usize, Option<ChannelFormat>) {
+    let nch = soundcraft_mix::source_channels(s, bus);
+    let fmt = match bus {
+        Some(id) => s.bus(id).map_or(ChannelFormat::Stereo, |b| b.format),
+        None if nch <= 2 => ChannelFormat::Stereo,
+        None => s.main_format(),
     };
-    if fold_stereo && ch.len() > 2 { (soundcraft_mix::fold_down_stereo(fmt, &ch), ChannelFormat::Stereo) } else { (ch, fmt) }
+    if fold_stereo && nch > 2 { (ChannelFormat::Stereo, 2, Some(fmt)) } else { (fmt, nch, None) }
+}
+
+/// The first `n` frames of `chunk`, folded down from `fold` when set and scaled by `gain`.
+fn fill(block: &mut Vec<Vec<f32>>, chunk: &[Vec<f32>], n: usize, fold: Option<ChannelFormat>, gain: f32) {
+    let folded = fold.map(|from| soundcraft_mix::fold_down_stereo(from, chunk));
+    let src = folded.as_deref().unwrap_or(chunk);
+    block.resize_with(src.len(), Vec::new);
+    for (d, c) in block.iter_mut().zip(src) {
+        d.clear();
+        d.extend(c.iter().take(n).map(|v| v * gain));
+    }
 }
 
 /// Bounce one file per audio/instrument track (each soloed, so its sends and auxes are included)
@@ -348,6 +547,9 @@ pub fn bounce_stems(e: &Engine, dir: &str, r: Range, opts: &EncodeOptions) -> Re
 /// [`bounce_stems`] in the main format, or folded down to stereo when `fold_stereo`.
 pub fn bounce_stems_with(e: &Engine, dir: &str, r: Range, opts: &EncodeOptions, fold_stereo: bool) -> Result<Vec<String>> {
     let s = e.session();
+    if r.len() > s.sample_rate.samples(MAX_BOUNCE_SECS) {
+        return Err(EngineError::BadParams("file.bounce_stems".into(), "bounces are limited to 4 hours".into()));
+    }
     make_dir(dir)?;
     let ext = match opts.format {
         FileFormat::Aiff => "aif",
@@ -366,11 +568,8 @@ pub fn bounce_stems_with(e: &Engine, dir: &str, r: Range, opts: &EncodeOptions, 
         for t in &mut solo.tracks {
             t.mixer.solo = t.id == id;
         }
-        let (ch, fmt) = render_main(&solo, r, fold_stereo);
-        let buf = AudioBuffer { sample_rate: s.sample_rate.hz(), channels: ch };
-        let bytes = soundcraft_audio_io::encode_with_channel_mask(&buf, opts, fmt.channel_mask()).map_err(|err| EngineError::Io(err.to_string()))?;
         let path = Path::new(dir).join(format!("{} - {}.{ext}", sanitize_name(&s.name), sanitize_name(&name)));
-        write_path(&path, bytes)?;
+        Bounce::new(Arc::new(solo), &path, r, opts, None, false, fold_stereo)?.run()?;
         out.push(path.to_string_lossy().into_owned());
     }
     Ok(out)
@@ -712,7 +911,13 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
 pub fn replace_file(tmp: &Path, file: &Path, bytes: &[u8]) -> Result<()> {
     crate::file_access::check_write(file).map_err(EngineError::Io)?;
     crate::file_access::check_write(tmp).map_err(EngineError::Io)?;
-    if let Err(err) = write_synced(tmp, bytes).and_then(|()| std::fs::rename(tmp, file)) {
+    replace_with(tmp, file, write_synced(tmp, bytes))
+}
+
+/// Renames `tmp` over `file` once it is `written`, or removes it when writing or renaming failed.
+/// The caller has checked both paths ([`crate::file_access::check_write`]).
+fn replace_with(tmp: &Path, file: &Path, written: std::io::Result<()>) -> Result<()> {
+    if let Err(err) = written.and_then(|()| std::fs::rename(tmp, file)) {
         let _ = std::fs::remove_file(tmp);
         return Err(EngineError::Io(format!("{}: {err}", file.display())));
     }
