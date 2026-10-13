@@ -107,7 +107,8 @@ where things are.
   Scrubber tools; cut, copy, paste, duplicate, repeat, shift, insert silence, separate (at
   selection, on grid, at transients), heal, consolidate, strip silence, nudge; fades and
   crossfades in five shapes, drawn straight from the clip corners; playlists with comping lanes;
-  clip gain lines; edit groups; single-key Commands Focus shortcuts; undo for everything.
+  clip gain lines; edit groups; single-key Commands Focus shortcuts; trackpad scrolling that
+  follows your fingers and pinch-to-zoom around the pointer; undo for everything.
 - **Mixing:** fader and pan with automation, pre/post sends, busses, aux inputs, master faders,
   VCA masters, routing folders, solo modes, mute and solo groups, phase invert and trim, clip
   effects, and automatic plugin delay compensation.
@@ -116,7 +117,8 @@ where things are.
 - **Plugins:** 7-band and 1-band EQ, compressor/limiter, expander/gate, de-esser, maximizer,
   channel strip, room and plate reverbs, mod delay, chorus, flanger, phaser, saturator, lo-fi,
   rectifier, pitch shifter, time shift, gain, trim, invert, DC removal, signal generator, dither,
-  a subtractive synth and a drum synth, all original. **CLAP plugins** load too. Any processor
+  a subtractive synth, a drum synth and a sampler (plays any WAV, AIFF, FLAC, MP3 or OGG across the
+  keyboard), all original. **CLAP plugins** load too. Any processor
   runs offline as AudioSuite, and user presets save per plugin.
 - **MIDI:** instrument and MIDI tracks, a piano-roll MIDI editor with a velocity lane, an event
   list, a score view, step input, quantize, transpose, real-time properties, Standard MIDI Files,
@@ -202,6 +204,9 @@ soundcraft-cli app --port 7801 ui.screenshot '{"path":"shot.png"}'
 
 # Give Claude a DAW.
 claude mcp add soundcraft -- soundcraft-cli mcp --demo
+
+# Or keep the agent to some folders (reads and writes are separate roots).
+soundcraft-cli mcp --automation-read-root DIR --automation-write-root DIR
 ```
 
 See [`docs/control-protocol.md`](docs/control-protocol.md) and [`docs/mcp.md`](docs/mcp.md).
@@ -250,7 +255,7 @@ very welcome, in the issues or on Discord.
 
 ## Downloads
 
-**Download SoundCraft** from GitHub: the [latest release](https://github.com/storytold/soundcraft/releases/latest) has every build listed below, and [all releases](https://github.com/storytold/soundcraft/releases) has earlier versions and their notes. `<ver>` in the file names is the version number, and `SHA256SUMS.txt` lists a checksum for every file.
+**Download SoundCraft** from GitHub: the [latest release](https://github.com/storytold/soundcraft/releases/latest) has every build listed below, and [all releases](https://github.com/storytold/soundcraft/releases) have earlier versions and their notes. `<ver>` in the file names is the version number, and `SHA256SUMS.txt` lists a checksum for every file.
 
 ### Windows
 

@@ -143,6 +143,8 @@ fn color_palette(app: &mut SoundApp, ctx: &egui::Context) {
                 }
             }
         });
+        ui.separator();
+        ui.add(egui::Slider::new(&mut app.ui.track_tint, 0.0..=1.0).show_value(false).text("Track tint in the Edit window"));
     });
     app.ui.show_color_palette = open;
 }
@@ -178,11 +180,17 @@ fn system_usage(app: &mut SoundApp, ctx: &egui::Context) {
 fn task_manager(app: &mut SoundApp, ctx: &egui::Context) {
     let mut open = app.ui.show_task_manager;
     win(ctx, &mut open, "Task Manager", vec2(320.0, 120.0), |ui| {
-        ui.label("No background tasks are running.");
+        match &app.bounce {
+            Some(b) => {
+                ui.label(format!("Bouncing {} ({:.0}%)", b.path().display(), b.progress() * 100.0));
+                ui.add(egui::ProgressBar::new(b.progress()));
+            }
+            None => {
+                ui.label("No background tasks are running.");
+            }
+        }
         ui.label(
-            egui::RichText::new("Renders, bounces and AudioSuite processes run to completion before returning.")
-                .small()
-                .color(Tokens::current().text_dim),
+            egui::RichText::new("Renders and AudioSuite processes run to completion before returning.").small().color(Tokens::current().text_dim),
         );
     });
     app.ui.show_task_manager = open;
@@ -202,10 +210,7 @@ fn metadata(app: &mut SoundApp, ctx: &egui::Context) {
                 ("Clips", s.tracks.iter().map(|t| t.clips().len()).sum::<usize>().to_string()),
                 ("Audio files", s.sources.len().to_string()),
                 ("Markers", s.markers.len().to_string()),
-                (
-                    "Length",
-                    soundcraft_time::format_position(s.content_end(), soundcraft_time::TimeFormat::MinSecs, s.sample_rate, &s.tempo, s.frame_rate, 0),
-                ),
+                ("Length", s.format_position(s.content_end(), soundcraft_time::TimeFormat::MinSecs)),
             ] {
                 ui.label(k);
                 ui.label(v);
@@ -334,7 +339,7 @@ fn workspace(app: &mut SoundApp, ctx: &egui::Context) {
                         }
                         let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
                         let ext = std::path::Path::new(&name).extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
-                        (is_dir || ["wav", "aif", "aiff", "flac", "mp3", "ogg", "m4a", "caf", "mid", "midi", "scraft"].contains(&ext.as_str()))
+                        (is_dir || ["wav", "aif", "aiff", "flac", "mp3", "ogg", "m4a", "m4b", "caf", "mid", "midi", "scraft"].contains(&ext.as_str()))
                             .then_some((name, is_dir))
                     })
                     .collect()
@@ -350,7 +355,7 @@ fn workspace(app: &mut SoundApp, ctx: &egui::Context) {
                     if is_dir {
                         app.ui.workspace_dir = path;
                     } else if name.ends_with(".scraft") {
-                        let _ = app.run("session.open", json!({"path": path}));
+                        let _ = crate::dialogs::run_or_ask(app, "session.open", json!({"path": path}));
                     } else if name.ends_with(".mid") || name.ends_with(".midi") {
                         let _ = app.run("file.import_midi", json!({"path": path}));
                     } else {
@@ -432,7 +437,7 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
             let _ = app.run("options.delay_compensation", json!({"value": dc}));
         }
         if ui.button("Reconnect audio device").clicked() {
-            app.player = Some(soundcraft_playback::Player::new(app.engine.session_arc()));
+            app.reconnect_audio();
         }
     });
     app.ui.show_playback_engine = open;
@@ -493,10 +498,13 @@ pub fn shortcuts_window(app: &mut SoundApp, ctx: &egui::Context) {
     win(ctx, &mut open, "Keyboard Shortcuts", vec2(520.0, 480.0), |ui| {
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Grid::new("sc").num_columns(3).striped(true).show(ui, |ui| {
-                for c in soundcraft_engine::command_specs().iter().filter(|c| c.shortcut.is_some()) {
-                    ui.label(egui::RichText::new(crate::shortcuts::shortcut_label(c.shortcut.unwrap_or(""), mac)).font(mono(11.0)));
-                    ui.label(c.label);
-                    ui.label(egui::RichText::new(c.menu.join(" › ")).small());
+                let engine = soundcraft_engine::command_specs().iter().map(|c| (c.shortcut, c.label, c.menu.join(" › ")));
+                let windows = crate::menus::UI_COMMANDS.iter().map(|c| (c.3, c.1, c.2.replace(" > ", " › ")));
+                for (shortcut, label, menu) in engine.chain(windows) {
+                    let Some(shortcut) = shortcut else { continue };
+                    ui.label(egui::RichText::new(crate::shortcuts::shortcut_label(shortcut, mac)).font(mono(11.0)));
+                    ui.label(label);
+                    ui.label(egui::RichText::new(menu).small());
                     ui.end_row();
                 }
             });

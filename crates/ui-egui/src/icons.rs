@@ -129,9 +129,6 @@ pub fn draw(painter: &Painter, r: Rect, name: &str, c: Color32) {
         "triangle_down" => {
             painter.add(Shape::convex_polygon(vec![p(r, 0.25, 0.35), p(r, 0.75, 0.35), p(r, 0.5, 0.68)], c, Stroke::NONE));
         }
-        "triangle_right" => {
-            painter.add(Shape::convex_polygon(vec![p(r, 0.35, 0.25), p(r, 0.68, 0.5), p(r, 0.35, 0.75)], c, Stroke::NONE));
-        }
         "note" => {
             painter.circle_filled(p(r, 0.38, 0.72), r.width() * 0.13, c);
             painter.line_segment([p(r, 0.5, 0.72), p(r, 0.5, 0.2)], s);
@@ -145,6 +142,13 @@ pub fn draw(painter: &Painter, r: Rect, name: &str, c: Color32) {
                 let c1 = r.center() + vec2(a.cos(), a.sin()) * r.width() * 0.34;
                 painter.line_segment([c0, c1], Stroke::new(s.width * 1.4, c));
             }
+        }
+        "lock" => {
+            painter.rect_filled(Rect::from_min_max(p(r, 0.22, 0.46), p(r, 0.78, 0.88)), r.width() * 0.08, c);
+            let (x, y, w) = (r.center().x, r.min.y + r.height() * 0.46, r.width() * 0.19);
+            let arc: Vec<Pos2> =
+                (0..=12).map(|i| std::f32::consts::PI * i as f32 / 12.0).map(|a| pos2(x - w * a.cos(), y - w * 1.4 * a.sin())).collect();
+            painter.add(Shape::line(arc, s));
         }
         "wave" => {
             let n = 24;

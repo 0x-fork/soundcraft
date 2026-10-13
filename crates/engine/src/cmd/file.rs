@@ -15,32 +15,41 @@ pub fn specs() -> Vec<CommandSpec> {
             Ok(json!({"name": e.session().name, "tracks": e.session().tracks.len(), "missing": missing}))
         }),
         cmd!(noundo "session.close", "Close Session", ["File"], Some("Cmd+Shift+W"), "{}", always, |e, _| { e.replace_session(Session::default()); e.path = None; Ok(json!({})) }),
-        cmd!(noundo "session.save", "Save Session", ["File"], Some("Cmd+S"), "{path?}", always, |e, p| {
+        cmd!(noundo "session.save", "Save Session", ["File"], Some("Cmd+S"), "{path?, replace?: false}", always, |e, p| {
             let path = str_param(p, "path").map(str::to_string).or_else(|| e.path.clone()).ok_or_else(|| bad("session.save", "no path yet: pass `path` (Save As)"))?;
+            refuse_replacing(e, "session.save", &crate::io::session_file(&path), p)?;
             let written = crate::io::save_session(e, &path)?;
             Ok(json!({"path": path, "audio_files_written": written}))
         }),
-        cmd!(noundo "session.save_as", "Save Session As...", ["File"], Some("Cmd+Shift+S"), "{path}", always, |e, p| {
+        cmd!(noundo "session.save_as", "Save Session As...", ["File"], Some("Cmd+Shift+S"), "{path, replace?: false}", always, |e, p| {
             let path = str_param(p, "path").ok_or_else(|| bad("session.save_as", "`path` required"))?.to_string();
+            refuse_replacing(e, "session.save_as", &crate::io::session_file(&path), p)?;
             let written = crate::io::save_session(e, &path)?;
             Ok(json!({"path": path, "audio_files_written": written}))
         }),
-        cmd!(noundo "session.save_copy", "Save Session Copy In...", ["File"], None, "{path}", always, |e, p| {
+        cmd!(noundo "session.save_copy", "Save Session Copy In...", ["File"], None, "{path, replace?: false}", always, |e, p| {
             let path = str_param(p, "path").ok_or_else(|| bad("session.save_copy", "`path` required"))?.to_string();
+            refuse_replacing(e, "session.save_copy", &crate::io::session_file(&path), p)?;
             let written = crate::io::save_session_copy(e, &path)?;
             Ok(json!({"path": path, "audio_files_written": written}))
         }),
-        cmd!(noundo "session.save_template", "Save As Template...", ["File"], None, "{path}", always, |e, p| {
+        cmd!(noundo "session.save_template", "Save As Template...", ["File"], None, "{path, replace?: false}", always, |e, p| {
             let path = str_param(p, "path").ok_or_else(|| bad("session.save_template", "`path` required"))?.to_string();
+            let file = crate::io::session_file(&path);
+            refuse_replacing(e, "session.save_template", &file, p)?;
             let mut s = e.session().clone();
             for t in &mut s.tracks { for pl in &mut t.playlists { pl.clips.clear() } }
             s.sources.clear();
             s.videos.clear();
             let text = s.to_json().map_err(|err| EngineError::Io(err.to_string()))?;
-            std::fs::write(&path, text).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
-            Ok(json!({"path": path}))
+            if cfg!(target_arch = "wasm32") {
+                crate::io::write_file(&file.to_string_lossy(), text.as_bytes())?;
+            } else {
+                crate::io::replace_file(&file.with_extension("scraft.tmp"), &file, text.as_bytes())?;
+            }
+            Ok(json!({"path": file}))
         }),
-        cmd!(noundo "session.revert", "Revert Session to Saved...", ["File"], None, "{}", always, |e, _| {
+        cmd!(noundo "session.revert", "Revert Session to Saved...", ["File"], None, "{}", |e| if e.path.is_some() { Ok(()) } else { Err("the session has not been saved".into()) }, |e, _| {
             let path = e.path.clone().ok_or_else(|| bad("session.revert", "the session has not been saved"))?;
             crate::io::open_session(e, &path)?;
             Ok(json!({}))
@@ -57,7 +66,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("file.import_midi", "MIDI...", ["File", "Import"], Some("Cmd+Alt+I"), "{path, at?}", always, |e, p| {
             let path = str_param(p, "path").ok_or_else(|| bad("file.import_midi", "`path` required"))?.to_string();
             let at = position_param(e, "file.import_midi", p, "at")?.unwrap_or(0);
-            let bytes = std::fs::read(&path).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+            let bytes = crate::io::read_file(&path)?;
             let tracks = crate::io::import_midi_bytes(e, &bytes, at, bool_or(p, "tempo_map", true))?;
             Ok(json!({"tracks": tracks}))
         }),
@@ -71,7 +80,7 @@ pub fn specs() -> Vec<CommandSpec> {
             |e, p| {
                 let path = str_param(p, "path").ok_or_else(|| bad("file.import_video", "`path` required"))?.to_string();
                 let at = position_param(e, "file.import_video", p, "at")?.unwrap_or(0).max(0);
-                let bytes = std::fs::read(&path).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+                let bytes = crate::io::read_file(&path)?;
                 crate::io::import_video_bytes(e, &path, bytes, at)
             }
         ),
@@ -98,24 +107,32 @@ pub fn specs() -> Vec<CommandSpec> {
             let path = str_param(p, "path").ok_or_else(|| bad("file.export_midi", "`path` required"))?.to_string();
             let only = if p.get("tracks").is_some() || p.get("track").is_some() { Some(tracks_param(e, "file.export_midi", p)?) } else { None };
             let bytes = crate::io::export_midi(e, only.as_deref())?;
-            std::fs::write(&path, &bytes).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+            crate::io::write_file(&path, &bytes)?;
             Ok(json!({"path": path, "bytes": bytes.len()}))
         }),
         cmd!(noundo "file.export_session_text", "Session Info as Text...", ["File", "Export"], None, "{path?}", always, |e, p| {
             let text = crate::inspect::session_text(e);
             if let Some(path) = str_param(p, "path") {
-                std::fs::write(path, &text).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+                crate::io::write_file(path, text.as_bytes())?;
             }
             Ok(json!({"text": text}))
         }),
-        cmd!(noundo "file.export_clips", "Export Clips as Files...", [], None, "{dir, clips?, format?: wav}", always, |e, p| {
+        cmd!(noundo "file.export_clips", "Export Clips as Files...", [], Some("Cmd+Shift+K"), "{dir, clips?, format?: wav}", always, |e, p| {
             let dir = str_param(p, "dir").ok_or_else(|| bad("file.export_clips", "`dir` required"))?.to_string();
             let ids = clip_ids_param(e, p);
+            if ids.is_empty() {
+                return Err(bad("file.export_clips", "no clips selected"));
+            }
+            for (t, c) in ids.iter().filter_map(|id| e.session().find_clip(*id)) {
+                let channels = e.session().track(t).map_or(1, |x| x.channels());
+                crate::io::refuse_longer(e.session(), "file.export_clips", &c.name, "export", c.length, crate::io::render_limit(channels))?;
+            }
             let n = crate::io::export_clips(e, &ids, &dir)?;
-            Ok(json!({"written": n}))
+            Ok(json!({"written": n, "dir": dir}))
         }),
-        cmd!(noundo "file.export_selected_tracks_as_session", "Selected Tracks as New Session...", ["File", "Export"], None, "{path, tracks?}", has_selection, |e, p| {
+        cmd!(noundo "file.export_selected_tracks_as_session", "Selected Tracks as New Session...", ["File", "Export"], None, "{path, tracks?, replace?: false}", has_selection, |e, p| {
             let path = str_param(p, "path").ok_or_else(|| bad("file.export_selected_tracks_as_session", "`path` required"))?.to_string();
+            refuse_replacing(e, "file.export_selected_tracks_as_session", &crate::io::session_file(&path), p)?;
             let keep = tracks_required(e, "file.export_selected_tracks_as_session", p)?;
             let mut s = e.session().clone();
             s.tracks.retain(|t| keep.contains(&t.id) || t.kind == soundcraft_model::TrackKind::Master);
@@ -179,6 +196,16 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
 }
 
+/// Writing a session over an existing file needs `replace: true` (see `io::replaces`).
+fn refuse_replacing(e: &Engine, id: &str, file: &std::path::Path, p: &Value) -> Result<()> {
+    // First, so a path outside the write root is refused as such and never reported as existing.
+    crate::file_access::check_write(file).map_err(EngineError::Io)?;
+    if crate::io::replaces(e, id, file) && !bool_or(p, "replace", false) {
+        return Err(bad(id, format!("{} already exists: pass `replace: true` to replace it", file.display())));
+    }
+    Ok(())
+}
+
 fn new_session(e: &mut Engine, p: &Value) -> Result<Value> {
     let name = str_param(p, "name").unwrap_or("Untitled").to_string();
     let sr =
@@ -210,7 +237,7 @@ fn import_audio(e: &mut Engine, p: &Value) -> Result<Value> {
     let target = import_audio_target(e, p)?;
     let mut out = Vec::new();
     for path in &paths {
-        let bytes = std::fs::read(path).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+        let bytes = crate::io::read_file(path)?;
         let name = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("Audio").to_string();
         let r = crate::io::import_audio_bytes(e, &name, &bytes, Some(path.as_str()), target, at)?;
         out.push(r);
@@ -254,6 +281,21 @@ fn fold_down_param(p: &Value, id: &str) -> Result<bool> {
 }
 
 fn bounce(e: &mut Engine, p: &Value) -> Result<Value> {
+    let job = bounce_job(e, p)?;
+    let (path, seconds) = (job.path().to_string_lossy().into_owned(), e.session().sample_rate.seconds(job.range().len()));
+    let done = job.run()?;
+    Ok(json!({
+        "path": path,
+        "bytes": done.bytes,
+        "seconds": seconds,
+        "peak_db": done.peak_db,
+        "lufs": done.lufs,
+        "true_peak_db": done.true_peak_db,
+    }))
+}
+
+/// The bounce `file.bounce_mix` runs for `p`, not rendered yet.
+pub fn bounce_job(e: &Engine, p: &Value) -> Result<crate::io::Bounce> {
     let path = str_param(p, "path").ok_or_else(|| bad("file.bounce_mix", "`path` required"))?.to_string();
     let r = range_param(e, "file.bounce_mix", p)?;
     let r = if r.is_empty() { soundcraft_time::Range::new(0, e.session().content_end().max(1)) } else { r };
@@ -271,11 +313,7 @@ fn bounce(e: &mut Engine, p: &Value) -> Result<Value> {
     let normalize = bool_or(p, "normalize", false);
     let fold = fold_down_param(p, "file.bounce_mix")?;
     let bus = bounce_bus(e, p)?;
-    let (bytes, stats) = crate::io::bounce_source(e, r, &opts, normalize, fold, bus)?;
-    std::fs::write(&path, &bytes).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
-    Ok(
-        json!({"path": path, "bytes": bytes.len(), "seconds": e.session().sample_rate.seconds(r.len()), "peak_db": stats.0, "lufs": stats.1, "true_peak_db": stats.2}),
-    )
+    crate::io::Bounce::new(e.session_arc(), std::path::Path::new(&path), r, &opts, bus, normalize, fold)
 }
 
 /// Write the score of the chosen MIDI tracks as MusicXML (or SVG when `svg`).
@@ -291,7 +329,7 @@ fn write_score(e: &mut Engine, p: &Value, id: &str, svg: bool) -> Result<Value> 
         Some(p) => p.to_string(),
         None => std::env::temp_dir().join(format!("{}.{ext}", crate::io::sanitize_name(&setup.title))).to_string_lossy().to_string(),
     };
-    std::fs::write(&path, &text).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+    crate::io::write_file(&path, text.as_bytes())?;
     let measures = parts.iter().map(|p| p.measures.len()).max().unwrap_or(0);
     Ok(json!({"path": path, "parts": parts.len(), "measures": measures}))
 }
@@ -438,6 +476,7 @@ mod tests {
     fn session_open_reports_missing_media() {
         let mut e = crate::demo::demo_engine();
         let dir = std::env::temp_dir().join(format!("soundcraft-open-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("Gone.scraft").to_string_lossy().into_owned();
         e.execute("session.save_as", &json!({"path": path})).unwrap();
         let mut ok = Engine::default();
@@ -448,6 +487,17 @@ mod tests {
         assert!(res["missing"].as_array().is_some_and(|m| !m.is_empty()), "{res}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn saving_a_session_without_audio_creates_its_folder() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-new-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("Song").join("Song.scraft");
+        Engine::default().execute("session.save_as", &json!({"path": path.to_string_lossy()})).unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn tone_engine() -> (Engine, u64) {
         let mut e = Engine::default();
         e.execute("track.new", &json!({"count": 1, "name": "Tone", "format": "mono"})).unwrap();
@@ -484,6 +534,20 @@ mod tests {
         wavs.sort();
         assert_eq!(wavs, vec!["Take-2.wav".to_string(), "Take.wav".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exports_the_selected_clips_and_refuses_an_empty_selection() {
+        let mut e = crate::demo::demo_engine();
+        let dir = std::env::temp_dir().join(format!("soundcraft-clips-{}", std::process::id()));
+        let p = json!({"dir": dir.to_string_lossy()});
+        e.execute("edit.select_none", &json!({})).unwrap();
+        assert!(e.execute("file.export_clips", &p).is_err());
+        e.execute("edit.select", &json!({"tracks": ["Kick"], "start": {"seconds": 10.0}, "end": {"seconds": 11.0}})).unwrap();
+        let r = e.execute("file.export_clips", &p).unwrap();
+        let files = std::fs::read_dir(&dir).map_or(0, Iterator::count);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(files >= 1 && r["written"] == files, "{r}, {files} files");
     }
 
     fn midi_engine() -> Engine {
