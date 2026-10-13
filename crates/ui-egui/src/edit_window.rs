@@ -1633,7 +1633,13 @@ fn lane_interaction(app: &mut SoundApp, ui: &mut Ui, track: &Track, lane: Rect, 
             Tool::Pencil => {
                 if let Some(param) = &auto_view {
                     let (lo, hi, _) = param.range();
-                    let (lo, hi) = if matches!(param, AutoParam::Volume | AutoParam::SendLevel(_)) { (-60.0, 12.0) } else { (lo, hi) };
+                    let (lo, hi) = if matches!(param, AutoParam::Volume | AutoParam::SendLevel(_)) {
+                        (-60.0, 12.0)
+                    } else if matches!(param, AutoParam::Plugin { .. }) {
+                        plugin_range(track, param)
+                    } else {
+                        (lo, hi)
+                    };
                     let k = ((lane.max.y - 4.0 - p.y) / (lane.height() - 8.0)).clamp(0.0, 1.0);
                     let _ = app.run(
                         "automation.set_point",
@@ -2456,5 +2462,25 @@ mod tests {
         drag(&mut h, grab, release);
         let want: Vec<TrackId> = [1, 0, 2, 3].iter().map(|&i| before[i]).collect();
         assert_eq!(order(&h), want);
+    }
+
+    #[test]
+    fn a_pencil_click_on_a_plugin_lane_uses_the_plugin_range() {
+        let mut engine = soundcraft_engine::demo::demo_engine();
+        engine.execute("track.view", &json!({"track": "Kick", "view": "plugin:a:input_gain"})).unwrap();
+        engine.execute("edit.tool", &json!({"tool": "pencil"})).unwrap();
+        let mut h = harness_with(engine);
+        let s = h.state().engine.session_arc();
+        let kick = s.track_by_name("Kick").unwrap();
+        let i = h.state().edit_layout.rows.iter().position(|(id, _)| *id == kick.id.0).unwrap();
+        let lane = lane_rect(kick, row(&h, i), timeline(&h));
+        // A quarter up the lane: -12 dB in the Input range of -24..24 dB.
+        let at = pos2(lane.min.x + 100.0, lane.max.y - 4.0 - (lane.height() - 8.0) * 0.25);
+        click(&mut h, at);
+        let s = h.state().engine.session_arc();
+        let param = AutoParam::Plugin { slot: 0, param: "input_gain".into() };
+        let points = s.track_by_name("Kick").and_then(|t| t.lane(&param)).map(|l| l.points.clone()).unwrap_or_default();
+        assert_eq!(points.len(), 1, "status: {}", h.state().ui.status);
+        assert!((points[0].value + 12.0).abs() < 0.01, "{}", points[0].value);
     }
 }
