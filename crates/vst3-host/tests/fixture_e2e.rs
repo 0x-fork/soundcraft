@@ -271,8 +271,8 @@ fn host_set_controller_param_survives_state_round_trip() {
 fn editor_view_is_probed_and_edits_come_back_as_plain_values() {
     let id = id_of("Fixture Gain");
     let mut p = soundcraft_vst3_host::instantiate_plugin(&id).unwrap();
-    // Editor windows are hosted on macOS only; elsewhere the probe reports "unsupported".
-    if cfg!(target_os = "macos") {
+    // Editor windows are hosted on macOS and Windows; elsewhere the probe reports "unsupported".
+    if cfg!(any(target_os = "macos", windows)) {
         assert_eq!(p.editor_size(), Ok((320, 240)));
     } else {
         assert!(p.editor_size().is_err());
@@ -281,7 +281,7 @@ fn editor_view_is_probed_and_edits_come_back_as_plain_values() {
     // The fixture "edits" Gain to 0.9 (normalized) when it gets the component handler.
     assert_eq!(ed.idle(), vec![("7".to_string(), 1.8)]);
     assert!(ed.idle().is_empty());
-    if cfg!(target_os = "macos") {
+    if cfg!(any(target_os = "macos", windows)) {
         assert!(ed.open().unwrap_err().contains("main thread"), "test threads are not the main thread");
     } else {
         assert!(ed.open().is_err(), "unsupported elsewhere");
