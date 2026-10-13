@@ -1,12 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-<<<<<<< HEAD
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** trivial (mix.instrument sets built-in instrument parameters in params (#265); previously major: first plugin checklist against Pro Tools 2026.4.1) · **Target:** Avid Pro Tools Ultimate 2026.4.1
-||||||| 8d5b38a
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (first plugin checklist against Pro Tools 2026.4.1) · **Target:** Avid Pro Tools Ultimate 2026.4.1
-=======
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (plugin editors on Windows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
->>>>>>> up408
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** trivial (mix.instrument sets built-in instrument parameters in params (#265); previously minor: plugin editors on Windows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -64,10 +58,6 @@ User report #152: a saved instrument level does not reach the bounce.
 
 | Date | Change | Summary |
 |---|---|---|
-<<<<<<< HEAD
 | 2026-10-13 | trivial | mix.instrument sets built-in instrument parameters in params (#265) |
-||||||| 8d5b38a
-=======
 | 2026-10-12 | minor | Editors: VST3 and embedded CLAP editors on Windows |
->>>>>>> up408
 | 2026-10-10 | major | Created: built-in processor inventory by category and third-party hosting checklist |
