@@ -36,6 +36,8 @@ mod view;
 mod view_more;
 mod vst3;
 
+pub use file::bounce_job;
+
 pub(crate) use edit::remember_selection;
 
 pub type Run = fn(&mut Engine, &Value) -> Result<Value>;

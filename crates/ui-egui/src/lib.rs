@@ -4,6 +4,7 @@
 //! executing commands. It can be replaced without touching anything below it.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod bounce;
 pub mod control;
 pub mod credits;
 pub mod dialogs;
@@ -295,6 +296,8 @@ pub struct SoundApp {
     last_meter_poll: f64,
     /// Movies for the Video window and Video track (decoded in the background).
     pub video: video_track::VideoPool,
+    /// The Bounce Mix in progress, rendered a slice per frame.
+    pub bounce: Option<soundcraft_engine::io::Bounce>,
     /// Test-only: owns the process-wide palette lock while this app exists, so frames painted
     /// and colour assertions in one test can never straddle another test's palette change.
     #[cfg(test)]
@@ -362,6 +365,7 @@ impl SoundApp {
             last_frame: None,
             last_meter_poll: f64::NEG_INFINITY,
             video: video_track::VideoPool::default(),
+            bounce: None,
             #[cfg(test)]
             _palette_lock: theme::lock_test_palette(),
         }
@@ -374,6 +378,9 @@ impl SoundApp {
 
     /// Run a command; errors go to the status line. Returns the result.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        if matches!(id, "session.new" | "session.open" | "session.close" | "session.revert") && bounce::refuses_session_switch(self) {
+            return Err(self.ui.status.clone());
+        }
         if let Some(r) = menus::run_ui_command(self, id, &params) {
             return r;
         }
@@ -1056,6 +1063,7 @@ impl SoundApp {
         self.frame_ms = self.frame_ms * 0.9 + dt * 1000.0 * 0.1;
         control::drain(self, ctx);
         self.apply_editor_edits();
+        bounce::step(self, ctx);
         if !ctx.input(|i| i.pointer.any_down()) {
             if matches!(self.gesture, Some(Gesture::Fader { .. })) {
                 self.gesture = None;
