@@ -272,15 +272,19 @@ fn transport_window(app: &mut SoundApp, ctx: &egui::Context) {
                 ("end", "transport.go_to_end"),
                 ("record", "transport.record"),
             ] {
-                if crate::widgets::icon_button(
+                let resp = crate::widgets::icon_button(
                     ui,
                     vec2(34.0, 26.0),
                     icon,
                     (cmd == "transport.play" && app.is_playing()) || (cmd == "transport.record" && app.engine.transport.recording),
                     cmd,
-                )
-                .clicked()
+                );
+                if cmd == "transport.record"
+                    && let Some(why) = app.record_hint()
                 {
+                    egui::Tooltip::for_widget(&resp).show(|ui| ui.label(why));
+                }
+                if resp.clicked() {
                     let _ = app.run(cmd, json!({}));
                 }
             }
