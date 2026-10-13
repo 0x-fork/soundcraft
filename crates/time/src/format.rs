@@ -150,7 +150,7 @@ mod tests {
             ("100000000000000:00:00:00", TimeFormat::Timecode),
             ("-9223372036854775808", TimeFormat::BarsBeats),
         ] {
-            let _ = parse_position(text, fmt, sr, &map, rate, 0);
+            let _ = parse_position(text, fmt, sr, &map, rate, 0, 0);
         }
     }
 

@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use soundcraft_engine::cmd::MAX_POSITION;
 use soundcraft_engine::edit::first_movable;
 use soundcraft_model::{ClipId, Session, SourceId, TrackId};
-use soundcraft_time::{Samples, TimeFormat, format_length, format_position, parse_position};
+use soundcraft_time::{Samples, TimeFormat, format_length};
 
 #[derive(Debug, Clone)]
 pub enum Target {
@@ -115,7 +115,7 @@ fn recorded_at(s: &Session, time_reference: u64) -> Samples {
 
 /// The dialog's fields; the caller adds OK and Cancel.
 pub fn fields(ui: &mut Ui, s: &Session, d: &mut Spot) {
-    let show = |at: Samples, f: TimeFormat| format_position(at, f, s.sample_rate, &s.tempo, s.frame_rate, s.timecode_start);
+    let show = |at: Samples, f: TimeFormat| s.format_position(at, f);
     egui::Grid::new("spot").num_columns(2).spacing(vec2(10.0, 6.0)).show(ui, |ui| {
         ui.label("Time Scale");
         egui::ComboBox::from_id_salt("spot_scale").selected_text(d.format.label()).show_ui(ui, |ui| {
@@ -136,7 +136,7 @@ pub fn fields(ui: &mut Ui, s: &Session, d: &mut Spot) {
                 }
                 let r = ui.add(TextEdit::singleline(&mut d.text[i]).id(id).font(mono(13.0)).desired_width(150.0));
                 if r.changed()
-                    && let Ok(v) = parse_position(&d.text[i], d.format, s.sample_rate, &s.tempo, s.frame_rate, s.timecode_start)
+                    && let Ok(v) = s.parse_position(&d.text[i], d.format)
                     && (-MAX_POSITION..=MAX_POSITION).contains(&v)
                 {
                     d.set(i, v);
