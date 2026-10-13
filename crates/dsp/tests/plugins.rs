@@ -200,6 +200,44 @@ fn eq_magnitude_at_center_matches_gain() {
 }
 
 #[test]
+fn eq_switches_and_choices_apply_to_a_running_eq() {
+    // (plugin, settings, the one switch or choice changed while running, test tone)
+    let cases: [(&str, &[(&str, f32)], (&str, f32), f32); 7] = [
+        ("eq_7band", &[("hpf_freq", 2000.0), ("hpf_slope", 3.0)], ("hpf_on", 1.0), 1000.0),
+        ("eq_7band", &[("hpf_freq", 2000.0), ("hpf_slope", 3.0), ("hpf_on", 1.0)], ("hpf_on", 0.0), 1000.0),
+        ("eq_7band", &[("hpf_freq", 2000.0), ("hpf_slope", 0.0), ("hpf_on", 1.0)], ("hpf_slope", 3.0), 1000.0),
+        ("eq_7band", &[("lpf_freq", 2000.0), ("lpf_slope", 3.0)], ("lpf_on", 1.0), 4000.0),
+        ("eq_7band", &[("lpf_freq", 2000.0), ("lpf_slope", 0.0), ("lpf_on", 1.0)], ("lpf_slope", 3.0), 4000.0),
+        ("eq_1band", &[("freq", 1000.0)], ("type", 4.0), 10_000.0),
+        ("channel_strip", &[("hpf_freq", 2000.0)], ("hpf_on", 1.0), 1000.0),
+    ];
+    let mut stale = Vec::new();
+    for (id, setup, (key, value), tone) in cases {
+        let x = [sine(tone, 0.5, 24_000)];
+        let level = |p: &mut dyn Plugin| gain_to_db(rms(&run(p, &x)[0][12_000..]));
+        let build = |settings: &[(&str, f32)]| {
+            let mut p = create(id).unwrap();
+            p.prepare(SR, BLOCK, 1);
+            for &(k, v) in settings {
+                assert!(p.set_param(k, v), "{id} {k}");
+            }
+            p.reset();
+            p
+        };
+        let mut live = build(setup);
+        let before = level(live.as_mut());
+        assert!(live.set_param(key, value));
+        let after = level(live.as_mut());
+        let want = level(build(&[setup, &[(key, value)]].concat()).as_mut());
+        assert!((before - want).abs() > 3.0, "{id} {key}={value}: the tone must tell the settings apart");
+        if (after - want).abs() >= 0.1 {
+            stale.push(format!("{id} {key}={value}: live {after:.2} dB, fresh {want:.2} dB, before {before:.2} dB"));
+        }
+    }
+    assert!(stale.is_empty(), "{stale:#?}");
+}
+
+#[test]
 fn compressor_steady_state_gain_reduction() {
     let mut p = prepared("compressor");
     p.set_param("threshold", -20.0);
