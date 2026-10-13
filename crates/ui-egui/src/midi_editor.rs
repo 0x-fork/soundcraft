@@ -36,7 +36,7 @@ pub fn target_clip(app: &SoundApp) -> Option<ClipId> {
     let s = app.engine.session();
     for id in &s.edit.selected_clips {
         if let Some((_, c)) = s.find_clip(*id)
-            && !c.is_audio()
+            && matches!(c.content, ClipContent::Midi { .. })
         {
             return Some(*id);
         }
