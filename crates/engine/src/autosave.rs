@@ -291,9 +291,9 @@ pub fn leftovers(root: &Path) -> Vec<Leftover> {
 /// media that couldn't be loaded.
 pub fn recover(e: &mut Engine, left: &Leftover) -> Result<Vec<String>> {
     let mut r = Engine::default();
-    let missing = open_session(&mut r, &left.dir.join(SESSION).to_string_lossy())?;
+    let mut missing = open_session(&mut r, &left.dir.join(SESSION).to_string_lossy())?;
     let mut s = r.session().clone();
-    let unfinished = unfinished_takes(&left.dir, &s);
+    let unfinished = unfinished_takes(left, &s, &mut missing);
     if let Some(home) = left.origin.as_deref().and_then(|o| Path::new(o).parent()) {
         for src in s.sources.iter_mut().filter(|src| !src.unsaved) {
             if let Ok(rel) = Path::new(&src.path).strip_prefix(home) {
@@ -310,30 +310,81 @@ pub fn recover(e: &mut Engine, left: &Leftover) -> Result<Vec<String>> {
     Ok(missing)
 }
 
-/// The takes of the recording `dir` holds the plan of, repaired, minus those already in `s`.
-fn unfinished_takes(dir: &Path, s: &Session) -> Option<(Recording, Vec<(soundcraft_model::TrackId, PathBuf)>)> {
-    let plan: Recording = serde_json::from_str(&std::fs::read_to_string(dir.join(RECORDING)).ok()?).ok()?;
+/// The takes of the recording `left` holds the plan of, repaired, minus those already in `s`.
+/// A take the plan names that isn't a take file SoundCraft recorded, in a folder it records into,
+/// is left untouched and added to `skipped`.
+fn unfinished_takes(left: &Leftover, s: &Session, skipped: &mut Vec<String>) -> Option<(Recording, Vec<(soundcraft_model::TrackId, PathBuf)>)> {
+    let plan: Recording = serde_json::from_str(&std::fs::read_to_string(left.dir.join(RECORDING)).ok()?).ok()?;
     let known: Vec<PathBuf> = s.sources.iter().filter_map(|src| std::fs::canonicalize(&src.path).ok()).collect();
-    let takes = plan
-        .takes
-        .iter()
-        .filter(|t| std::fs::canonicalize(&t.path).is_ok_and(|p| !known.contains(&p)))
-        .filter(|t| repair_take(&t.path, t.channels, plan.rate).is_ok_and(|frames| frames > 0))
-        .map(|t| (t.track, t.path.clone()))
-        .collect();
+    let folders = take_folders(left);
+    let mut takes = Vec::new();
+    for t in &plan.takes {
+        if std::fs::canonicalize(&t.path).is_ok_and(|p| known.contains(&p)) {
+            continue;
+        }
+        match repair_take(&t.path, &folders, t.channels, plan.rate) {
+            Ok(frames) if frames > 0 => takes.push((t.track, t.path.clone())),
+            Ok(_) => {}
+            Err(err) => {
+                log::warn!("recovery skipped the take {}: {err}", t.path.display());
+                skipped.push(format!("{}: {err}", t.path.display()));
+            }
+        }
+    }
     Some((plan, takes))
 }
 
+/// The folders a recording in `left`'s session writes its takes into: the `Audio Files` next to
+/// the session file, or, never saved, the one in its folder under the autosave root.
+fn take_folders(left: &Leftover) -> Vec<PathBuf> {
+    let saved = left.origin.as_deref().and_then(|o| Path::new(o).parent()).map(|d| d.join("Audio Files"));
+    let unsaved = left.dir.parent().map(|root| root.join(sanitize_name(&left.name)).join("Audio Files"));
+    saved.into_iter().chain(unsaved).filter_map(|d| std::fs::canonicalize(d).ok()).collect()
+}
+
 /// Make a take file's header cover all the audio in it; returns its frames. The recorder
-/// rewrites the header only every second, so a crash leaves up to a second uncovered.
-fn repair_take(path: &Path, channels: usize, rate: u32) -> std::io::Result<u64> {
+/// rewrites the header only every second, so a crash leaves up to a second uncovered. Only a
+/// regular file in one of `folders` that starts with the header the recorder writes is touched.
+fn repair_take(path: &Path, folders: &[PathBuf], channels: usize, rate: u32) -> std::io::Result<u64> {
+    let refuse = |why: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, why.to_string());
+    if !std::fs::symlink_metadata(path)?.file_type().is_file() {
+        return Err(refuse("not a regular file"));
+    }
+    let folder = path.parent().and_then(|d| std::fs::canonicalize(d).ok());
+    if !folder.is_some_and(|d| folders.contains(&d)) {
+        return Err(refuse("not in a folder SoundCraft records into"));
+    }
     let header = |frames| soundcraft_audio_io::wav_float_header(channels, rate, frames).map_err(std::io::Error::other);
-    let audio = std::fs::metadata(path)?.len().saturating_sub(header(0)?.len() as u64);
+    let expected = header(0)?;
+    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+    let mut head = vec![0u8; expected.len()];
+    if std::io::Read::read_exact(&mut f, &mut head).is_err() || !is_take_header(&head, &expected) {
+        return Err(refuse("not a take SoundCraft recorded"));
+    }
+    let audio = f.metadata()?.len().saturating_sub(expected.len() as u64);
     let frames = audio / (channels.max(1) as u64 * 4);
-    let mut f = std::fs::OpenOptions::new().write(true).open(path)?;
+    std::io::Seek::rewind(&mut f)?;
     f.write_all(&header(frames)?)?;
     f.sync_all()?;
     Ok(frames)
+}
+
+/// `head` is a take header like `expected` (the recorder's header for no frames yet): RIFF or
+/// RF64 WAVE, the same format chunk at the same place, and the data chunk right after it all.
+/// Only the sizes and frame counts may differ.
+fn is_take_header(head: &[u8], expected: &[u8]) -> bool {
+    let magic = matches!(head.get(..4), Some(b"RIFF" | b"RF64")) && head.get(8..12) == Some(b"WAVE");
+    let fmt = expected.windows(4).position(|w| w == b"fmt ");
+    let fmt_len = fmt.and_then(|at| expected.get(at + 4..at + 8)).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes);
+    let same_fmt = match (fmt, fmt_len) {
+        (Some(at), Some(n)) => {
+            let end = at.saturating_add(8).saturating_add(n as usize);
+            expected.get(at..end).is_some_and(|chunk| head.get(at..end) == Some(chunk))
+        }
+        _ => false,
+    };
+    let data = expected.len().checked_sub(8).and_then(|at| head.get(at..at + 4)) == Some(b"data");
+    magic && same_fmt && data
 }
 
 /// Delete a leftover autosave.
@@ -464,7 +515,7 @@ mod tests {
         let mut e = Engine::default();
         let track =
             soundcraft_model::TrackId(e.execute("track.new", &json!({"name": "Vox", "format": "mono"})).unwrap()["tracks"][0].as_u64().unwrap());
-        let take = dir.join("Audio Files/Vox_01.wav");
+        let take = root.join(sanitize_name(&e.session().name)).join("Audio Files/Vox_01.wav");
         std::fs::create_dir_all(take.parent().unwrap()).unwrap();
         let audio: Vec<u8> = (0..480).flat_map(|i| (i as f32 / 1000.0).to_le_bytes()).collect();
         std::fs::write(&take, [soundcraft_audio_io::wav_float_header(1, 48_000, 100).unwrap(), audio].concat()).unwrap();
@@ -485,6 +536,51 @@ mod tests {
         let mut again = Engine::default();
         recover(&mut again, &leftovers(&root)[0]).unwrap();
         assert_eq!((clips(&again), again.session().sources.len()), (vec![(48_000, 480)], 1), "placed once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recovery_never_writes_a_file_that_isnt_a_take_in_a_take_folder() {
+        use crate::io::Take;
+        let dir = folder("autosave-hostile-take");
+        let root = dir.join("Autosave");
+        let mut e = Engine::default();
+        let track =
+            soundcraft_model::TrackId(e.execute("track.new", &json!({"name": "Vox", "format": "mono"})).unwrap()["tracks"][0].as_u64().unwrap());
+        let takes = root.join(sanitize_name(&e.session().name)).join("Audio Files");
+        std::fs::create_dir_all(&takes).unwrap();
+        let wav = [soundcraft_audio_io::wav_float_header(1, 48_000, 0).unwrap(), vec![0; 4_000]].concat();
+        let text = b"not audio at all, but long enough to be mistaken for a header if nobody looked at it ......".repeat(4);
+        let files =
+            [(takes.join("notes.wav"), text.clone()), (dir.join("Elsewhere/Vox_01.wav"), wav.clone()), (takes.join("../Vox_02.wav"), wav.clone())];
+        for (path, bytes) in &files {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let mut paths: Vec<PathBuf> = files.iter().map(|(p, _)| p.clone()).collect();
+        #[cfg(unix)]
+        {
+            let link = takes.join("Vox_03.wav");
+            std::os::unix::fs::symlink(&files[1].0, &link).unwrap();
+            paths.push(link);
+        }
+        let plan = Recording {
+            start: 0,
+            pass: None,
+            punch: None,
+            rate: 48_000,
+            takes: paths.iter().map(|p| Take { track, path: p.clone(), channels: 1 }).collect(),
+        };
+        let w = Autosaver::new(root.clone());
+        w.write(e.session_arc(), None, Some(plan));
+        drop(w);
+        let mut r = Engine::default();
+        let skipped = recover(&mut r, &leftovers(&root)[0]).unwrap();
+        assert_eq!(skipped.len(), paths.len(), "{skipped:?}");
+        assert!(r.session().sources.is_empty());
+        for (path, bytes) in &files {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes, "{} untouched", path.display());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
