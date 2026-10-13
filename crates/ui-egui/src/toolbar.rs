@@ -6,7 +6,7 @@ use crate::{SoundApp, icons};
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
 use soundcraft_model::{EditMode, Tool};
-use soundcraft_time::{TimeFormat, format_length, format_position};
+use soundcraft_time::{TimeFormat, format_length};
 
 pub const HEIGHT: f32 = 78.0;
 
@@ -173,7 +173,7 @@ fn tools(app: &mut SoundApp, ui: &mut Ui) {
 
 fn fmt_pos(app: &SoundApp, at: i64, f: TimeFormat) -> String {
     let s = app.engine.session();
-    format_position(at, f, s.sample_rate, &s.tempo, s.frame_rate, s.timecode_start)
+    s.format_position(at, f)
 }
 
 fn counters(app: &mut SoundApp, ui: &mut Ui) {

@@ -202,9 +202,9 @@ impl Timecode {
     }
 }
 
-/// Feet+Frames for 35 mm film (16 frames per foot).
-pub fn feet_frames(s: Samples, rate: FrameRate, sr: SampleRate) -> (i64, i64) {
-    let f = rate.frames_at(s, sr);
+/// Feet+Frames for 35 mm film (16 frames per foot), `start` frames in at sample 0.
+pub fn feet_frames(s: Samples, rate: FrameRate, sr: SampleRate, start: i64) -> (i64, i64) {
+    let f = rate.frames_at(s, sr).saturating_add(start);
     (f.div_euclid(16), f.rem_euclid(16))
 }
 
@@ -246,6 +246,6 @@ mod tests {
     #[test]
     fn feet_and_frames() {
         let sr = SampleRate::HZ_48000;
-        assert_eq!(feet_frames(48_000, FrameRate::Fps24, sr), (1, 8));
+        assert_eq!(feet_frames(48_000, FrameRate::Fps24, sr, 0), (1, 8));
     }
 }
