@@ -1368,7 +1368,8 @@ fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mu
         }
         let near = s.tempo.samples_to_ticks(pos, sr).saturating_sub(base).saturating_sub(1)
             ..=s.tempo.samples_to_ticks(end, sr).saturating_sub(base).saturating_add(1);
-        for c in &sequence.ctrls {
+        // Events before tick 0 are what a start trim hid: they don't play.
+        for c in sequence.ctrls.iter().filter(|c| c.tick >= 0) {
             let tick = c.tick.saturating_add(delay).max(0);
             if !near.contains(&tick) {
                 continue;
@@ -1413,7 +1414,7 @@ fn chase_controllers(s: &Session, t: &Track, pos: Samples, inst: &mut PluginSlot
         }
         let base = s.tempo.samples_to_ticks(clip.start, sr);
         let until = pos.min(clip.end());
-        for c in &sequence.ctrls {
+        for c in sequence.ctrls.iter().filter(|c| c.tick >= 0) {
             let slot = match c.kind {
                 CtrlKind::Cc(n) => usize::from(n & 0x7F),
                 CtrlKind::PitchBend => BEND,
@@ -2378,6 +2379,27 @@ mod tests {
         assert_eq!(std::mem::take(&mut *heard.lock().unwrap()), vec![(0, [0xB0, 121, 0]), (0, [0xB0, 64, 127]), (0, [0xE0, 0, 0])]);
         render_block(&mut eng, &s, 36_512);
         assert!(heard.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn controllers_hidden_before_a_clip_start_are_neither_played_nor_chased() {
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.ears"));
+        let cc = |tick, kind, value| soundcraft_midi::CtrlEvent { tick, channel: 0, kind, value };
+        let ctrls = vec![cc(-480, CtrlKind::Cc(64), 127), cc(960, CtrlKind::Cc(1), 64)];
+        let seq = soundcraft_midi::Sequence { ctrls, ..Default::default() };
+        let cid = s.new_clip_id();
+        s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::midi(cid, "m", 0, 48_000 * 4, seq));
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ears = Ears { inner: soundcraft_dsp::create("gain").unwrap(), heard: Arc::clone(&heard) };
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.ears".into(), ch: 2, plugin: Box::new(ears) }]);
+        render_block(&mut eng, &s, 0);
+        assert_eq!(std::mem::take(&mut *heard.lock().unwrap()), vec![(0, [0xB0, 121, 0])]);
+        render_block(&mut eng, &s, 36_000);
+        assert_eq!(std::mem::take(&mut *heard.lock().unwrap()), vec![(0, [0xB0, 121, 0]), (0, [0xB0, 1, 64])]);
     }
 
     fn render_block(eng: &mut MixEngine, s: &Session, pos: i64) -> f32 {
