@@ -289,6 +289,12 @@ fn in_edit_window(s: &Session, t: &Track) -> bool {
     ops::shown(s, t)
 }
 
+/// Pro Tools' rule for track height: Alt reaches every shown track, Alt+Shift the selected ones too.
+pub(crate) fn height_targets(s: &Session, m: egui::Modifiers, own: &[TrackId]) -> Vec<u64> {
+    let extra = |t: &Track| if m.shift { s.edit.selected_tracks.contains(&t.id) } else { in_edit_window(s, t) };
+    s.tracks.iter().filter(|t| own.contains(&t.id) || (m.alt && extra(t))).map(|t| t.id.0).collect()
+}
+
 /// Pro Tools' track-name click: Shift adds the tracks up to the nearest selected one, Cmd/Ctrl adds or removes one.
 pub(crate) fn click_track(app: &mut SoundApp, id: TrackId, mods: egui::Modifiers, shown: impl Fn(&Session, &Track) -> bool) {
     let s = app.engine.session();
@@ -860,13 +866,26 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
     if eresp.hovered() || eresp.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
     }
-    if eresp.drag_stopped()
+    if eresp.drag_started() {
+        ui.data_mut(|d| d.insert_temp(eresp.id, track.height));
+    }
+    if eresp.dragged()
         && let Some(p) = ui.ctx().pointer_latest_pos()
+        && let Some(origin) = ui.input(|i| i.pointer.press_origin()).filter(|o| o.y != p.y)
     {
-        let want = (p.y - head.min.y).max(10.0);
-        let best = TrackHeight::ALL.into_iter().min_by_key(|h| ((h.points() - want).abs() * 10.0) as i64).unwrap_or(TrackHeight::Medium);
-        if best != track.height {
-            let _ = app.run("track.height", json!({"tracks": [id.0], "height": best.label()}));
+        let start = ui.data(|d| d.get_temp::<TrackHeight>(eresp.id)).unwrap_or(track.height);
+        let want = start.points() + p.y - origin.y;
+        let m = ui.input(|i| i.modifiers);
+        let best = if m.command {
+            TrackHeight::from_points(want)
+        } else {
+            TrackHeight::ALL.into_iter().min_by_key(|h| ((h.points() - want).abs() * 10.0) as i64).unwrap_or(start)
+        };
+        let s = app.engine.session();
+        let tracks = height_targets(s, m, &[id]);
+        if tracks.iter().any(|t| s.track(TrackId(*t)).is_some_and(|tr| tr.height != best)) {
+            let _ = app.engine.execute_merged("track.height", &json!({"tracks": tracks, "height": best.points()}), &format!("track_height:{}", id.0));
+            ui.ctx().request_repaint();
         }
     }
     let h = head.height();
@@ -1363,7 +1382,8 @@ pub(crate) fn track_context_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
     ui.menu_button("Track Height", |ui| {
         for h in TrackHeight::ALL {
             if ui.button(h.label()).clicked() {
-                let _ = app.run("track.height", json!({"tracks": [tid], "height": h.label()}));
+                let tracks = height_targets(app.engine.session(), ui.input(|i| i.modifiers), &[id]);
+                let _ = app.run("track.height", json!({"tracks": tracks, "height": h.label()}));
             }
         }
     });

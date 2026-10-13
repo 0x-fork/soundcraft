@@ -210,9 +210,17 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             let _ = app.run("view.zoom_preset", json!({"preset": digit(key)}));
             true
         }
-        Key::ArrowUp | Key::ArrowDown if m.ctrl && !m.shift => {
-            let id = if key == Key::ArrowUp { "edit.extend_selection_up" } else { "edit.extend_selection_down" };
-            let _ = app.run(id, json!({}));
+        // Pro Tools' Control+Up/Down track height, on Ctrl off macOS too (its Start key isn't available there).
+        Key::ArrowUp | Key::ArrowDown if m.ctrl && (m.alt || !m.shift) => {
+            let s = app.engine.session();
+            let tracks = crate::edit_window::height_targets(s, m, &s.edit.selected_tracks);
+            let id = if key == Key::ArrowUp { "track.height_up" } else { "track.height_down" };
+            let _ = app.run(id, if tracks.is_empty() { json!({}) } else { json!({"tracks": tracks}) });
+            true
+        }
+        // Extend Edit Down is Control+Shift+;, which macOS sends as Control+:.
+        Key::Semicolon | Key::Colon if mac && m.ctrl && m.shift && !m.alt && !m.command => {
+            let _ = app.run("edit.extend_selection_down", json!({}));
             true
         }
         // Ctrl+Shift+Up/Down nudge clip gain off macOS too (the registry's Ctrl is the Mac Control key).
@@ -385,14 +393,18 @@ fn digit(key: Key) -> u8 {
 /// Shortcut text for display. The registry stores macOS-style strings ("Cmd+N"); off macOS the Cmd
 /// modifier is the Ctrl key. Mac-only Control chords ("Cmd+Ctrl+S") have no key there, so they show nothing.
 pub fn shortcut_label(s: &str, mac: bool) -> String {
-    if mac || !s.split('+').any(|p| p == "Cmd") {
+    let has = |m: &str| s.split('+').any(|p| p == m);
+    if mac || (!has("Cmd") && !has("Ctrl")) || PC_CTRL_CHORDS.contains(&s) {
         return s.to_string();
     }
-    if s.split('+').any(|p| p == "Ctrl") {
+    if has("Ctrl") {
         return String::new();
     }
     s.split('+').map(|p| if p == "Cmd" { "Ctrl" } else { p }).collect::<Vec<_>>().join("+")
 }
+
+/// Mac Control chords that `fixed` also maps to Ctrl off macOS.
+const PC_CTRL_CHORDS: [&str; 4] = ["Ctrl+Up", "Ctrl+Down", "Ctrl+Shift+Up", "Ctrl+Shift+Down"];
 
 #[cfg(test)]
 mod label_tests {
@@ -407,6 +419,10 @@ mod label_tests {
         assert_eq!(shortcut_label("Shift+R", false), "Shift+R");
         assert_eq!(shortcut_label("Cmd+Ctrl+S", false), "");
         assert_eq!(shortcut_label("", false), "");
+        assert_eq!(shortcut_label("Ctrl+Up", false), "Ctrl+Up");
+        assert_eq!(shortcut_label("Ctrl+Shift+Down", false), "Ctrl+Shift+Down");
+        assert_eq!(shortcut_label("Ctrl+Shift+P", false), "");
+        assert_eq!(shortcut_label("Ctrl+Alt+L", false), "");
     }
 
     #[test]
