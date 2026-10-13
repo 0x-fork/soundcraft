@@ -215,10 +215,11 @@ pub fn sample_strip(app: &mut SoundApp, ui: &mut Ui, tid: TrackId, ins: &Insert)
     for (c, peaks) in audio.peaks.iter().take(lanes).enumerate() {
         let mid = r.min.y + lane_h * (c as f32 + 0.5);
         let half = lane_h * 0.45;
+        let samples = audio.channel(c).unwrap_or_default();
         for i in 0..cols {
             let a = frames.saturating_mul(i) / cols;
             let b = (frames.saturating_mul(i + 1) / cols).max(a + 1);
-            let (lo, hi) = peaks.minmax(a, b);
+            let (lo, hi) = peaks.minmax(samples, a, b);
             let x = r.min.x + i as f32 + 0.5;
             p.line_segment([pos2(x, mid - hi.clamp(-1.0, 1.0) * half), pos2(x, mid - lo.clamp(-1.0, 1.0) * half)], Stroke::new(1.0, wave));
         }
