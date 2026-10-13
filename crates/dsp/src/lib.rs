@@ -324,6 +324,11 @@ pub fn plugin_info(id: &str) -> Option<&'static PluginInfo> {
     plugins::REGISTRY.iter().copied().find(|i| i.id == id)
 }
 
+/// Whether a plugin makes sound instead of processing its input (it ignores the input).
+pub fn is_generator(id: &str) -> bool {
+    id == "signal_generator"
+}
+
 /// Silence floor used by the dB helpers.
 pub const MIN_DB: f32 = -144.0;
 
