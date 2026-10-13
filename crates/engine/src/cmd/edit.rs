@@ -10,7 +10,7 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(noundo "edit.undo", "Undo", ["Edit"], Some("Cmd+Z"), "{}", can_undo, |e, _| Ok(json!({"undone": e.undo()}))),
         cmd!(noundo "edit.redo", "Redo", ["Edit"], Some("Cmd+Shift+Z"), "{}", can_redo, |e, _| Ok(json!({"redone": e.redo()}))),
-        cmd!("edit.restore_last_selection", "Restore Last Selection", ["Edit"], Some("Cmd+Alt+Z"), "{}", always, restore_selection),
+        cmd!(noundo "edit.restore_last_selection", "Restore Last Selection", ["Edit"], Some("Cmd+Alt+Z"), "{}", has_last_selection, restore_selection),
         cmd!("edit.cut", "Cut", ["Edit"], Some("Cmd+X"), "{tracks?, start?, end?}", has_range, |e, p| cut_copy(e, p, true, "edit.cut")),
         cmd!(noundo "edit.copy", "Copy", ["Edit"], Some("Cmd+C"), "{tracks?, start?, end?}", has_range, |e, p| cut_copy(e, p, false, "edit.copy")),
         cmd!("edit.paste", "Paste", ["Edit"], Some("Cmd+V"), "{tracks?, at?}", has_clipboard, paste),
@@ -152,8 +152,28 @@ fn shuffle(s: &Session) -> bool {
     s.edit.edit_mode == EditMode::Shuffle
 }
 
+fn has_last_selection(e: &Engine) -> std::result::Result<(), String> {
+    if e.last_selection.is_some() { Ok(()) } else { Err("no previous selection to restore".into()) }
+}
+
+/// Remember the selection `before` had when a command changed it, for Restore Last Selection.
+pub(crate) fn remember_selection(e: &mut Engine, before: &Session) {
+    let (old, new) = (&before.edit, &e.session().edit);
+    if old.selection == new.selection && old.selected_tracks == new.selected_tracks {
+        return;
+    }
+    e.last_selection = Some((old.selection, old.selected_tracks.clone()));
+}
+
+/// Swaps in the previous selection; `remember_selection` then keeps the one replaced, so
+/// invoking it again goes back.
 fn restore_selection(e: &mut Engine, _: &Value) -> Result<Value> {
-    Ok(json!({"selection": e.session().edit.selection}))
+    let (range, mut tracks) = e.last_selection.clone().ok_or_else(|| bad("edit.restore_last_selection", "no previous selection to restore"))?;
+    tracks.retain(|t| e.session().track(*t).is_some());
+    let ed = &mut e.session_mut().edit;
+    ed.selection = range;
+    ed.selected_tracks = tracks;
+    Ok(json!({"selection": range}))
 }
 
 fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
@@ -847,5 +867,21 @@ mod tests {
         assert_eq!((faded[0].1, faded[1].0), (10_500, 9_500), "the fixture needs an overlapping crossfade");
         e.execute("edit.trim_to_file_boundaries", &json!({"clips": [ids[1].0]})).unwrap();
         assert_eq!(bounds(&e, t), vec![faded[0], (9_500, 60_000, 9_500)]);
+    }
+
+    #[test]
+    fn restore_last_selection_swaps_back_to_the_previous_range_and_tracks() {
+        let mut e = Engine::default();
+        assert!(e.execute("edit.restore_last_selection", &json!({})).is_err(), "nothing to restore yet");
+        let ids = e.execute("track.new", &json!({"count": 2})).unwrap()["tracks"].clone();
+        e.execute("edit.select", &json!({"tracks": [ids[0]], "start": 1_000, "end": 4_000})).unwrap();
+        e.execute("edit.select", &json!({"tracks": [ids[1]], "start": 7_000, "end": 9_000})).unwrap();
+        let tracks = |e: &Engine| e.session().edit.selected_tracks.iter().map(|t| t.0).collect::<Vec<_>>();
+        e.execute("edit.restore_last_selection", &json!({})).unwrap();
+        assert_eq!(e.session().edit.selection, soundcraft_time::Range::new(1_000, 4_000));
+        assert_eq!(json!(tracks(&e)), json!([ids[0]]));
+        e.execute("edit.restore_last_selection", &json!({})).unwrap();
+        assert_eq!(e.session().edit.selection, soundcraft_time::Range::new(7_000, 9_000));
+        assert_eq!(json!(tracks(&e)), json!([ids[1]]));
     }
 }

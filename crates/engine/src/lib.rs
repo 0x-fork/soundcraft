@@ -120,6 +120,9 @@ pub struct Engine {
     merge_key: Option<String>,
     /// Messages for the UI status line / agents.
     pub messages: Vec<String>,
+    /// The edit selection (range, tracks) before the last change, for Restore Last Selection.
+    /// Kept out of the document so selecting never marks the session modified.
+    pub last_selection: Option<(soundcraft_time::Range, Vec<TrackId>)>,
 }
 
 impl Default for Engine {
@@ -148,6 +151,7 @@ impl Engine {
             dirty_at: Cell::new((0, false)),
             merge_key: None,
             messages: Vec::new(),
+            last_selection: None,
         }
     }
 
@@ -181,6 +185,7 @@ impl Engine {
         self.saved = Arc::clone(&self.doc);
         self.undo.clear();
         self.redo.clear();
+        self.last_selection = None;
         self.revision = self.revision.wrapping_add(1);
         self.dirty = false;
     }
@@ -282,6 +287,7 @@ impl Engine {
         };
         match result {
             Ok(v) => {
+                cmd::remember_selection(self, &before);
                 if spec.undoable && !Arc::ptr_eq(&before, &self.doc) {
                     self.push_undo(spec.label, before);
                 }
