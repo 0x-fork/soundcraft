@@ -25,6 +25,7 @@ pub mod theme;
 pub mod toolbar;
 pub mod video_track;
 pub mod video_window;
+pub mod waveform;
 pub mod widgets;
 pub mod windows;
 
