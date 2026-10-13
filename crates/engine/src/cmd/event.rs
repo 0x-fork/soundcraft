@@ -338,7 +338,8 @@ fn edit_marker(e: &mut Engine, p: &Value) -> Result<Value> {
     let at = position_param(e, "markers.edit", p, "at")?;
     let s = e.session_mut();
     let Some(m) = s.markers.get_mut(i) else { return Err(bad("markers.edit", "gone")) };
-    if let Some(n) = p.get("rename").and_then(Value::as_str) {
+    // `name` is the documented new name; when it was the selector it already matches, so this is a no-op.
+    if let Some(n) = str_param(p, "rename").or_else(|| str_param(p, "name")) {
         m.name = n.to_string();
     }
     if let Some(c) = str_param(p, "comments") {
@@ -399,6 +400,30 @@ mod tests {
         let s = e.session();
         let tick = s.tempo.samples_to_ticks(at, s.sample_rate);
         assert!((s.tempo.tempo_at_tick(tick) - 133.5).abs() < 1e-9);
+    }
+
+    fn marker_name(e: &crate::Engine, id: u64) -> String {
+        e.session().markers.iter().find(|m| m.id.0 == id).map(|m| m.name.clone()).unwrap_or_default()
+    }
+
+    /// `markers.edit` documents `name`: with `id` or `number` selecting the location, it is the new name.
+    #[test]
+    fn edit_marker_renames_with_documented_name() {
+        let mut e = crate::Engine::default();
+        let verse = e.execute("markers.add", &json!({"name": "Verse", "at": 1000})).unwrap();
+        let outro = e.execute("markers.add", &json!({"name": "Outro", "at": 3000})).unwrap();
+        let (verse_id, outro_id) = (verse["id"].as_u64().unwrap(), outro["id"].as_u64().unwrap());
+
+        e.execute("markers.edit", &json!({"id": verse_id, "name": "Chorus"})).unwrap();
+        assert_eq!((marker_name(&e, verse_id), marker_name(&e, outro_id)), ("Chorus".into(), "Outro".into()));
+
+        e.execute("markers.edit", &json!({"number": outro["number"], "name": "Bridge"})).unwrap();
+        assert_eq!((marker_name(&e, verse_id), marker_name(&e, outro_id)), ("Chorus".into(), "Bridge".into()));
+
+        e.execute("markers.edit", &json!({"name": "Bridge", "comments": "last"})).unwrap();
+        let s = e.session();
+        let bridge = s.markers.iter().find(|m| m.id.0 == outro_id).unwrap();
+        assert_eq!((bridge.name.as_str(), bridge.comments.as_str()), ("Bridge", "last"));
     }
 
     /// Constant replaces the tempo over [start, end) only; the tempo at the old end tick carries on after it.

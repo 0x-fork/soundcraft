@@ -36,7 +36,7 @@ pub fn target_clip(app: &SoundApp) -> Option<ClipId> {
     let s = app.engine.session();
     for id in &s.edit.selected_clips {
         if let Some((_, c)) = s.find_clip(*id)
-            && !c.is_audio()
+            && matches!(c.content, ClipContent::Midi { .. })
         {
             return Some(*id);
         }
@@ -84,6 +84,19 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         regular(11.0),
         t.text_dim,
     );
+    let grid_ticks = match app.engine.session().edit.grid {
+        soundcraft_time::GridValue::Note { value, dotted, triplet } => {
+            let mut g = value.ticks();
+            if dotted {
+                g = g * 3 / 2;
+            }
+            if triplet {
+                g = g * 2 / 3;
+            }
+            g.max(1)
+        }
+        _ => TICKS_PER_QUARTER / 4,
+    };
     // Header toolbar: whole-clip MIDI operations.
     let bar = Rect::from_min_max(pos2(header.max.x - 330.0, header.min.y + 1.0), pos2(header.max.x - 6.0, header.max.y - 1.0));
     let mut tb = ui.new_child(egui::UiBuilder::new().max_rect(bar).layout(egui::Layout::right_to_left(egui::Align::Center)));
@@ -99,7 +112,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         op = Some(("event.change_velocity", json!({"add": 10})));
     }
     if tb.small_button("Quantize").on_hover_text("Quantize to the grid").clicked() {
-        op = Some(("event.quantize", json!({"grid": "1/16", "strength": 100})));
+        op = Some(("event.quantize", json!({"grid": grid_ticks, "strength": 100})));
     }
     if let Some((id, mut p)) = op {
         p["clips"] = json!([cid.0]);
@@ -109,19 +122,6 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     let sr = s.sample_rate;
     let base_tick = s.tempo.samples_to_ticks(clip.start, sr);
     let len_ticks = (s.tempo.samples_to_ticks(clip.end(), sr) - base_tick).max(1);
-    let grid_ticks = match s.edit.grid {
-        soundcraft_time::GridValue::Note { value, dotted, triplet } => {
-            let mut g = value.ticks();
-            if dotted {
-                g = g * 3 / 2;
-            }
-            if triplet {
-                g = g * 2 / 3;
-            }
-            g.max(1)
-        }
-        _ => TICKS_PER_QUARTER / 4,
-    };
     let roll = Rect::from_min_max(pos2(full.min.x + KEY_W, header.max.y), pos2(full.max.x - 4.0, full.max.y - VEL_H - 4.0));
     let keys = Rect::from_min_max(pos2(full.min.x, roll.min.y), pos2(roll.min.x, roll.max.y));
     let vel = Rect::from_min_max(pos2(roll.min.x, roll.max.y + 4.0), pos2(roll.max.x, full.max.y - 2.0));
@@ -330,7 +330,10 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
             let _ = app.run("midi.notes_move", json!({"clip": cid.0, "indices": app.midi.selected, "ticks": ticks, "semitones": semi}));
         }
     }
-    if !app.midi.selected.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+    if !app.midi.selected.is_empty()
+        && !ui.ctx().egui_wants_keyboard_input()
+        && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
+    {
         let _ = app.run("midi.note_delete", json!({"clip": cid.0, "indices": app.midi.selected}));
         app.midi.selected.clear();
     }

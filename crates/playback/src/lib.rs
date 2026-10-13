@@ -176,6 +176,7 @@ impl AudioState {
                     self.pos = at;
                     self.pending_len = 0;
                     self.read = 0.0;
+                    self.mix.reset();
                 }
             }
         }
@@ -332,7 +333,10 @@ impl Side {
     /// Drops retired instances (closing their editors first, inside the plugin's drop).
     fn collect_garbage(&mut self) {
         while let Ok(g) = self.garbage.try_recv() {
-            drop(g);
+            for p in g {
+                log::debug!("plugin instance released: {}", p.info().name);
+                drop(p);
+            }
         }
     }
 
@@ -681,6 +685,7 @@ impl Side {
             }
             self.forget(key);
             let made = soundcraft_mix::create_instance(&spec.id, spec.state.as_deref(), sr, BLOCK, spec.ch);
+            log::debug!("plugin instance for {:?} slot {}: {} ({} ch, created: {})", spec.track, spec.slot, spec.id, spec.ch, made.is_some());
             self.shadow.insert(key, (spec.id.clone(), spec.ch, made.is_some()));
             if let Some(mut plugin) = made {
                 if let Some(e) = plugin.editor() {
@@ -947,6 +952,49 @@ mod tests {
         let p = shared.position.load(Ordering::Relaxed);
         assert!(p <= 1000, "position {p} should stay inside the loop");
         assert!(shared.playing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn locate_while_playing_drops_the_old_position_audio() {
+        use soundcraft_model::{ChannelFormat, Clip, Insert, SourceAudio, SourceId, TrackKind};
+        for (plugin, params) in [("compressor", &[("lookahead", 5.0), ("ratio", 1.0)][..]), ("room_reverb", &[][..])] {
+            let mut s = soundcraft_model::Session::default();
+            s.edit.click = false;
+            let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+            s.pool.insert(
+                SourceId(5),
+                Arc::new(SourceAudio::new(soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 4800]] })),
+            );
+            let id = s.new_clip_id();
+            let tr = s.track_mut(t).unwrap();
+            tr.playlist_mut().unwrap().clips.push(Clip::audio(id, "x", SourceId(5), 0, 0, 4800));
+            let mut ins = Insert::new(plugin);
+            for (k, v) in params {
+                ins.params.insert((*k).into(), *v);
+            }
+            tr.mixer.inserts[0] = Some(ins);
+            let shared = Arc::new(Shared {
+                position: AtomicI64::new(0),
+                playing: AtomicBool::new(false),
+                speed: AtomicU32::new(1000),
+                meters: Mutex::new(MeterSnapshot::default()),
+            });
+            let (tx, rx) = channel();
+            let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(s), 48_000.0, channel().0);
+            tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+            let mut out = vec![0.0f32; 2 * 512];
+            let mut before = 0.0f32;
+            for _ in 0..9 {
+                st.fill(&mut out, 2);
+                before = out.iter().fold(before, |m, x| m.max(x.abs()));
+            }
+            assert!(before > 0.1, "{plugin}: the clip plays before the locate");
+            tx.send(Cmd::Locate(1_000_000)).unwrap();
+            for _ in 0..8 {
+                st.fill(&mut out, 2);
+                assert!(out.iter().all(|x| x.abs() < 1e-6), "{plugin}: audio from before the locate");
+            }
+        }
     }
 
     #[test]
