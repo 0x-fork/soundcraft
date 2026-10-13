@@ -123,6 +123,10 @@ pub fn specs() -> Vec<CommandSpec> {
             if ids.is_empty() {
                 return Err(bad("file.export_clips", "no clips selected"));
             }
+            for (t, c) in ids.iter().filter_map(|id| e.session().find_clip(*id)) {
+                let channels = e.session().track(t).map_or(1, |x| x.channels());
+                crate::io::refuse_longer(e.session(), "file.export_clips", &c.name, "export", c.length, crate::io::render_limit(channels))?;
+            }
             let n = crate::io::export_clips(e, &ids, &dir)?;
             Ok(json!({"written": n, "dir": dir}))
         }),

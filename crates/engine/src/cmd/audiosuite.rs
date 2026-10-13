@@ -46,12 +46,25 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
         return Err(bad("audiosuite.process", "select audio clips first"));
     }
     let sr = e.session().sample_rate;
+    let ratio = f64::from(get("ratio", 1.0).clamp(0.25, 4.0));
+    let semitones = get("semitones", 0.0).clamp(-24.0, 24.0);
+    let to = (sr.as_f64() / f64::from(get("speed", 1.0).clamp(0.25, 4.0))).round().max(1.0) as u32;
+    // These processes cut their output at MAX_OFFLINE_SAMPLES frames.
+    let longest = |grows: f64| (soundcraft_dsp::offline::MAX_OFFLINE_SAMPLES as f64 / grows) as usize;
+    let most = match name.as_str() {
+        "time_stretch" => longest(ratio),
+        "pitch_shift" => longest(2f64.powf(f64::from(semitones) / 12.0)),
+        "varispeed" => longest(f64::from(to) / sr.as_f64()),
+        _ => usize::MAX,
+    };
     let mut done = 0;
     for id in ids {
         let Some((track, clip)) = e.session().find_clip(id).map(|(t, c)| (t, c.clone())) else { continue };
         if !clip.is_audio() {
             continue;
         }
+        let channels = e.session().track(track).map_or(1, |t| t.channels());
+        crate::io::refuse_longer(e.session(), "audiosuite.process", &clip.name, "process", clip.length, most.min(crate::io::render_limit(channels)))?;
         let mut audio = soundcraft_mix::render_clips(e.session(), track, clip.range());
         // Render without the clip's own fades: re-render a copy without fades so they stay editable.
         let mut tmp = e.session().clone();
@@ -84,13 +97,9 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
                 audio
             }
             "duplicate" => audio,
-            "time_stretch" => soundcraft_dsp::offline::time_stretch(&audio, f64::from(get("ratio", 1.0).clamp(0.25, 4.0)), srf),
-            "pitch_shift" => soundcraft_dsp::offline::pitch_shift(&audio, get("semitones", 0.0).clamp(-24.0, 24.0), srf),
-            "varispeed" => {
-                let speed = get("speed", 1.0).clamp(0.25, 4.0);
-                let to = (sr.as_f64() / f64::from(speed)).round().max(1.0) as u32;
-                soundcraft_dsp::offline::resample(&audio, sr.hz(), to)
-            }
+            "time_stretch" => soundcraft_dsp::offline::time_stretch(&audio, ratio, srf),
+            "pitch_shift" => soundcraft_dsp::offline::pitch_shift(&audio, semitones, srf),
+            "varispeed" => soundcraft_dsp::offline::resample(&audio, sr.hz(), to),
             plugin => {
                 apply(plugin, &params, &mut audio, srf)?;
                 audio

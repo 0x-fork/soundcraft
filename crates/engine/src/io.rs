@@ -408,13 +408,28 @@ pub fn consolidate(e: &mut Engine, t: TrackId, r: Range) -> Result<bool> {
     Ok(true)
 }
 
+/// The most frames of `channels`-channel audio one offline render holds.
+pub fn render_limit(channels: usize) -> usize {
+    soundcraft_mix::MAX_RENDER_SAMPLES / channels.max(1)
+}
+
+/// Refuses `len` frames of `name` past `max`, where a render would cut the audio short.
+pub fn refuse_longer(s: &Session, cmd: &str, name: &str, verb: &str, len: Samples, max: usize) -> Result<()> {
+    if len <= Samples::try_from(max).unwrap_or(Samples::MAX) {
+        return Ok(());
+    }
+    let secs = max as f64 / s.sample_rate.as_f64();
+    Err(crate::cmd::bad(cmd, format!("`{name}` is too long to {verb} (at most {secs:.0} s)")))
+}
+
 /// Render clip gain into a new source and reset the clip's gain.
-pub fn render_clip_gain(e: &mut Engine, id: soundcraft_model::ClipId) -> Result<bool> {
+pub fn render_clip_gain(e: &mut Engine, cmd: &str, id: soundcraft_model::ClipId) -> Result<bool> {
     let s = e.session();
     let Some((t, c)) = s.find_clip(id).map(|(t, c)| (t, c.clone())) else { return Ok(false) };
     if !c.is_audio() {
         return Ok(false);
     }
+    refuse_longer(s, cmd, &c.name, "render", c.length, render_limit(s.track(t).map_or(1, |x| x.channels())))?;
     let mut c2 = c.clone();
     c2.fade_in = Default::default();
     c2.fade_out = Default::default();
@@ -449,6 +464,8 @@ pub fn commit_track(e: &mut Engine, t: TrackId) -> Result<Option<TrackId>> {
         return Ok(None);
     }
     let range = Range::new(0, end + s.sample_rate.samples(2.0));
+    // The track renders through a main mix of at least two channels.
+    refuse_longer(s, "track.commit", &tr.name, "commit", range.len(), render_limit(tr.channels().max(2)))?;
     let audio = soundcraft_mix::render_track_pre_fader(s, t, range);
     let name = format!("{}.cm", tr.name);
     let fmt = ChannelFormat::for_channels(audio.len().clamp(1, 2));

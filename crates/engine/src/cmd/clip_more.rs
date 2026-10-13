@@ -204,7 +204,7 @@ fn effects_render(e: &mut Engine, p: &Value) -> Result<Value> {
     let ids = clip_ids_param(e, p);
     let mut n = 0;
     for id in &ids {
-        if crate::io::render_clip_gain(e, *id)? {
+        if crate::io::render_clip_gain(e, "clip.effects_render", *id)? {
             n += 1;
         }
         let s = e.session_mut();
