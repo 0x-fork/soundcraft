@@ -349,20 +349,13 @@ pub fn transients_in(s: &Session, t: TrackId, r: Range, sens: f32) -> Vec<Sample
 }
 
 /// Strip Silence: keep only the non-silent ranges of clips inside `r`.
-pub fn strip_silence(s: &mut Session, t: TrackId, r: Range, thr: f32, min_len: Samples, pre: Samples, post: Samples) -> usize {
+pub fn strip_silence(s: &mut Session, t: TrackId, r: Range, thr: f32, min_len: Samples, pre: Samples, post: Samples) -> Result<usize> {
     let r = bounded_to_track(s, t, r);
-    let audio = soundcraft_mix::render_clips(s, t, r);
-    let keep = soundcraft_dsp::offline::non_silent_ranges(
-        &audio,
-        thr,
-        usize::try_from(min_len).unwrap_or(0),
-        usize::try_from(pre).unwrap_or(0),
-        usize::try_from(post).unwrap_or(0),
-    );
+    let keep = non_silent(s, t, r, thr, min_len, pre, post)?;
     let mut cut_points = vec![r.start];
     for (a, b) in &keep {
-        cut_points.push(r.start + *a as i64);
-        cut_points.push(r.start + *b as i64);
+        cut_points.push(*a);
+        cut_points.push(*b);
     }
     cut_points.push(r.end);
     for p in &cut_points {
@@ -372,11 +365,10 @@ pub fn strip_silence(s: &mut Session, t: TrackId, r: Range, thr: f32, min_len: S
     let mut gaps = Vec::new();
     let mut prev = r.start;
     for (a, b) in &keep {
-        let a = r.start + *a as i64;
-        if a > prev {
-            gaps.push(Range::new(prev, a));
+        if *a > prev {
+            gaps.push(Range::new(prev, *a));
         }
-        prev = r.start + *b as i64;
+        prev = *b;
     }
     if prev < r.end {
         gaps.push(Range::new(prev, r.end));
@@ -384,7 +376,44 @@ pub fn strip_silence(s: &mut Session, t: TrackId, r: Range, thr: f32, min_len: S
     if let Some(pl) = s.track_mut(t).and_then(|x| x.playlist_mut()) {
         pl.clips.retain(|c| !gaps.iter().any(|g| c.start >= g.start && c.end() <= g.end));
     }
-    keep.len()
+    Ok(keep.len())
+}
+
+/// Most samples (over all channels) Strip Silence renders at once.
+const STRIP_WINDOW_SAMPLES: usize = 1 << 24;
+
+/// The non-silent ranges of `t`'s clips in `r`. The audio is rendered a window at a time where
+/// audio clips play, so all of `r` is scanned however long it is (one render stops at
+/// `MAX_RENDER_SAMPLES`); at most a day of clips, Pro Tools' longest session.
+fn non_silent(s: &Session, t: TrackId, r: Range, thr: f32, min_len: Samples, pre: Samples, post: Samples) -> Result<Vec<(Samples, Samples)>> {
+    let Some(tr) = s.track(t) else { return Ok(Vec::new()) };
+    let mut clips: Vec<Range> = tr.clips().iter().filter(|c| c.is_audio() && !c.muted).filter_map(|c| c.range().intersect(&r)).collect();
+    clips.sort_by_key(|x| x.start);
+    let mut spans: Vec<Range> = Vec::new();
+    for x in clips {
+        match spans.last_mut() {
+            Some(last) if x.start <= last.end => last.end = last.end.max(x.end),
+            _ => spans.push(x),
+        }
+    }
+    if spans.iter().map(Range::len).fold(0, i64::saturating_add) > s.sample_rate.samples(86_400.0) {
+        return Err(EngineError::BadParams("edit.strip_silence".into(), format!("`{}` has more than a day of clips to scan", tr.name)));
+    }
+    let window = i64::try_from(STRIP_WINDOW_SAMPLES / tr.channels().max(1)).unwrap_or(i64::MAX);
+    let len = |n: Samples| u64::try_from(n).unwrap_or(0);
+    let mut scan = soundcraft_dsp::offline::SilenceScan::new(thr, len(min_len));
+    let mut at = r.start;
+    for x in spans {
+        scan.skip(len(x.start - at));
+        at = x.start;
+        while at < x.end {
+            let end = at.saturating_add(window).min(x.end);
+            scan.push(&soundcraft_mix::render_clips(s, t, Range::new(at, end)));
+            at = end;
+        }
+    }
+    scan.skip(len(r.end - at));
+    Ok(scan.finish(len(pre), len(post)).into_iter().map(|(a, b)| (r.start.saturating_add_unsigned(a), r.start.saturating_add_unsigned(b))).collect())
 }
 
 /// Consolidate `r` on a track into one new clip backed by a rendered source. The clip covers the
@@ -1255,6 +1284,43 @@ mod stem_tests {
         let n = r["files"].as_array().map_or(0, Vec::len);
         assert_eq!(n, 7, "{r}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod strip_tests {
+    use super::*;
+
+    /// A stereo track with `length`-long clips at `starts`, each playing a second of steady tone.
+    fn tones(starts: &[Samples], length: Samples) -> (Engine, TrackId) {
+        let mut e = Engine::default();
+        e.execute("track.new", &json!({"format": "stereo"})).unwrap();
+        let t = e.session().tracks[0].id;
+        let s = e.session_mut();
+        let tone = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 48_000]; 2] };
+        let src = add_source(s, "tone", tone, None, FileFormat::Wav);
+        for at in starts {
+            let id = s.new_clip_id();
+            crate::edit::place_clip(s, t, Clip::audio(id, "tone", src, 0, *at, length));
+        }
+        (e, t)
+    }
+
+    #[test]
+    fn clips_past_what_one_render_holds_are_kept() {
+        // 100 minutes in: a stereo render stops at 2^28 frames, about 93 minutes.
+        let far = 48_000 * 6000;
+        let (mut e, t) = tones(&[0, far], 48_000);
+        let r = e.execute("edit.strip_silence", &json!({"track": t.0, "start": 0, "end": far + 96_000})).unwrap();
+        assert_eq!(r["clips"], 2);
+        assert!(e.session().track(t).unwrap().clips().iter().any(|c| c.start >= far));
+    }
+
+    #[test]
+    fn more_than_a_day_of_clips_is_refused() {
+        let (mut e, t) = tones(&[0], 48_000 * 86_401);
+        assert!(e.execute("edit.strip_silence", &json!({"track": t.0, "start": 0, "end": 48_000i64 * 86_402})).is_err());
+        assert_eq!(e.session().track(t).unwrap().clips().len(), 1);
     }
 }
 
