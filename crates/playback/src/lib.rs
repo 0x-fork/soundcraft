@@ -526,7 +526,6 @@ impl Player {
                     let (gtx, grx) = channel();
                     let state = AudioState::new(rx, Arc::clone(&shared), Arc::clone(&session), f64::from(rate), gtx);
                     let fault = Arc::new(Fault::default());
-                    use cpal::traits::StreamTrait;
                     let built = match format {
                         cpal::SampleFormat::I32 => build_output::<i32>(&device, &config, state, channels, &fault, &shared),
                         cpal::SampleFormat::I16 => build_output::<i16>(&device, &config, state, channels, &fault, &shared),
@@ -534,8 +533,9 @@ impl Player {
                     };
                     match built {
                         Ok(stream) => {
-                            if let Err(e) = stream.play() {
-                                log::warn!("audio stream failed to start: {e}");
+                            // A stream that builds but will not start is dropped, and the next config is tried.
+                            if !start_stream(&stream) {
+                                continue;
                             }
                             let buffer = match config.buffer_size {
                                 cpal::BufferSize::Fixed(n) => Some(n),
@@ -862,6 +862,18 @@ fn fold_gains(s: &Session) -> [(f32, f32); MAX_CHANNELS] {
     g
 }
 
+/// Start a freshly built output stream. `false` when the device refuses to start it, so the caller
+/// treats it like a stream that failed to build and tries the next configuration.
+fn start_stream(stream: &impl cpal::traits::StreamTrait) -> bool {
+    match stream.play() {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("audio stream failed to start: {e}");
+            false
+        }
+    }
+}
+
 /// The output stream: the mix renders f32 into a scratch buffer allocated here (so the callback
 /// never allocates), converted to the device's sample type.
 fn build_output<T>(
@@ -966,6 +978,35 @@ fn open_device(want_rate: u32, want_ch: u16, cfg: &AudioConfig) -> Result<(cpal:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stream that builds but refuses to start, as a device can after a reconnect.
+    struct RefusesToStart;
+
+    impl cpal::traits::StreamTrait for RefusesToStart {
+        fn play(&self) -> Result<(), cpal::PlayStreamError> {
+            Err(cpal::PlayStreamError::DeviceNotAvailable)
+        }
+        fn pause(&self) -> Result<(), cpal::PauseStreamError> {
+            Ok(())
+        }
+    }
+
+    struct Starts;
+
+    impl cpal::traits::StreamTrait for Starts {
+        fn play(&self) -> Result<(), cpal::PlayStreamError> {
+            Ok(())
+        }
+        fn pause(&self) -> Result<(), cpal::PauseStreamError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_stream_that_will_not_start_is_reported_as_failed() {
+        assert!(!start_stream(&RefusesToStart));
+        assert!(start_stream(&Starts));
+    }
 
     #[test]
     fn reusable_meter_snapshot_updates_and_drops_stale_tracks() {
