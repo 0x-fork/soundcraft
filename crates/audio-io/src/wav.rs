@@ -83,6 +83,57 @@ fn parse_bext(c: &[u8]) -> Option<BwfInfo> {
     })
 }
 
+/// Refuse the WAVE file at `at`, which symphonia reads (A-law, ADPCM, ...), if an INFO entry
+/// claims more bytes than the file holds: symphonia allocates each entry's length. Chunks are
+/// walked where symphonia reads them: after the bytes a chunk's parser used, not its length.
+pub(crate) fn check_info(b: &[u8], at: usize) -> Result<()> {
+    if tag(b, at + 8) != Some(*b"WAVE") {
+        return Ok(());
+    }
+    let mut pos = at + 12;
+    while let Some(id) = tag(b, pos) {
+        let Some(len) = le_u32(b, pos + 4).map(|n| n as usize) else { break };
+        let (body, pad) = (pos + 8, len & 1);
+        let used = match &id {
+            b"data" => break,
+            b"fmt " => fmt_used(b, body, len),
+            b"LIST" if len < 4 => break,
+            b"LIST" => {
+                let entries = if tag(b, body) == Some(*b"INFO") { info_entries(b, body + 4, len - 4)? } else { 0 };
+                // The list pads itself, then the chunk is padded again.
+                4 + entries.max(len - 4) + pad
+            }
+            _ => len,
+        };
+        pos = body.saturating_add(used).saturating_add(pad);
+    }
+    Ok(())
+}
+
+/// The bytes symphonia reads of a `fmt ` chunk: some formats' parsers go by their own extra size.
+fn fmt_used(b: &[u8], body: usize, len: usize) -> usize {
+    match le_u16(b, body) {
+        Some(2 | 6 | 7 | 0x11) => le_u16(b, body + 16).map_or(len, |extra| 18 + usize::from(extra)),
+        Some(0xfffe) => 40,
+        _ => len,
+    }
+}
+
+/// Check the INFO entries in the `len` bytes from `start`; returns the bytes symphonia reads of
+/// them, with the pad it reads after an odd entry.
+fn info_entries(b: &[u8], start: usize, len: usize) -> Result<usize> {
+    let mut used = 0;
+    while used + 8 <= len {
+        let Some(n) = le_u32(b, start + used + 4).map(|n| n as usize) else { break };
+        if n > b.len().saturating_sub(start + used + 8) {
+            return Err(AudioError::Malformed("a WAV INFO entry is larger than the file".into()));
+        }
+        used += 8 + n;
+        used += used & 1;
+    }
+    Ok(used)
+}
+
 /// True when the bytes start like a RIFF/RF64/BW64 WAVE file.
 pub(crate) fn is_wav(b: &[u8]) -> bool {
     matches!(tag(b, 0), Some(t) if &t == b"RIFF" || &t == b"RF64" || &t == b"BW64") && tag(b, 8).is_some_and(|t| &t == b"WAVE")
