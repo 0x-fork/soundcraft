@@ -180,7 +180,7 @@ fn status_bar(app: &mut SoundApp, ui: &mut Ui) {
     let t = Tokens::current();
     let r = ui.max_rect();
     let s = app.engine.session();
-    let left = format!(
+    let mut left = format!(
         "{} · {} Hz · {} · {} tracks · {}",
         s.name,
         s.sample_rate.hz(),
@@ -192,6 +192,7 @@ fn status_bar(app: &mut SoundApp, ui: &mut Ui) {
         s.tracks.len(),
         app.ui.status
     );
+    soundcraft_model::truncate_chars(&mut left, 4 * soundcraft_model::MAX_NAME_CHARS);
     ui.painter().text(pos2(r.min.x + 10.0, r.center().y), Align2::LEFT_CENTER, left, regular(11.0), t.text_dim);
     let undo = app.engine.undo_label().map_or(String::new(), |l| format!("Undo {l}"));
     ui.painter().text(
@@ -2515,6 +2516,15 @@ mod tests {
         h.input_mut().max_texture_side = Some(8192);
         h.run_steps(4);
         h
+    }
+
+    #[test]
+    fn a_file_time_stamp_at_the_end_of_the_range_draws() {
+        let mut engine = soundcraft_engine::demo::demo_engine();
+        let s = engine.session_mut();
+        s.edit.flags.insert("view.clip.time.original".into());
+        s.sources.iter_mut().for_each(|src| src.time_reference = i64::MAX as u64);
+        harness_with(engine).run_steps(2);
     }
 
     fn smart_demo() -> Harness<'static, SoundApp> {
