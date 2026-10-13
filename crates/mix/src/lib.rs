@@ -1436,7 +1436,8 @@ fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mu
         }
         let near = s.tempo.samples_to_ticks(pos, sr).saturating_sub(base).saturating_sub(1)
             ..=s.tempo.samples_to_ticks(end, sr).saturating_sub(base).saturating_add(1);
-        for c in &sequence.ctrls {
+        // Events before tick 0 are what a start trim hid: they don't play.
+        for c in sequence.ctrls.iter().filter(|c| c.tick >= 0) {
             let tick = c.tick.saturating_add(delay).max(0);
             if !near.contains(&tick) {
                 continue;
@@ -1469,6 +1470,7 @@ fn ctrl_message(kind: CtrlKind, value: i32, transpose: i64) -> [u8; 3] {
 /// it had on this track before `pos`.
 fn chase_controllers(s: &Session, t: &Track, pos: Samples, inst: &mut PluginSlot) {
     inst.plugin.midi(0, [0xB0, 121, 0]);
+    let pos = pos.saturating_sub(midi_offset(s, t));
     const BEND: usize = 128;
     const PRESSURE: usize = 129;
     const PROGRAM: usize = 130;
@@ -1481,7 +1483,7 @@ fn chase_controllers(s: &Session, t: &Track, pos: Samples, inst: &mut PluginSlot
         }
         let base = s.tempo.samples_to_ticks(clip.start, sr);
         let until = pos.min(clip.end());
-        for c in &sequence.ctrls {
+        for c in sequence.ctrls.iter().filter(|c| c.tick >= 0) {
             let slot = match c.kind {
                 CtrlKind::Cc(n) => usize::from(n & 0x7F),
                 CtrlKind::PitchBend => BEND,
