@@ -14,8 +14,10 @@ use crate::{ClapError, scan};
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
-    CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_VALUE, clap_event_header, clap_event_midi,
-    clap_event_note, clap_event_param_value, clap_input_events, clap_output_events,
+    CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT,
+    CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_SECONDS_TIMELINE, CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE,
+    CLAP_TRANSPORT_IS_PLAYING, CLAP_TRANSPORT_IS_RECORDING, clap_event_header, clap_event_midi, clap_event_note, clap_event_param_value,
+    clap_event_transport, clap_input_events, clap_output_events,
 };
 use clap_sys::ext::audio_ports::{CLAP_AUDIO_PORT_IS_MAIN, CLAP_EXT_AUDIO_PORTS, clap_audio_port_info, clap_plugin_audio_ports};
 use clap_sys::ext::gui::{CLAP_EXT_GUI, clap_host_gui, clap_plugin_gui, clap_window, clap_window_handle};
@@ -27,12 +29,14 @@ use clap_sys::ext::params::{
 };
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_host_state, clap_plugin_state};
 use clap_sys::factory::plugin_factory::{CLAP_PLUGIN_FACTORY_ID, clap_plugin_factory};
+use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::host::clap_host;
 use clap_sys::id::clap_id;
 use clap_sys::plugin::clap_plugin;
 use clap_sys::process::{CLAP_PROCESS_ERROR, clap_process};
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{CLAP_VERSION, clap_version_is_compatible};
+use soundcraft_dsp::Transport;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::{Path, PathBuf};
@@ -275,7 +279,7 @@ impl Bundle {
         inst.state_ext = inst.extension::<clap_plugin_state>(CLAP_EXT_STATE);
         let gui = inst.extension::<clap_plugin_gui>(CLAP_EXT_GUI);
         inst.gui = Arc::new(GuiLink {
-            inner: Mutex::new(GuiInner { plugin, gui, alive: !gui.is_null(), created: false, visible: false, window: None }),
+            inner: Mutex::new(GuiInner { plugin, gui, state: inst.state_ext, alive: true, created: false, visible: false, window: None }),
             host: Arc::clone(&inst.state),
         });
         Ok(inst)
@@ -590,6 +594,40 @@ impl RawEvent {
     }
 }
 
+fn transport_event(t: &Transport) -> clap_event_transport {
+    let fixed = |x: f64, factor: i64| if x.is_finite() { (x * factor as f64).round() as i64 } else { 0 };
+    let mut flags =
+        CLAP_TRANSPORT_HAS_TEMPO | CLAP_TRANSPORT_HAS_BEATS_TIMELINE | CLAP_TRANSPORT_HAS_SECONDS_TIMELINE | CLAP_TRANSPORT_HAS_TIME_SIGNATURE;
+    if t.playing {
+        flags |= CLAP_TRANSPORT_IS_PLAYING;
+    }
+    if t.recording {
+        flags |= CLAP_TRANSPORT_IS_RECORDING;
+    }
+    clap_event_transport {
+        header: clap_event_header {
+            size: u32::try_from(size_of::<clap_event_transport>()).unwrap_or(u32::MAX),
+            time: 0,
+            space_id: CLAP_CORE_EVENT_SPACE_ID,
+            type_: CLAP_EVENT_TRANSPORT,
+            flags: 0,
+        },
+        flags,
+        song_pos_beats: fixed(t.quarters, CLAP_BEATTIME_FACTOR),
+        song_pos_seconds: fixed(t.seconds, CLAP_SECTIME_FACTOR),
+        tempo: t.tempo,
+        tempo_inc: 0.0,
+        loop_start_beats: 0,
+        loop_end_beats: 0,
+        loop_start_seconds: 0,
+        loop_end_seconds: 0,
+        bar_start: fixed(t.bar_start, CLAP_BEATTIME_FACTOR),
+        bar_number: i32::try_from(t.bar).unwrap_or(0),
+        tsig_num: u16::try_from(t.numerator).unwrap_or(4),
+        tsig_denom: u16::try_from(t.denominator).unwrap_or(4),
+    }
+}
+
 unsafe extern "C" fn in_events_size(list: *const clap_input_events) -> u32 {
     if list.is_null() {
         return 0;
@@ -707,6 +745,7 @@ fn window_api() -> Option<&'static CStr> {
 struct GuiInner {
     plugin: *const clap_plugin,
     gui: *const clap_plugin_gui,
+    state: *const clap_plugin_state,
     /// The plugin instance exists (cleared by `Instance::drop` before it destroys the plugin).
     alive: bool,
     created: bool,
@@ -715,11 +754,12 @@ struct GuiInner {
     window: Option<hostwin::HostWindow>,
 }
 
-/// The link between an instance and its editor handles. The instance may process on the audio
-/// thread while the editor is driven from the main thread: CLAP allows `clap.gui` (main-thread)
-/// calls concurrently with audio-thread calls. Every GUI call happens under this lock, and the
-/// instance clears `alive` (destroying any GUI) under the same lock before it destroys the
-/// plugin, so a handle can never call into a destroyed plugin.
+/// The link between an instance and its editor and state handles. The instance may process on
+/// the audio thread while the editor is driven and the state saved from the main thread: CLAP
+/// allows `clap.gui` and `clap.state` (main-thread) calls concurrently with audio-thread calls.
+/// Every such call happens under this lock, and the instance clears `alive` (destroying any GUI)
+/// under the same lock before it destroys the plugin, so a handle can never call into a destroyed
+/// plugin.
 pub(crate) struct GuiLink {
     inner: Mutex<GuiInner>,
     host: Arc<HostState>,
@@ -731,6 +771,7 @@ impl Default for GuiLink {
             inner: Mutex::new(GuiInner {
                 plugin: std::ptr::null(),
                 gui: std::ptr::null(),
+                state: std::ptr::null(),
                 alive: false,
                 created: false,
                 visible: false,
@@ -751,7 +792,8 @@ impl GuiLink {
     }
 
     pub fn available(&self) -> bool {
-        self.lock().alive
+        let g = self.lock();
+        g.alive && !g.gui.is_null()
     }
 
     pub fn host(&self) -> &HostState {
@@ -889,6 +931,22 @@ impl GuiLink {
         if let Some(w) = g.window.take() {
             w.close();
         }
+    }
+
+    /// `clap_plugin_state.save` into memory (`None` without the extension, on failure, or once the
+    /// plugin is gone).
+    pub fn save_state(&self) -> Option<Vec<u8>> {
+        let g = self.lock();
+        if !g.alive {
+            return None;
+        }
+        // SAFETY: `state` is null or the plugin's static extension vtable, valid while `alive`.
+        let save = unsafe { g.state.as_ref() }?.save?;
+        let mut out: Vec<u8> = Vec::new();
+        let stream = clap_ostream { ctx: (&mut out as *mut Vec<u8>).cast::<c_void>(), write: Some(ostream_write) };
+        // SAFETY: live plugin (`alive`, under the lock); the stream and its context live on this
+        // frame for the call.
+        unsafe { save(g.plugin, &stream) }.then_some(out)
     }
 
     /// Closes (destroys) the editor.
@@ -1114,19 +1172,14 @@ impl Instance {
         self.gui.available().then(|| Arc::clone(&self.gui))
     }
 
-    /// `clap_plugin_state.save` into memory (`None` without the extension or on failure).
-    pub fn save_state(&self) -> Option<Vec<u8>> {
-        // SAFETY: the extension pointer, when non-null, points to a static vtable in the plugin.
-        let save = unsafe { self.state_ext.as_ref() }?.save?;
-        let mut out: Vec<u8> = Vec::new();
-        let stream = clap_ostream { ctx: (&mut out as *mut Vec<u8>).cast::<c_void>(), write: Some(ostream_write) };
-        // SAFETY: valid instance; the stream and its context live on this frame for the call.
-        unsafe { save(self.plugin, &stream) }.then_some(out)
+    /// The same link, for state handles (`None` when the plugin has no `clap.state`).
+    pub fn state_link(&self) -> Option<Arc<GuiLink>> {
+        (!self.state_ext.is_null()).then(|| Arc::clone(&self.gui))
     }
 
     /// `clap_plugin_state.load` from memory. `false` without the extension or when refused.
     pub fn load_state(&self, data: &[u8]) -> bool {
-        // SAFETY: see `save_state`.
+        // SAFETY: the extension pointer, when non-null, points to a static vtable in the plugin.
         let Some(load) = (unsafe { self.state_ext.as_ref() }).and_then(|s| s.load) else { return false };
         let mut cursor = ReadCursor { data, pos: 0 };
         let stream = clap_istream { ctx: (&mut cursor as *mut ReadCursor<'_>).cast::<c_void>(), read: Some(istream_read) };
@@ -1288,6 +1341,7 @@ impl Instance {
         outputs: &mut PortBuffers,
         events: &[Event],
         offset: u32,
+        transport: Option<&Transport>,
     ) -> Result<i32, ClapError> {
         if !self.active {
             return Err(ClapError::Process("not active".into()));
@@ -1321,10 +1375,11 @@ impl Instance {
         self.out_params.clear();
         let out_events =
             clap_output_events { ctx: (&mut self.out_params as *mut Vec<(u32, f64)>).cast::<c_void>(), try_push: Some(out_events_try_push) };
+        let transport = transport.map(transport_event);
         let p = clap_process {
             steady_time,
             frames_count: u32::try_from(frames).unwrap_or(0),
-            transport: std::ptr::null(),
+            transport: transport.as_ref().map_or(std::ptr::null(), std::ptr::from_ref),
             audio_inputs: inputs.bufs.as_ptr(),
             audio_outputs: outputs.bufs.as_mut_ptr(),
             audio_inputs_count: u32::try_from(inputs.bufs.len()).unwrap_or(0),
@@ -1334,8 +1389,8 @@ impl Instance {
         };
         // SAFETY: valid, processing instance. Every buffer pointer refers to `frames` (or more)
         // valid f32s owned by `inputs`/`outputs`, which are borrowed for the whole call; the event
-        // lists and their contexts live on this stack frame / in `self.raw`, untouched until the
-        // call returns.
+        // lists and their contexts and the transport live on this stack frame / in `self.raw`,
+        // untouched until the call returns.
         let status = unsafe { process(self.plugin, &p) };
         if !self.out_params.is_empty()
             && let Ok(mut edits) = self.state.edits.try_lock()
@@ -1569,4 +1624,34 @@ mod hostwin {
     }
 
     pub fn resize(_window: *mut c_void, _w: f64, _h: f64) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_transport_reaches_clap_in_fixed_point() {
+        let t = Transport {
+            playing: true,
+            tempo: 90.0,
+            numerator: 3,
+            denominator: 4,
+            samples: 96_000,
+            seconds: 2.0,
+            quarters: 3.5,
+            bar_start: 3.0,
+            bar: 1,
+            ..Transport::default()
+        };
+        let e = transport_event(&t);
+        assert_eq!((e.header.type_, e.header.size as usize), (CLAP_EVENT_TRANSPORT, size_of::<clap_event_transport>()));
+        assert_eq!(e.flags & CLAP_TRANSPORT_IS_PLAYING, CLAP_TRANSPORT_IS_PLAYING);
+        assert_eq!(e.flags & CLAP_TRANSPORT_IS_RECORDING, 0);
+        assert_eq!((e.song_pos_beats, e.bar_start), (7 * CLAP_BEATTIME_FACTOR / 2, 3 * CLAP_BEATTIME_FACTOR));
+        assert_eq!(e.song_pos_seconds, 2 * CLAP_SECTIME_FACTOR);
+        assert_eq!((e.tempo, e.bar_number, e.tsig_num, e.tsig_denom), (90.0, 1, 3, 4));
+        let nan = transport_event(&Transport { quarters: f64::NAN, ..t });
+        assert_eq!(nan.song_pos_beats, 0);
+    }
 }

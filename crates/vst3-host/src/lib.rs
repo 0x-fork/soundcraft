@@ -116,6 +116,9 @@ pub enum Vst3Error {
 mod api {
     use super::*;
 
+    pub fn cached() -> Option<Vec<Vst3Descriptor>> {
+        registry::cached()
+    }
     pub fn scan() -> Vec<Vst3Descriptor> {
         registry::scan()
     }
@@ -146,6 +149,9 @@ mod api {
 mod api {
     use super::*;
 
+    pub fn cached() -> Option<Vec<Vst3Descriptor>> {
+        Some(Vec::new())
+    }
     pub fn scan() -> Vec<Vst3Descriptor> {
         Vec::new()
     }
@@ -191,6 +197,11 @@ pub fn add_search_dir(dir: &Path) -> usize {
 /// Scans the given folders without touching the cache.
 pub fn scan_paths(dirs: &[PathBuf]) -> Vec<Vst3Descriptor> {
     api::scan_paths(dirs)
+}
+
+/// The plugins of the last scan, without scanning: `None` until something has scanned.
+pub fn cached() -> Option<Vec<Vst3Descriptor>> {
+    api::cached()
 }
 
 /// Shuts plugin hosting down: runs the module exit of every loaded binary that has no live
@@ -296,11 +307,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    // Unix only: the test points a ".vst3" at a system library through a symlink.
+    #[cfg(unix)]
     #[test]
     fn a_real_library_without_the_vst3_export_is_rejected() {
         // A system library loads fine but has no `GetPluginFactory`.
         // (macOS system libraries live only in the dyld shared cache, not as files.)
-        let lib = if cfg!(target_os = "macos") || cfg!(windows) {
+        let lib = if cfg!(target_os = "macos") {
             None
         } else {
             ["/lib/x86_64-linux-gnu/libz.so.1", "/usr/lib/libz.so.1", "/lib64/libz.so.1"].iter().map(PathBuf::from).find(|p| p.exists())
@@ -310,15 +323,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         // Point a single-file ".vst3" at it via a symlink (no copying of binaries).
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&lib, d.join("z.vst3")).unwrap();
-            let e = load_bundle(&d.join("z.vst3")).unwrap_err();
-            assert!(e.to_string().contains("not a VST3 plugin"), "{e}");
-        }
-        // Elsewhere there is no library to point at (and no symlink without privileges).
-        #[cfg(not(unix))]
-        let _ = lib;
+        std::os::unix::fs::symlink(&lib, d.join("z.vst3")).unwrap();
+        let e = load_bundle(&d.join("z.vst3")).unwrap_err();
+        assert!(e.to_string().contains("not a VST3 plugin"), "{e}");
         let _ = std::fs::remove_dir_all(&d);
     }
 }
