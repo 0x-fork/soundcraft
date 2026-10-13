@@ -143,6 +143,8 @@ fn color_palette(app: &mut SoundApp, ctx: &egui::Context) {
                 }
             }
         });
+        ui.separator();
+        ui.add(egui::Slider::new(&mut app.ui.track_tint, 0.0..=1.0).show_value(false).text("Track tint in the Edit window"));
     });
     app.ui.show_color_palette = open;
 }
@@ -178,11 +180,17 @@ fn system_usage(app: &mut SoundApp, ctx: &egui::Context) {
 fn task_manager(app: &mut SoundApp, ctx: &egui::Context) {
     let mut open = app.ui.show_task_manager;
     win(ctx, &mut open, "Task Manager", vec2(320.0, 120.0), |ui| {
-        ui.label("No background tasks are running.");
+        match &app.bounce {
+            Some(b) => {
+                ui.label(format!("Bouncing {} ({:.0}%)", b.path().display(), b.progress() * 100.0));
+                ui.add(egui::ProgressBar::new(b.progress()));
+            }
+            None => {
+                ui.label("No background tasks are running.");
+            }
+        }
         ui.label(
-            egui::RichText::new("Renders, bounces and AudioSuite processes run to completion before returning.")
-                .small()
-                .color(Tokens::current().text_dim),
+            egui::RichText::new("Renders and AudioSuite processes run to completion before returning.").small().color(Tokens::current().text_dim),
         );
     });
     app.ui.show_task_manager = open;
@@ -202,10 +210,7 @@ fn metadata(app: &mut SoundApp, ctx: &egui::Context) {
                 ("Clips", s.tracks.iter().map(|t| t.clips().len()).sum::<usize>().to_string()),
                 ("Audio files", s.sources.len().to_string()),
                 ("Markers", s.markers.len().to_string()),
-                (
-                    "Length",
-                    soundcraft_time::format_position(s.content_end(), soundcraft_time::TimeFormat::MinSecs, s.sample_rate, &s.tempo, s.frame_rate, 0),
-                ),
+                ("Length", s.format_position(s.content_end(), soundcraft_time::TimeFormat::MinSecs)),
             ] {
                 ui.label(k);
                 ui.label(v);
@@ -334,7 +339,7 @@ fn workspace(app: &mut SoundApp, ctx: &egui::Context) {
                         }
                         let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
                         let ext = std::path::Path::new(&name).extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
-                        (is_dir || ["wav", "aif", "aiff", "flac", "mp3", "ogg", "m4a", "caf", "mid", "midi", "scraft"].contains(&ext.as_str()))
+                        (is_dir || ["wav", "aif", "aiff", "flac", "mp3", "ogg", "m4a", "m4b", "caf", "mid", "midi", "scraft"].contains(&ext.as_str()))
                             .then_some((name, is_dir))
                     })
                     .collect()
@@ -432,7 +437,7 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
             let _ = app.run("options.delay_compensation", json!({"value": dc}));
         }
         if ui.button("Reconnect audio device").clicked() {
-            app.player = Some(soundcraft_playback::Player::new(app.engine.session_arc()));
+            app.reconnect_audio();
         }
     });
     app.ui.show_playback_engine = open;
