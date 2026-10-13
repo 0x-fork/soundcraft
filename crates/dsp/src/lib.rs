@@ -169,6 +169,24 @@ impl PluginInfo {
     }
 }
 
+/// The host's transport at the start of a block, for tempo-synced plugins.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Transport {
+    pub playing: bool,
+    pub recording: bool,
+    /// Quarter notes per minute.
+    pub tempo: f64,
+    pub numerator: u32,
+    pub denominator: u32,
+    /// Timeline position.
+    pub samples: i64,
+    pub seconds: f64,
+    pub quarters: f64,
+    /// Start of the current bar, in quarter notes, and its number (0 for the first bar).
+    pub bar_start: f64,
+    pub bar: i64,
+}
+
 /// A realtime audio processor or instrument.
 ///
 /// Contract: `process` never allocates or panics. It processes `min(frames, io[c].len())` frames
@@ -195,9 +213,14 @@ pub trait Plugin: Send {
     fn gain_reduction_db(&self) -> f32 {
         0.0
     }
+    /// The transport for the next block, given before `process`.
+    fn set_transport(&mut self, _transport: &Transport) {}
     /// Instruments: note events at sample offsets within the next block.
     fn note_on(&mut self, _offset: usize, _note: u8, _velocity: u8) {}
     fn note_off(&mut self, _offset: usize, _note: u8) {}
+    /// Instruments: any other MIDI 1.0 channel message (control change, pitch bend, pressure,
+    /// program change) at a sample offset within the next block.
+    fn midi(&mut self, _offset: usize, _msg: [u8; 3]) {}
     fn all_notes_off(&mut self) {}
     /// Sample-playing instruments (the Sampler): the recorded audio to play, `None` to clear it.
     /// `false` when the plugin does not play samples. Does not allocate; sounding voices stop.
@@ -299,6 +322,11 @@ pub fn create(id: &str) -> Option<Box<dyn Plugin>> {
 /// Looks up a plugin description by id.
 pub fn plugin_info(id: &str) -> Option<&'static PluginInfo> {
     plugins::REGISTRY.iter().copied().find(|i| i.id == id)
+}
+
+/// Whether a plugin makes sound instead of processing its input (it ignores the input).
+pub fn is_generator(id: &str) -> bool {
+    id == "signal_generator"
 }
 
 /// Silence floor used by the dB helpers.

@@ -1,7 +1,7 @@
 //! `Vst3Plugin`: a loaded VST3 instance behind the safe `soundcraft_dsp::Plugin` trait.
 
-use crate::ffi::{BusBuffers, EVENT_CAP, EditorLink, HostContext, Instance, NoteEvent, PARAM_QUEUE_CAP};
-use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, Unit};
+use crate::ffi::{AFTERTOUCH, BusBuffers, EVENT_CAP, EditorLink, HostContext, Instance, NoteEvent, PARAM_QUEUE_CAP, PITCH_BEND};
+use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, Transport, Unit};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use vst3::ComWrapper;
@@ -33,8 +33,16 @@ pub struct Vst3Plugin {
     values: Vec<f32>,
     /// Normalized values waiting for the next block (coalesced per id; bounded).
     pending: Vec<(u32, f64)>,
+    /// Host-set values the controller has not seen yet (same order as `ids`). `set_param` may
+    /// run on the audio thread, so it never calls the controller; `save_state`, which already
+    /// does, hands them over first.
+    unsynced: Vec<bool>,
     /// Pending notes, kept sorted by time. Never grows past `EVENT_CAP`.
     notes: Vec<NoteEvent>,
+    /// The parameter each MIDI controller drives (see `Instance::midi_mapping`).
+    midi_map: Vec<Option<u32>>,
+    /// Controller points for the next block: (time, param id, normalized value). Bounded.
+    controls: Vec<(u32, u32, f64)>,
     inputs: BusBuffers,
     outputs: BusBuffers,
     has_input: bool,
@@ -46,6 +54,7 @@ pub struct Vst3Plugin {
     latency: usize,
     tail: usize,
     position: i64,
+    transport: Option<Transport>,
 }
 
 impl Vst3Plugin {
@@ -76,7 +85,10 @@ impl Vst3Plugin {
             info,
             values: Vec::with_capacity(ids.len()),
             pending: Vec::with_capacity(ids.len().min(PARAM_QUEUE_CAP)),
+            unsynced: vec![false; ids.len()],
             notes: Vec::with_capacity(EVENT_CAP),
+            midi_map: Vec::new(),
+            controls: Vec::with_capacity(EVENT_CAP),
             inputs: BusBuffers::new(&[], 0),
             outputs: BusBuffers::new(&[], 0),
             has_input: false,
@@ -88,6 +100,7 @@ impl Vst3Plugin {
             latency: 0,
             tail: 0,
             position: 0,
+            transport: None,
             ids,
             maps,
             inst,
@@ -145,6 +158,7 @@ impl Vst3Plugin {
             }
         }
         self.pending.clear();
+        self.unsynced.fill(false);
     }
 
     /// Inserts keeping the queue time-sorted; drops the event when the queue is full (never
@@ -178,6 +192,7 @@ impl Plugin for Vst3Plugin {
                 self.max_block = mb;
                 self.latency = self.inst.latency() as usize;
                 self.tail = self.inst.tail() as usize;
+                self.midi_map = self.inst.midi_mapping();
             }
             Err(e) => {
                 log::warn!("{}: {e}", self.info.id);
@@ -195,6 +210,7 @@ impl Plugin for Vst3Plugin {
 
     fn reset(&mut self) {
         self.notes.clear();
+        self.controls.clear();
         self.held = [false; 128];
     }
 
@@ -204,6 +220,9 @@ impl Plugin for Vst3Plugin {
         let v = pi.clamp(value);
         if let Some(slot) = self.values.get_mut(i) {
             *slot = v;
+        }
+        if let Some(u) = self.unsynced.get_mut(i) {
+            *u = true;
         }
         let Some(n) = self.normalized_from_plain(i, v) else { return true };
         if let Some(e) = self.pending.iter_mut().find(|(pid, _)| *pid == vid) {
@@ -237,6 +256,9 @@ impl Plugin for Vst3Plugin {
                 e.set_time(last);
             }
         }
+        for c in &mut self.controls {
+            c.0 = c.0.min(last);
+        }
         let mut start = 0usize;
         while start < frames {
             let n = (frames - start).min(self.max_block);
@@ -253,7 +275,17 @@ impl Plugin for Vst3Plugin {
             let k = self.notes.iter().position(|e| e.time() >= end).unwrap_or(self.notes.len());
             let offset = u32::try_from(start).unwrap_or(u32::MAX);
             let notes = self.notes.get(..k).unwrap_or(&[]);
-            let r = self.inst.process(n, &mut self.inputs, &mut self.outputs, &self.pending, notes, offset, self.position);
+            let r = self.inst.process(
+                n,
+                &mut self.inputs,
+                &mut self.outputs,
+                &self.pending,
+                &self.controls,
+                notes,
+                offset,
+                self.position,
+                self.transport.as_ref(),
+            );
             self.pending.clear();
             self.notes.drain(..k);
             self.position = self.position.saturating_add(i64::try_from(n).unwrap_or(0));
@@ -278,10 +310,15 @@ impl Plugin for Vst3Plugin {
             }
             start += n;
         }
+        self.controls.clear();
     }
 
     fn latency(&self) -> usize {
         self.latency
+    }
+
+    fn set_transport(&mut self, transport: &Transport) {
+        self.transport = Some(*transport);
     }
 
     fn tail_samples(&self) -> usize {
@@ -310,6 +347,26 @@ impl Plugin for Vst3Plugin {
         }
     }
 
+    fn midi(&mut self, offset: usize, msg: [u8; 3]) {
+        let time = u32::try_from(offset).unwrap_or(u32::MAX);
+        let [_, d1, d2] = msg.map(|b| b & 0x7F);
+        let (ctrl, value) = match msg[0] & 0xF0 {
+            0xB0 => (usize::from(d1), f64::from(d2) / 127.0),
+            0xD0 => (AFTERTOUCH, f64::from(d1) / 127.0),
+            0xE0 => (PITCH_BEND, f64::from(u16::from(d2) << 7 | u16::from(d1)) / 16383.0),
+            0xA0 if self.event_input => {
+                self.push_note(NoteEvent::Pressure { time, key: d1, pressure: f32::from(d2) / 127.0 });
+                return;
+            }
+            _ => return,
+        };
+        if let Some(&Some(id)) = self.midi_map.get(ctrl)
+            && self.controls.len() < self.controls.capacity()
+        {
+            self.controls.push((time, id, value));
+        }
+    }
+
     fn all_notes_off(&mut self) {
         for k in 0..128u8 {
             if self.held.get(k as usize).copied().unwrap_or(false) {
@@ -319,6 +376,17 @@ impl Plugin for Vst3Plugin {
     }
 
     fn save_state(&mut self) -> Option<Vec<u8>> {
+        // A parameter only the controller stores (no processor state) would otherwise be saved
+        // with the controller's stale value.
+        for i in 0..self.ids.len() {
+            if !self.unsynced.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            if let (Some(&id), Some(n)) = (self.ids.get(i), self.values.get(i).and_then(|&v| self.normalized_from_plain(i, v))) {
+                self.inst.set_normalized(id, n);
+            }
+        }
+        self.unsynced.fill(false);
         self.inst.save_state()
     }
 

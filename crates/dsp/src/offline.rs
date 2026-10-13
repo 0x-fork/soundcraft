@@ -342,7 +342,14 @@ pub fn pitch_shift(ch: &[Vec<f32>], semitones: f32, sample_rate: f32) -> Vec<Vec
         return ch.to_vec();
     }
     let factor = 2f64.powf(f64::from(st) / 12.0);
-    let stretched = time_stretch(ch, factor, sample_rate);
+    // time_stretch clamps to 0.1..=10, short of the 16x (or 1/16) that ±48 needs: stretch twice by
+    // the square root instead.
+    let stretched = if (0.1..=10.0).contains(&factor) {
+        time_stretch(ch, factor, sample_rate)
+    } else {
+        let half = factor.sqrt();
+        time_stretch(&time_stretch(ch, half, sample_rate), half, sample_rate)
+    };
     let len = max_len(ch);
     let slen = max_len(&stretched);
     if slen == 0 || len == 0 {
@@ -444,39 +451,71 @@ pub fn detect_transients(ch: &[Vec<f32>], sample_rate: f32, sensitivity: f32) ->
 /// Each region is padded by `pad_before`/`pad_after` (clamped to the buffer) and overlapping
 /// regions are merged.
 pub fn non_silent_ranges(ch: &[Vec<f32>], threshold_db: f32, min_len: usize, pad_before: usize, pad_after: usize) -> Vec<(usize, usize)> {
-    let len = max_len(ch);
-    let thr = db_to_gain(if threshold_db.is_nan() { -48.0 } else { threshold_db });
-    let mut raw: Vec<(usize, usize)> = Vec::new();
-    let mut start: Option<usize> = None;
-    let mut last_loud = 0usize;
-    for i in 0..len {
-        let loud = ch.iter().any(|c| c.get(i).is_some_and(|v| v.is_finite() && v.abs() > thr));
-        if !loud {
-            continue;
-        }
-        match start {
-            Some(s) if i - last_loud > min_len.max(1) => {
-                raw.push((s, last_loud + 1));
-                start = Some(i);
+    let mut scan = SilenceScan::new(threshold_db, min_len as u64);
+    scan.push(ch);
+    let at = |x: u64| usize::try_from(x).unwrap_or(usize::MAX);
+    scan.finish(pad_before as u64, pad_after as u64).into_iter().map(|(s, e)| (at(s), at(e))).collect()
+}
+
+/// [`non_silent_ranges`] over audio that arrives a block at a time, so material of any length can
+/// be scanned without holding all of it.
+pub struct SilenceScan {
+    thr: f32,
+    min_len: u64,
+    len: u64,
+    start: Option<u64>,
+    last_loud: u64,
+    raw: Vec<(u64, u64)>,
+}
+
+impl SilenceScan {
+    pub fn new(threshold_db: f32, min_len: u64) -> Self {
+        let thr = db_to_gain(if threshold_db.is_nan() { -48.0 } else { threshold_db });
+        SilenceScan { thr, min_len, len: 0, start: None, last_loud: 0, raw: Vec::new() }
+    }
+
+    /// Scan the next block (planar), which follows the audio scanned so far.
+    pub fn push(&mut self, ch: &[Vec<f32>]) {
+        let n = max_len(ch);
+        for k in 0..n {
+            if !ch.iter().any(|c| c.get(k).is_some_and(|v| v.is_finite() && v.abs() > self.thr)) {
+                continue;
             }
-            None => start = Some(i),
-            _ => {}
+            let i = self.len.saturating_add(k as u64);
+            match self.start {
+                Some(s) if i - self.last_loud > self.min_len.max(1) => {
+                    self.raw.push((s, self.last_loud.saturating_add(1)));
+                    self.start = Some(i);
+                }
+                None => self.start = Some(i),
+                _ => {}
+            }
+            self.last_loud = i;
         }
-        last_loud = i;
+        self.len = self.len.saturating_add(n as u64);
     }
-    if let Some(s) = start {
-        raw.push((s, last_loud + 1));
+
+    /// Pass over `n` samples known to be silent.
+    pub fn skip(&mut self, n: u64) {
+        self.len = self.len.saturating_add(n);
     }
-    let mut out: Vec<(usize, usize)> = Vec::with_capacity(raw.len());
-    for (s, e) in raw {
-        let s = s.saturating_sub(pad_before);
-        let e = e.saturating_add(pad_after).min(len);
-        match out.last_mut() {
-            Some(last) if s <= last.1 => last.1 = last.1.max(e),
-            _ => out.push((s, e)),
+
+    /// The regions found, padded and merged (see [`non_silent_ranges`]).
+    pub fn finish(mut self, pad_before: u64, pad_after: u64) -> Vec<(u64, u64)> {
+        if let Some(s) = self.start {
+            self.raw.push((s, self.last_loud.saturating_add(1)));
         }
+        let mut out: Vec<(u64, u64)> = Vec::with_capacity(self.raw.len());
+        for (s, e) in self.raw {
+            let s = s.saturating_sub(pad_before);
+            let e = e.saturating_add(pad_after).min(self.len);
+            match out.last_mut() {
+                Some(last) if s <= last.1 => last.1 = last.1.max(e),
+                _ => out.push((s, e)),
+            }
+        }
+        out
     }
-    out
 }
 
 /// Runs a plugin over whole buffers in blocks, compensating its latency so the output lines up

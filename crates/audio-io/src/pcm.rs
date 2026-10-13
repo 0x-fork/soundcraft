@@ -37,6 +37,12 @@ pub(crate) fn be_u32(b: &[u8], pos: usize) -> Option<u32> {
     Some(u32::from_be_bytes(s))
 }
 
+/// Big-endian `u64` at `pos`.
+pub(crate) fn be_u64(b: &[u8], pos: usize) -> Option<u64> {
+    let s: [u8; 8] = b.get(pos..pos.checked_add(8)?)?.try_into().ok()?;
+    Some(u64::from_be_bytes(s))
+}
+
 /// Four-byte tag at `pos`.
 pub(crate) fn tag(b: &[u8], pos: usize) -> Option<[u8; 4]> {
     b.get(pos..pos.checked_add(4)?)?.try_into().ok()
