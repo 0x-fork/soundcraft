@@ -306,7 +306,8 @@ pub struct MixEngine {
     /// Snapshot key of the session the strips/order were synced to.
     synced: (usize, usize, usize),
     order: Vec<usize>,
-    /// Current total compensation delay (samples) of the mix.
+    /// Current total compensation delay (samples) of the main mix: the slowest track and aux
+    /// returns, and the master faders' inserts.
     pub latency: usize,
     /// Delay already applied to audio written onto busses: the slowest track insert.
     /// A bus render drops this so the bus lines up with the timeline. The extra delay
@@ -641,11 +642,22 @@ impl MixEngine {
                 }
             }
         }
+        // The master faders' inserts delay the whole main mix, so their latency is part of the
+        // mix's too (the faders run one after the other: it adds up).
+        let mut lmax_m = 0usize;
+        if pdc {
+            for t in s.tracks.iter().filter(|t| t.kind == TrackKind::Master && !t.inactive) {
+                if let Some(st) = self.strips.get_mut(&t.id) {
+                    note_insert_latency(t, st, pos);
+                    lmax_m = lmax_m.saturating_add(st.latency);
+                }
+            }
+        }
         let lmax_t = if pdc { work.iter().map(|(_, st)| st.latency).max().unwrap_or(0) } else { 0 };
         let lmax_a =
             if pdc { self.strips.iter().filter(|(id, _)| s.track(**id).is_some_and(is_aux)).map(|(_, st)| st.latency).max().unwrap_or(0) } else { 0 };
         self.track_latency = lmax_t;
-        self.latency = lmax_t + lmax_a;
+        self.latency = lmax_t + lmax_a + lmax_m;
         for (i, st) in work.iter_mut() {
             let Some(t) = s.tracks.get(*i) else { continue };
             let ch = st.buf.len();
