@@ -349,12 +349,42 @@ fn tempo_meter(app: &mut SoundApp, ui: &mut Ui) {
     ui.painter().text(pos2(r.max.x - 8.0, r.min.y + 32.0), Align2::RIGHT_CENTER, meter, mono(11.0), t.counter_text);
     ui.painter().text(pos2(r.min.x + 70.0, r.min.y + 48.0), Align2::RIGHT_CENTER, "Tempo", regular(11.0), t.counter_label);
     icons::draw(ui.painter(), Rect::from_center_size(pos2(r.min.x + 82.0, r.min.y + 48.0), vec2(13.0, 13.0)), "note", t.counter_text);
-    ui.painter().text(pos2(r.max.x - 8.0, r.min.y + 48.0), Align2::RIGHT_CENTER, format!("{bpm:.4}"), mono(11.0), t.counter_text);
+    tempo_value(app, ui, r.max.x - 8.0, r.min.y + 48.0, bpm);
     let clk = Rect::from_min_size(pos2(r.min.x + 6.0, r.min.y + 40.0), vec2(18.0, 18.0));
     icons::draw(ui.painter(), clk, "click", if click { t.counter_text } else { t.text_dim });
     if ui.interact(clk, ui.id().with("click"), Sense::click()).on_hover_text("Click").clicked() {
         let _ = app.run("options.click", json!({}));
     }
+}
+
+/// The tempo in effect at the playhead, right-aligned at `right`: drag it (Shift for fine steps),
+/// or click and type.
+fn tempo_value(app: &mut SoundApp, ui: &mut Ui, right: f32, y: f32, bpm: f64) {
+    let t = Tokens::current();
+    let w = ui.painter().layout_no_wrap(format!("{bpm:.4}"), mono(11.0), t.counter_text).size().x;
+    let rect = Rect::from_min_max(pos2(right - w - 4.0, y - 8.0), pos2(right + 4.0, y + 8.0));
+    let mut c = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    c.style_mut().override_font_id = Some(mono(11.0));
+    let v = c.visuals_mut();
+    v.override_text_color = Some(t.counter_text);
+    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active] {
+        w.weak_bg_fill = Color32::TRANSPARENT;
+        w.bg_stroke = Stroke::NONE;
+    }
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, t.counter_border);
+    let mut value = bpm;
+    let resp = c.add_sized(rect.size(), egui::DragValue::new(&mut value).speed(0.1).range(5.0..=1000.0).fixed_decimals(4));
+    if resp.changed() {
+        let s = app.engine.session();
+        let tick = s.tempo.samples_to_ticks(app.position(), s.sample_rate);
+        let event = s.tempo.tempos().iter().rev().find(|e| e.tick <= tick).map_or(0, |e| e.tick);
+        let at = s.tempo.tick_to_samples(event, s.sample_rate);
+        let _ = app.engine.execute_merged("event.tempo", &json!({"bpm": value, "at": at}), "toolbar_tempo");
+    }
+    if resp.drag_stopped() || resp.lost_focus() {
+        app.engine.end_merge();
+    }
+    resp.on_hover_text("Drag to change the tempo (Shift: fine steps), or click to type it");
 }
 
 fn output_meter(app: &mut SoundApp, ui: &mut Ui) {
