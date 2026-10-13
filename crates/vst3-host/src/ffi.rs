@@ -1239,6 +1239,15 @@ impl Instance {
         v.is_finite().then(|| v.clamp(0.0, 1.0))
     }
 
+    /// Tells the controller about a value the host set (`setParamNormalized`).
+    pub fn set_normalized(&self, id: u32, n: f64) {
+        let Some(c) = &self.controller else { return };
+        if n.is_finite() {
+            // SAFETY: valid controller.
+            unsafe { c.setParamNormalized(id, n.clamp(0.0, 1.0)) };
+        }
+    }
+
     pub fn value_text(&self, id: u32, normalized: f64) -> Option<String> {
         let c = self.controller.as_ref()?;
         let mut s: sv::String128 = [0; 128];
@@ -1749,7 +1758,7 @@ impl EditorLink {
 mod window {
     use objc2::rc::Retained;
     use objc2::{MainThreadMarker, MainThreadOnly};
-    use objc2_app_kit::{NSApplication, NSBackingStoreType, NSFloatingWindowLevel, NSWindow, NSWindowStyleMask};
+    use objc2_app_kit::{NSApplication, NSBackingStoreType, NSFloatingWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask};
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
     use std::ffi::{c_char, c_void};
 
@@ -1780,7 +1789,10 @@ mod window {
             let mtm = MainThreadMarker::new().ok_or_else(|| "not on the main thread".to_string())?;
             let _app = NSApplication::sharedApplication(mtm);
             let rect = NSRect::new(NSPoint::new(200.0, 200.0), NSSize::new(w, h));
-            let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable;
+            // Plugin editors are transient windows. In particular they must not be
+            // minimizable: minimized NSWindows become persistent thumbnails in the macOS Dock,
+            // which made every editor visited in a session look like another running app.
+            let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
             // SAFETY: a freshly allocated window on the main thread; valid rect and style.
             let window = unsafe {
                 NSWindow::initWithContentRect_styleMask_backing_defer(NSWindow::alloc(mtm), rect, style, NSBackingStoreType::Buffered, false)
@@ -1791,6 +1803,8 @@ mod window {
             window.setTitle(&NSString::from_str(title));
             window.setLevel(NSFloatingWindowLevel);
             window.setHidesOnDeactivate(true);
+            window.setExcludedFromWindowsMenu(true);
+            window.setCollectionBehavior(NSWindowCollectionBehavior::Transient | NSWindowCollectionBehavior::IgnoresCycle);
             window.center();
             Ok(HostWindow { window: Retained::into_raw(window) })
         }

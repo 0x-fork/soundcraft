@@ -83,6 +83,57 @@ fn parse_bext(c: &[u8]) -> Option<BwfInfo> {
     })
 }
 
+/// Refuse the WAVE file at `at`, which symphonia reads (A-law, ADPCM, ...), if an INFO entry
+/// claims more bytes than the file holds: symphonia allocates each entry's length. Chunks are
+/// walked where symphonia reads them: after the bytes a chunk's parser used, not its length.
+pub(crate) fn check_info(b: &[u8], at: usize) -> Result<()> {
+    if tag(b, at + 8) != Some(*b"WAVE") {
+        return Ok(());
+    }
+    let mut pos = at + 12;
+    while let Some(id) = tag(b, pos) {
+        let Some(len) = le_u32(b, pos + 4).map(|n| n as usize) else { break };
+        let (body, pad) = (pos + 8, len & 1);
+        let used = match &id {
+            b"data" => break,
+            b"fmt " => fmt_used(b, body, len),
+            b"LIST" if len < 4 => break,
+            b"LIST" => {
+                let entries = if tag(b, body) == Some(*b"INFO") { info_entries(b, body + 4, len - 4)? } else { 0 };
+                // The list pads itself, then the chunk is padded again.
+                4 + entries.max(len - 4) + pad
+            }
+            _ => len,
+        };
+        pos = body.saturating_add(used).saturating_add(pad);
+    }
+    Ok(())
+}
+
+/// The bytes symphonia reads of a `fmt ` chunk: some formats' parsers go by their own extra size.
+fn fmt_used(b: &[u8], body: usize, len: usize) -> usize {
+    match le_u16(b, body) {
+        Some(2 | 6 | 7 | 0x11) => le_u16(b, body + 16).map_or(len, |extra| 18 + usize::from(extra)),
+        Some(0xfffe) => 40,
+        _ => len,
+    }
+}
+
+/// Check the INFO entries in the `len` bytes from `start`; returns the bytes symphonia reads of
+/// them, with the pad it reads after an odd entry.
+fn info_entries(b: &[u8], start: usize, len: usize) -> Result<usize> {
+    let mut used = 0;
+    while used + 8 <= len {
+        let Some(n) = le_u32(b, start + used + 4).map(|n| n as usize) else { break };
+        if n > b.len().saturating_sub(start + used + 8) {
+            return Err(AudioError::Malformed("a WAV INFO entry is larger than the file".into()));
+        }
+        used += 8 + n;
+        used += used & 1;
+    }
+    Ok(used)
+}
+
 /// True when the bytes start like a RIFF/RF64/BW64 WAVE file.
 pub(crate) fn is_wav(b: &[u8]) -> bool {
     matches!(tag(b, 0), Some(t) if &t == b"RIFF" || &t == b"RF64" || &t == b"BW64") && tag(b, 8).is_some_and(|t| &t == b"WAVE")
@@ -276,60 +327,8 @@ pub(crate) fn encode(
         BitDepth::Float32 => (32, true),
     };
     let bytes = usize::from(bits / 8);
-    let block = bytes.checked_mul(channels).ok_or_else(|| AudioError::TooLarge("block size overflow".into()))?;
-    let block_align = u16::try_from(block).map_err(|_| AudioError::Encode("too many channels for WAV".into()))?;
-    let data_len = block.checked_mul(frames).ok_or_else(|| AudioError::TooLarge("data size overflow".into()))?;
-    let extensible = channels > 2 || bits > 16 || mask.is_some_and(|m| m != channel_mask(channels));
-    let fmt_tag = if is_float { WAVE_FORMAT_IEEE_FLOAT } else { WAVE_FORMAT_PCM };
-
-    let mut fmt = Vec::with_capacity(40);
-    fmt.extend_from_slice(&(if extensible { WAVE_FORMAT_EXTENSIBLE } else { fmt_tag }).to_le_bytes());
-    fmt.extend_from_slice(&(channels as u16).to_le_bytes());
-    fmt.extend_from_slice(&buf.sample_rate.to_le_bytes());
-    fmt.extend_from_slice(&buf.sample_rate.saturating_mul(u32::from(block_align)).to_le_bytes());
-    fmt.extend_from_slice(&block_align.to_le_bytes());
-    fmt.extend_from_slice(&bits.to_le_bytes());
-    if extensible {
-        fmt.extend_from_slice(&22u16.to_le_bytes());
-        fmt.extend_from_slice(&bits.to_le_bytes());
-        fmt.extend_from_slice(&mask.unwrap_or_else(|| channel_mask(channels)).to_le_bytes());
-        fmt.extend_from_slice(&fmt_tag.to_le_bytes());
-        fmt.extend_from_slice(&GUID_TAIL);
-    }
-
-    let mut head = Vec::with_capacity(1024);
-    let rf64_body_len = 28usize;
-    // Reserve room for ds64 (as JUNK when not needed, so a later writer could upgrade in place).
-    let mut meta = Vec::new();
-    if let Some(bwf) = bwf {
-        push_chunk(&mut meta, b"bext", &bext_chunk(bwf));
-    }
-    push_chunk(&mut meta, b"fmt ", &fmt);
-    if is_float {
-        push_chunk(&mut meta, b"fact", &u32::try_from(frames).unwrap_or(u32::MAX).to_le_bytes());
-    }
-    let total = 4 + (8 + rf64_body_len) + meta.len() + 8 + data_len + (data_len & 1);
-    let rf64 = force_rf64 || u32::try_from(total).is_err();
-
-    if rf64 {
-        head.extend_from_slice(b"RF64");
-        head.extend_from_slice(&u32::MAX.to_le_bytes());
-        head.extend_from_slice(b"WAVE");
-        let mut ds64 = Vec::with_capacity(rf64_body_len);
-        ds64.extend_from_slice(&(total as u64).to_le_bytes());
-        ds64.extend_from_slice(&(data_len as u64).to_le_bytes());
-        ds64.extend_from_slice(&(frames as u64).to_le_bytes());
-        ds64.extend_from_slice(&0u32.to_le_bytes());
-        push_chunk(&mut head, b"ds64", &ds64);
-    } else {
-        head.extend_from_slice(b"RIFF");
-        head.extend_from_slice(&(total as u32).to_le_bytes());
-        head.extend_from_slice(b"WAVE");
-        push_chunk(&mut head, b"JUNK", &[0u8; 28]);
-    }
-    head.extend_from_slice(&meta);
-    head.extend_from_slice(b"data");
-    head.extend_from_slice(&(if rf64 { u32::MAX } else { data_len as u32 }).to_le_bytes());
+    let head = header(channels, buf.sample_rate, (bits, is_float), bwf, mask, frames as u64, force_rf64)?;
+    let data_len = (bytes * channels).checked_mul(frames).ok_or_else(|| AudioError::TooLarge("data size overflow".into()))?;
 
     let mut out = Vec::new();
     out.try_reserve_exact(head.len().saturating_add(data_len).saturating_add(1))
@@ -351,4 +350,71 @@ pub(crate) fn encode(
         out.push(0);
     }
     Ok(out)
+}
+
+/// Everything before the sample data of a WAV holding `frames` frames.
+pub(crate) fn header(
+    channels: usize,
+    sample_rate: u32,
+    (bits, is_float): (u16, bool),
+    bwf: Option<&BwfInfo>,
+    mask: Option<u32>,
+    frames: u64,
+    force_rf64: bool,
+) -> Result<Vec<u8>> {
+    let block = usize::from(bits / 8).checked_mul(channels).ok_or_else(|| AudioError::TooLarge("block size overflow".into()))?;
+    let block_align = u16::try_from(block).map_err(|_| AudioError::Encode("too many channels for WAV".into()))?;
+    let data_len = u64::from(block_align).checked_mul(frames).ok_or_else(|| AudioError::TooLarge("data size overflow".into()))?;
+    let extensible = channels > 2 || bits > 16 || mask.is_some_and(|m| m != channel_mask(channels));
+    let fmt_tag = if is_float { WAVE_FORMAT_IEEE_FLOAT } else { WAVE_FORMAT_PCM };
+
+    let mut fmt = Vec::with_capacity(40);
+    fmt.extend_from_slice(&(if extensible { WAVE_FORMAT_EXTENSIBLE } else { fmt_tag }).to_le_bytes());
+    fmt.extend_from_slice(&(channels as u16).to_le_bytes());
+    fmt.extend_from_slice(&sample_rate.to_le_bytes());
+    fmt.extend_from_slice(&sample_rate.saturating_mul(u32::from(block_align)).to_le_bytes());
+    fmt.extend_from_slice(&block_align.to_le_bytes());
+    fmt.extend_from_slice(&bits.to_le_bytes());
+    if extensible {
+        fmt.extend_from_slice(&22u16.to_le_bytes());
+        fmt.extend_from_slice(&bits.to_le_bytes());
+        fmt.extend_from_slice(&mask.unwrap_or_else(|| channel_mask(channels)).to_le_bytes());
+        fmt.extend_from_slice(&fmt_tag.to_le_bytes());
+        fmt.extend_from_slice(&GUID_TAIL);
+    }
+
+    let mut head = Vec::with_capacity(1024);
+    let rf64_body_len = 28usize;
+    // Reserve room for ds64 (as JUNK when not needed, so a later writer could upgrade in place).
+    let mut meta = Vec::new();
+    if let Some(bwf) = bwf {
+        push_chunk(&mut meta, b"bext", &bext_chunk(bwf));
+    }
+    push_chunk(&mut meta, b"fmt ", &fmt);
+    if is_float {
+        push_chunk(&mut meta, b"fact", &u32::try_from(frames).unwrap_or(u32::MAX).to_le_bytes());
+    }
+    let total = (4 + (8 + rf64_body_len) + meta.len() + 8) as u64 + data_len + (data_len & 1);
+    let rf64 = force_rf64 || u32::try_from(total).is_err();
+
+    if rf64 {
+        head.extend_from_slice(b"RF64");
+        head.extend_from_slice(&u32::MAX.to_le_bytes());
+        head.extend_from_slice(b"WAVE");
+        let mut ds64 = Vec::with_capacity(rf64_body_len);
+        ds64.extend_from_slice(&total.to_le_bytes());
+        ds64.extend_from_slice(&data_len.to_le_bytes());
+        ds64.extend_from_slice(&frames.to_le_bytes());
+        ds64.extend_from_slice(&0u32.to_le_bytes());
+        push_chunk(&mut head, b"ds64", &ds64);
+    } else {
+        head.extend_from_slice(b"RIFF");
+        head.extend_from_slice(&(total as u32).to_le_bytes());
+        head.extend_from_slice(b"WAVE");
+        push_chunk(&mut head, b"JUNK", &[0u8; 28]);
+    }
+    head.extend_from_slice(&meta);
+    head.extend_from_slice(b"data");
+    head.extend_from_slice(&(if rf64 { u32::MAX } else { data_len as u32 }).to_le_bytes());
+    Ok(head)
 }
