@@ -75,8 +75,26 @@ fn channel_levels(ui: &Ui, key: (&str, u64), peaks: &[f32], n: usize) -> Vec<f32
     lv
 }
 
+/// Pro Tools' names for sections in strips too narrow for the full ones.
+fn short_label(text: &str) -> &str {
+    match text {
+        "INSERTS A-E" => "I A-E",
+        "INSERTS F-J" => "I F-J",
+        "SENDS A-E" => "S A-E",
+        "SENDS F-J" => "S F-J",
+        "INSTRUMENT" => "INST",
+        _ => text,
+    }
+}
+
 fn section_label(ui: &Ui, r: Rect, text: &str) {
-    ui.painter().text(pos2(r.center().x, r.min.y + 7.0), Align2::CENTER_CENTER, text, bold(10.0), Tokens::current().section_label);
+    let p = ui.painter();
+    let color = Tokens::current().section_label;
+    let mut galley = p.layout_no_wrap(text.to_owned(), bold(10.0), color);
+    if galley.size().x > r.width() - 8.0 {
+        galley = p.layout_no_wrap(short_label(text).to_owned(), bold(10.0), color);
+    }
+    p.galley(Align2::CENTER_CENTER.anchor_size(pos2(r.center().x, r.min.y + 7.0), galley.size()).min, galley, color);
 }
 
 pub(crate) fn route_name(app: &SoundApp, r: &Route) -> String {
@@ -220,7 +238,8 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         let sec = Rect::from_min_size(pos2(x0, y), vec2(inner_w, 44.0));
         let mut c = track.comments.clone();
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(sec));
-        if child.add(egui::TextEdit::multiline(&mut c).desired_width(inner_w).desired_rows(2).hint_text("comments").font(regular(10.0))).changed() {
+        let hint = if narrow { "" } else { "comments" };
+        if child.add(egui::TextEdit::multiline(&mut c).desired_width(inner_w).desired_rows(2).hint_text(hint).font(regular(10.0))).changed() {
             let _ = app.engine.execute_merged("track.comments", &json!({"track": id.0, "comments": c}), &format!("comments:{}", id.0));
         }
         y = sec.max.y + 4.0;
@@ -268,7 +287,8 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         y = sec.max.y + 4.0;
     }
     // Group selector.
-    let gname = app.engine.session().groups.iter().find(|g| g.members.contains(&id)).map_or("no group".to_string(), |g| g.name.clone());
+    let no_group = if narrow { "nogrp" } else { "no group" };
+    let gname = app.engine.session().groups.iter().find(|g| g.members.contains(&id)).map_or(no_group.to_string(), |g| g.name.clone());
     let gr = Rect::from_min_size(pos2(x0 + 2.0, y), vec2(inner_w - 4.0, 16.0));
     let mut c = ui.new_child(egui::UiBuilder::new().max_rect(gr));
     let _ = selector_box(&mut c, gr.width(), gr.height(), &gname, t.text_dim);
