@@ -67,6 +67,10 @@ impl eframe::App for App {
             self.0.ui.window_size = (r.size() * ctx.zoom_factor()).round().into();
         }
         self.0.ui.ui_scale = self.0.extra.ui_scale;
+        // Saved now rather than at exit: the recent list matters most after a crash.
+        if self.0.take_recent_changed() {
+            save_prefs(&self.0.ui);
+        }
         // With the system menu bar there is no egui bar showing the window and dirty state, so the
         // title carries them; elsewhere the egui menu bar already does.
         let title = if self.0.native_menu_bar {
