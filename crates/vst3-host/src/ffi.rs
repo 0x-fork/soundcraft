@@ -576,8 +576,10 @@ impl Bundle {
                 // SAFETY: valid controller; the handler (host context) outlives it.
                 unsafe { c.setComponentHandler(h.as_ptr()) };
             }
-            inst.editor = Arc::new(EditorLink { inner: Mutex::new(EditorInner { controller: Some(c.clone()), ..EditorInner::default() }) });
         }
+        inst.editor = Arc::new(EditorLink {
+            inner: Mutex::new(EditorInner { component: Some(inst.component.clone()), controller: inst.controller.clone(), ..EditorInner::default() }),
+        });
         Ok(inst)
     }
 }
@@ -1154,6 +1156,11 @@ impl Instance {
         self.editor.has_controller().then(|| Arc::clone(&self.editor))
     }
 
+    /// The same link, for state handles.
+    pub fn state_link(&self) -> Arc<EditorLink> {
+        Arc::clone(&self.editor)
+    }
+
     /// Writes one state into a fresh memory stream.
     fn read_state(f: impl FnOnce(*mut sb::IBStream) -> sb::tresult) -> Option<Vec<u8>> {
         let stream = MemoryStream::new(Vec::new());
@@ -1161,26 +1168,7 @@ impl Instance {
         ok(f(s.as_ptr())).then(|| stream.take())
     }
 
-    /// The component state plus the controller state, in SoundCraft's container (see
-    /// `STATE_MAGIC`). `None` when the component refuses `getState`.
-    pub fn save_state(&self) -> Option<Vec<u8>> {
-        // SAFETY: valid component; the stream lives in `read_state` for the whole call.
-        let comp = Instance::read_state(|s| unsafe { self.component.getState(s) })?;
-        let ctrl = match &self.controller {
-            // SAFETY: valid controller; as above.
-            Some(c) => Instance::read_state(|s| unsafe { c.getState(s) }).unwrap_or_default(),
-            None => Vec::new(),
-        };
-        let mut out = Vec::with_capacity(12 + comp.len() + ctrl.len());
-        out.extend_from_slice(STATE_MAGIC);
-        out.extend_from_slice(&u32::try_from(comp.len()).ok()?.to_le_bytes());
-        out.extend_from_slice(&comp);
-        out.extend_from_slice(&u32::try_from(ctrl.len()).ok()?.to_le_bytes());
-        out.extend_from_slice(&ctrl);
-        Some(out)
-    }
-
-    /// Restores a [`Instance::save_state`] blob (or a bare component state): component
+    /// Restores a [`EditorLink::save_state`] blob (or a bare component state): component
     /// `setState`, then the controller's `setComponentState` and `setState`. `false` when the
     /// blob is malformed or the component refuses it.
     pub fn load_state(&self, data: &[u8]) -> bool {
@@ -1282,15 +1270,6 @@ impl Instance {
                 ok(unsafe { m.getMidiControllerAssignment(0, 0, n, &mut id) }).then_some(id)
             })
             .collect()
-    }
-
-    /// Tells the controller about a value the host set (`setParamNormalized`).
-    pub fn set_normalized(&self, id: u32, n: f64) {
-        let Some(c) = &self.controller else { return };
-        if n.is_finite() {
-            // SAFETY: valid controller.
-            unsafe { c.setParamNormalized(id, n.clamp(0.0, 1.0)) };
-        }
     }
 
     pub fn value_text(&self, id: u32, normalized: f64) -> Option<String> {
@@ -1611,17 +1590,20 @@ fn rect_size(r: &sb::ViewRect) -> (f64, f64) {
 #[derive(Default)]
 struct EditorInner {
     /// `None` once the instance is gone.
+    component: Option<ComPtr<sv::IComponent>>,
+    /// `None` once the instance is gone, or without an edit controller.
     controller: Option<ComPtr<sv::IEditController>>,
     view: Option<ComPtr<sb::IPlugView>>,
     frame: Option<ComWrapper<PlugFrame>>,
     window: Option<window::HostWindow>,
 }
 
-/// The link between an instance and its editor handles. The instance may process on the audio
-/// thread while the editor (the edit controller's `IPlugView`) is driven from the main thread,
-/// which is VST3's own threading model (controller and views on the UI thread). All view calls
-/// happen under this lock, and the instance closes the view and drops the controller reference
-/// under the same lock before it terminates, so a handle never calls into a dead plugin.
+/// The link between an instance and its editor and state handles. The instance may process on
+/// the audio thread while the editor (the edit controller's `IPlugView`) is driven and the state
+/// read from the main thread, which is VST3's own threading model (controller, views and
+/// `getState` on the UI thread). All such calls happen under this lock, and the instance closes
+/// the view and drops the component and controller references under the same lock before it
+/// terminates, so a handle never calls into a dead plugin.
 #[derive(Default)]
 pub(crate) struct EditorLink {
     inner: Mutex<EditorInner>,
@@ -1723,6 +1705,41 @@ impl EditorLink {
         }
     }
 
+    /// Hands a host-set value to the controller before a state save (`setParamNormalized`,
+    /// under the lock like [`EditorLink::save_state`]). No-op once the instance is gone.
+    pub fn sync_param(&self, id: u32, n: f64) {
+        if !n.is_finite() {
+            return;
+        }
+        let g = self.lock();
+        if let Some(c) = &g.controller {
+            // SAFETY: valid controller (the instance clears it under this lock before it terminates).
+            unsafe { c.setParamNormalized(id, n.clamp(0.0, 1.0)) };
+        }
+    }
+
+    /// The component state plus the controller state, in SoundCraft's container (see
+    /// `STATE_MAGIC`). `None` when the component refuses `getState` or the instance is gone.
+    pub fn save_state(&self) -> Option<Vec<u8>> {
+        let g = self.lock();
+        let component = g.component.as_ref()?;
+        // SAFETY: valid component (the instance clears it under this lock before it terminates);
+        // the stream lives in `read_state` for the whole call.
+        let comp = Instance::read_state(|s| unsafe { component.getState(s) })?;
+        let ctrl = match &g.controller {
+            // SAFETY: valid controller; as above.
+            Some(c) => Instance::read_state(|s| unsafe { c.getState(s) }).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let mut out = Vec::with_capacity(12 + comp.len() + ctrl.len());
+        out.extend_from_slice(STATE_MAGIC);
+        out.extend_from_slice(&u32::try_from(comp.len()).ok()?.to_le_bytes());
+        out.extend_from_slice(&comp);
+        out.extend_from_slice(&u32::try_from(ctrl.len()).ok()?.to_le_bytes());
+        out.extend_from_slice(&ctrl);
+        Some(out)
+    }
+
     /// Closes the editor. Main thread only (no-op elsewhere).
     pub fn close(&self) {
         if window::on_main_thread() {
@@ -1805,6 +1822,7 @@ impl EditorLink {
                 }
             }
         }
+        g.component = None;
         g.controller = None;
         leaked
     }

@@ -170,13 +170,12 @@ impl Plugin for AuPlugin {
                         if ch == 1 && au_ch >= 2 {
                             if let (Some(l), Some(r)) = (self.inst.output(0, n), self.inst.output(1, n)) {
                                 for ((d, a), b) in dst.iter_mut().zip(l).zip(r) {
-                                    let v = 0.5 * (a + b);
-                                    *d = if v.is_finite() { v } else { 0.0 };
+                                    *d = 0.5 * (a + b);
                                 }
                             }
                         } else if let Some(src) = self.inst.output(c.min(au_ch.saturating_sub(1)), n) {
                             for (d, &s) in dst.iter_mut().zip(src) {
-                                *d = if s.is_finite() { s } else { 0.0 };
+                                *d = s;
                             }
                         }
                     }
@@ -248,15 +247,16 @@ impl Plugin for AuPlugin {
         self.push_event(MidiEvent { time: 0, status: 0xB0, data1: 123, data2: 0 });
     }
 
-    fn save_state(&mut self) -> Option<Vec<u8>> {
-        self.inst.save_state()
-    }
-
     fn load_state(&mut self, data: &[u8]) -> bool {
         let ok = self.inst.load_state(data);
         if ok {
             self.refresh_values();
         }
         ok
+    }
+
+    fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
+        let link = self.inst.state_link();
+        Some(Box::new(move || link.save_state()))
     }
 }

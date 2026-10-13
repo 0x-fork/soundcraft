@@ -522,6 +522,7 @@ pub struct Instance {
     max_frames: usize,
     sample_rate: f64,
     sample_time: f64,
+    link: std::sync::Arc<StateLink>,
 }
 
 // SAFETY: an Audio Unit instance may be used from any thread as long as calls are not
@@ -561,6 +562,7 @@ impl Instance {
             outputs: Vec::new(),
             abl: AudioBufferList { number_buffers: 0, buffers: [empty; MAX_AU_CHANNELS] },
             has_input,
+            link: std::sync::Arc::new(StateLink(std::sync::Mutex::new(LinkedUnit(Some(unit))))),
             initialized: false,
             channels: 0,
             max_frames: 0,
@@ -855,35 +857,12 @@ impl Instance {
         out
     }
 
-    /// The unit's `ClassInfo` as a binary property list.
-    pub fn save_state(&self) -> Option<Vec<u8>> {
-        let mut plist: CFTypeRef = ptr::null();
-        let mut size = std::mem::size_of::<CFTypeRef>() as u32;
-        // SAFETY: the property is a `CFPropertyListRef` returned +1; `plist` is a local pointer.
-        let st = unsafe { AudioUnitGetProperty(self.unit, PROP_CLASS_INFO, SCOPE_GLOBAL, 0, (&mut plist as *mut CFTypeRef).cast(), &mut size) };
-        if st != 0 || plist.is_null() {
-            release(plist);
-            return None;
-        }
-        let mut err: CFTypeRef = ptr::null();
-        // SAFETY: `plist` is a live property list; `err` is a local out pointer.
-        let data = unsafe { CFPropertyListCreateData(ptr::null(), plist, CF_PROPERTY_LIST_BINARY_FORMAT, 0, &mut err) };
-        release(err);
-        release(plist);
-        if data.is_null() {
-            return None;
-        }
-        // SAFETY: `data` is a live CFData we own; its byte pointer is valid for its length.
-        let out = unsafe {
-            let len = CFDataGetLength(data);
-            let p = CFDataGetBytePtr(data);
-            if len <= 0 || len as usize > MAX_STATE || p.is_null() { None } else { Some(std::slice::from_raw_parts(p, len as usize).to_vec()) }
-        };
-        release(data);
-        out
+    /// The link for state handles.
+    pub fn state_link(&self) -> std::sync::Arc<StateLink> {
+        std::sync::Arc::clone(&self.link)
     }
 
-    /// Restores a blob from [`Instance::save_state`] (hostile input: parsed by CoreFoundation,
+    /// Restores a blob from [`StateLink::save_state`] (hostile input: parsed by CoreFoundation,
     /// must be a dictionary, and the unit validates it).
     pub fn load_state(&self, bytes: &[u8]) -> bool {
         if bytes.is_empty() || bytes.len() > MAX_STATE {
@@ -910,8 +889,61 @@ impl Instance {
     }
 }
 
+struct LinkedUnit(Option<AudioUnit>);
+
+// SAFETY: the pointer is only used under the link's mutex, while the instance keeps the unit alive.
+unsafe impl Send for LinkedUnit {}
+
+/// The link between an instance and its state handles: the unit's state is read on the main
+/// thread while the instance renders on the audio thread (hosts make property calls from other
+/// threads during rendering). The instance clears the link under its lock before it disposes of
+/// the unit, so a handle never reads a dead unit.
+pub(crate) struct StateLink(std::sync::Mutex<LinkedUnit>);
+
+impl StateLink {
+    fn lock(&self) -> std::sync::MutexGuard<'_, LinkedUnit> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The unit's `ClassInfo` as a binary property list (`None` once the instance is gone).
+    pub fn save_state(&self) -> Option<Vec<u8>> {
+        let g = self.lock();
+        let unit = g.0?;
+        let mut plist: CFTypeRef = ptr::null();
+        let mut size = std::mem::size_of::<CFTypeRef>() as u32;
+        // SAFETY: the unit is live while the link holds it (see the type); the property is a
+        // `CFPropertyListRef` returned +1; `plist` is a local pointer.
+        let st = unsafe { AudioUnitGetProperty(unit, PROP_CLASS_INFO, SCOPE_GLOBAL, 0, (&mut plist as *mut CFTypeRef).cast(), &mut size) };
+        if st != 0 || plist.is_null() {
+            release(plist);
+            return None;
+        }
+        let mut err: CFTypeRef = ptr::null();
+        // SAFETY: `plist` is a live property list; `err` is a local out pointer.
+        let data = unsafe { CFPropertyListCreateData(ptr::null(), plist, CF_PROPERTY_LIST_BINARY_FORMAT, 0, &mut err) };
+        release(err);
+        release(plist);
+        if data.is_null() {
+            return None;
+        }
+        // SAFETY: `data` is a live CFData we own; its byte pointer is valid for its length.
+        let out = unsafe {
+            let len = CFDataGetLength(data);
+            let p = CFDataGetBytePtr(data);
+            if len <= 0 || len as usize > MAX_STATE || p.is_null() { None } else { Some(std::slice::from_raw_parts(p, len as usize).to_vec()) }
+        };
+        release(data);
+        out
+    }
+
+    fn kill(&self) {
+        self.lock().0 = None;
+    }
+}
+
 impl Drop for Instance {
     fn drop(&mut self) {
+        self.link.kill();
         // SAFETY: the unit is live (disposed only here); after disposal nothing can call the
         // input callback or the host callbacks, so the leaked input state and host time can be
         // freed.

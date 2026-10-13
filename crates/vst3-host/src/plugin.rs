@@ -3,13 +3,15 @@
 use crate::ffi::{AFTERTOUCH, BusBuffers, EVENT_CAP, EditorLink, HostContext, Instance, NoteEvent, PARAM_QUEUE_CAP, PITCH_BEND};
 use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, Transport, Unit};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use vst3::ComWrapper;
 
 /// Largest block we set a plugin up for.
 const MAX_BLOCK: usize = 1 << 16;
 /// Most channels a host strip may ask for.
 const MAX_CHANNELS: usize = 64;
+/// An `unsynced` slot with no value waiting (a NaN pattern, which `set_param` never stores).
+const SYNCED: u64 = u64::MAX;
 
 /// How a SoundCraft parameter value maps to the VST3 normalized value.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -33,10 +35,10 @@ pub struct Vst3Plugin {
     values: Vec<f32>,
     /// Normalized values waiting for the next block (coalesced per id; bounded).
     pending: Vec<(u32, f64)>,
-    /// Host-set values the controller has not seen yet (same order as `ids`). `set_param` may
-    /// run on the audio thread, so it never calls the controller; `save_state`, which already
-    /// does, hands them over first.
-    unsynced: Vec<bool>,
+    /// Host-set normalized values the controller has not seen yet (same order as `ids`; the bits
+    /// of an `f64`, or [`SYNCED`]). `set_param` may run on the audio thread, so it never calls the
+    /// controller; the state reader, which already does, hands them over first.
+    unsynced: Arc<[AtomicU64]>,
     /// Pending notes, kept sorted by time. Never grows past `EVENT_CAP`.
     notes: Vec<NoteEvent>,
     /// The parameter each MIDI controller drives (see `Instance::midi_mapping`).
@@ -85,7 +87,7 @@ impl Vst3Plugin {
             info,
             values: Vec::with_capacity(ids.len()),
             pending: Vec::with_capacity(ids.len().min(PARAM_QUEUE_CAP)),
-            unsynced: vec![false; ids.len()],
+            unsynced: ids.iter().map(|_| AtomicU64::new(SYNCED)).collect(),
             notes: Vec::with_capacity(EVENT_CAP),
             midi_map: Vec::new(),
             controls: Vec::with_capacity(EVENT_CAP),
@@ -158,7 +160,9 @@ impl Vst3Plugin {
             }
         }
         self.pending.clear();
-        self.unsynced.fill(false);
+        for u in self.unsynced.iter() {
+            u.store(SYNCED, Ordering::Relaxed);
+        }
     }
 
     /// Inserts keeping the queue time-sorted; drops the event when the queue is full (never
@@ -221,10 +225,10 @@ impl Plugin for Vst3Plugin {
         if let Some(slot) = self.values.get_mut(i) {
             *slot = v;
         }
-        if let Some(u) = self.unsynced.get_mut(i) {
-            *u = true;
-        }
         let Some(n) = self.normalized_from_plain(i, v) else { return true };
+        if let Some(u) = self.unsynced.get(i) {
+            u.store(n.to_bits(), Ordering::Relaxed);
+        }
         if let Some(e) = self.pending.iter_mut().find(|(pid, _)| *pid == vid) {
             e.1 = n;
         } else if self.pending.len() < self.pending.capacity() {
@@ -375,21 +379,6 @@ impl Plugin for Vst3Plugin {
         }
     }
 
-    fn save_state(&mut self) -> Option<Vec<u8>> {
-        // A parameter only the controller stores (no processor state) would otherwise be saved
-        // with the controller's stale value.
-        for i in 0..self.ids.len() {
-            if !self.unsynced.get(i).copied().unwrap_or(false) {
-                continue;
-            }
-            if let (Some(&id), Some(n)) = (self.ids.get(i), self.values.get(i).and_then(|&v| self.normalized_from_plain(i, v))) {
-                self.inst.set_normalized(id, n);
-            }
-        }
-        self.unsynced.fill(false);
-        self.inst.save_state()
-    }
-
     fn load_state(&mut self, data: &[u8]) -> bool {
         let ok = self.inst.load_state(data);
         if ok {
@@ -411,6 +400,21 @@ impl Plugin for Vst3Plugin {
     fn editor(&mut self) -> Option<Box<dyn PluginEditor>> {
         let link = self.inst.editor()?;
         Some(Box::new(Vst3Editor { link, host: self.inst.host_ref(), info: self.info, ids: self.ids.clone(), maps: self.maps.clone() }))
+    }
+
+    fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
+        let (link, ids, unsynced) = (self.inst.state_link(), self.ids.clone(), Arc::clone(&self.unsynced));
+        Some(Box::new(move || {
+            // A parameter only the controller stores (no processor state) would otherwise be
+            // saved with the controller's stale value.
+            for (&id, u) in ids.iter().zip(unsynced.iter()) {
+                let bits = u.swap(SYNCED, Ordering::Relaxed);
+                if bits != SYNCED {
+                    link.sync_param(id, f64::from_bits(bits));
+                }
+            }
+            link.save_state()
+        }))
     }
 }
 

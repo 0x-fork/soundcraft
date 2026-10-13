@@ -273,10 +273,6 @@ impl Plugin for ClapPlugin {
         }
     }
 
-    fn save_state(&mut self) -> Option<Vec<u8>> {
-        self.inst.save_state()
-    }
-
     fn load_state(&mut self, data: &[u8]) -> bool {
         let ok = self.inst.load_state(data);
         if ok {
@@ -299,6 +295,11 @@ impl Plugin for ClapPlugin {
     fn editor(&mut self) -> Option<Box<dyn PluginEditor>> {
         let link = self.inst.gui()?;
         Some(Box::new(ClapEditor { link, info: self.info, ids: self.ids.clone() }))
+    }
+
+    fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
+        let link = self.inst.state_link()?;
+        Some(Box::new(move || link.save_state()))
     }
 }
 
