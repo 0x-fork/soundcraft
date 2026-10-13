@@ -13,9 +13,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
-/// Longest accepted request line (bytes, without the newline). Generous, so requests that carry
-/// large payloads (base64 data) still fit.
-const MAX_LINE: usize = 256 * 1024 * 1024;
+/// Longest accepted request line (bytes, without the newline). The largest payload a request
+/// carries is a plugin state for `mix.insert_state`: base64 of at most `b64::MAX_DECODED_BYTES`
+/// (64 MiB, so about 85 MiB of text). Room for that and 1 MiB of JSON around it; replies
+/// (screenshots) aren't bounded by this.
+const MAX_LINE: usize = soundcraft_engine::model::b64::MAX_DECODED_BYTES.div_ceil(3) * 4 + (1 << 20);
+// With MAX_CONNECTIONS, at most 1.5 GiB of request lines are buffered at once.
+const _: () = assert!(MAX_LINE <= 96 << 20);
 /// Connections served at once; further ones get an error line and are closed.
 const MAX_CONNECTIONS: usize = 16;
 
@@ -158,6 +162,13 @@ mod tests {
         assert!(read_bounded_line(&mut input, &mut buf, 10).is_err());
         assert!(buf.len() <= 11, "at most limit + 1 bytes are buffered, got {}", buf.len());
         assert_eq!(input.len(), 100 - 11, "the rest of the line is left unread");
+    }
+
+    #[test]
+    fn the_largest_plugin_state_fits_in_a_line() {
+        let state = soundcraft_engine::model::b64::MAX_DECODED_BYTES.div_ceil(3) * 4;
+        let request = json!({"id": 1, "method": "engine.execute", "params": {"command": "mix.insert_state", "params": {"track": "Audio 1", "slot": 0, "state": ""}}});
+        assert!(state + request.to_string().len() <= MAX_LINE);
     }
 
     /// The control server on a loopback port, with a stand-in UI that echoes each method.
