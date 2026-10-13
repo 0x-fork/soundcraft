@@ -97,6 +97,9 @@ pub struct UiState {
     pub show_workspace: bool,
     pub show_configurations: bool,
     pub show_playback_engine: bool,
+    /// The Mix window lives in its own native window (Window › Mix in Separate Window); the main
+    /// window then always shows Edit.
+    pub mix_separate: bool,
     pub show_io_setup: bool,
     pub show_shortcuts: bool,
     pub show_clip_effects: bool,
@@ -159,6 +162,7 @@ impl Default for UiState {
             show_workspace: false,
             show_configurations: false,
             show_playback_engine: false,
+            mix_separate: false,
             show_io_setup: false,
             show_shortcuts: false,
             show_clip_effects: false,
@@ -285,6 +289,8 @@ pub struct SoundApp {
     pub ops: ops_windows::OpsState,
     pub extra: extra_windows::ExtraState,
     pub palette: palette::PaletteState,
+    /// Bring the separate Mix window to the front on the next frame.
+    pub(crate) focus_mix: bool,
     pub synthetic: Vec<egui::Event>,
     /// Where a dropped audio file loads into a track's sampler (last frame's rects).
     pub sample_drop_targets: Vec<(egui::Rect, TrackId)>,
@@ -368,6 +374,7 @@ impl SoundApp {
             ops: ops_windows::OpsState::default(),
             extra: extra_windows::ExtraState::default(),
             palette: palette::PaletteState::default(),
+            focus_mix: false,
             synthetic: Vec::new(),
             sample_drop_targets: Vec::new(),
             sample_reads: Vec::new(),
@@ -1181,9 +1188,13 @@ impl SoundApp {
         if !self.native_menu_bar {
             menus::menu_bar(self, ui);
         }
-        match self.ui.window {
+        // With the Mix window in its own native window, the main window keeps Edit.
+        match if self.ui.mix_separate { MainWindow::Edit } else { self.ui.window } {
             MainWindow::Edit => edit_window::show(self, ui),
             MainWindow::Mix => mix_window::show(self, ui),
+        }
+        if self.ui.mix_separate {
+            mix_window::show_separate(self, &ctx);
         }
         panels::floating(self, &ctx);
         windows::show(self, &ctx);

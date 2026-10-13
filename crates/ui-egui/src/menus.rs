@@ -12,6 +12,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.mix", "Mix", "Window > Mix", Some("Cmd+=")),
     ("window.edit", "Edit", "Window > Edit", Some("Cmd+=")),
     ("window.toggle_mix_edit", "Toggle Mix/Edit", "", Some("Cmd+=")),
+    ("window.mix_separate", "Mix in Separate Window", "", None),
     ("window.transport", "Transport", "Window > Transport", Some("Cmd+1")),
     ("window.big_counter", "Big Counter", "Window > Big Counter", Some("Cmd+3")),
     ("window.memory_locations", "Memory Locations", "Window > Memory Locations", Some("Cmd+5")),
@@ -246,13 +247,25 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                             ui.separator();
                             ui.label(egui::RichText::new("Processes selected clips offline").small().color(t.text_dim));
                         }
+                        if root.label == "Window" {
+                            ui.separator();
+                            let mut separate = app.ui.mix_separate;
+                            if ui
+                                .checkbox(&mut separate, "Mix in Separate Window")
+                                .on_hover_text("Show Edit and Mix at once, e.g. one per monitor")
+                                .changed()
+                            {
+                                let _ = run_ui_command(app, "window.mix_separate", &json!({"value": separate}));
+                                ui.close();
+                            }
+                        }
                     });
                 }
                 let title = format!(
                     "{}{}  —  {}",
                     app.engine.session().name,
                     if app.engine.is_dirty() { " *" } else { "" },
-                    if app.ui.window == MainWindow::Edit { "Edit" } else { "Mix" }
+                    if app.ui.window == MainWindow::Edit || app.ui.mix_separate { "Edit" } else { "Mix" }
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new(title).color(t.text_dim));
@@ -476,14 +489,25 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
     let r = match id {
         "window.mix" => {
             app.ui.window = MainWindow::Mix;
+            app.focus_mix = app.ui.mix_separate;
             json!({"window": "mix"})
+        }
+        "window.mix_separate" => {
+            let v = toggle(&mut app.ui.mix_separate);
+            app.focus_mix = app.ui.mix_separate;
+            v
         }
         "window.edit" => {
             app.ui.window = MainWindow::Edit;
             json!({"window": "edit"})
         }
         "window.toggle_mix_edit" => {
-            app.ui.window = if app.ui.window == MainWindow::Edit { MainWindow::Mix } else { MainWindow::Edit };
+            if app.ui.mix_separate {
+                // Both are on screen: bring the Mix window forward instead.
+                app.focus_mix = true;
+            } else {
+                app.ui.window = if app.ui.window == MainWindow::Edit { MainWindow::Mix } else { MainWindow::Edit };
+            }
             json!({"window": app.ui.window})
         }
         "window.transport" => toggle(&mut app.ui.show_transport),
