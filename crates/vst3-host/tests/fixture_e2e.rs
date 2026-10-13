@@ -121,6 +121,16 @@ fn synth_plays_notes_at_their_offsets() {
     p.all_notes_off();
     p.process(&mut io, 64);
     assert!(io[0].iter().all(|x| x.abs() < 1e-6));
+    // MIDI CC 7 reaches the parameter the plugin maps it to, and poly pressure arrives as an event,
+    // each at its offset; an unmapped controller is dropped.
+    p.midi(10, [0xA0, 60, 32]);
+    p.midi(20, [0xB0, 7, 64]);
+    p.midi(30, [0xB0, 1, 127]);
+    p.process(&mut io, 64);
+    assert!(io[0][9].abs() < 1e-6 && (io[0][10] - 32.0 / 127.0).abs() < 1e-6);
+    assert!((io[0][20] - 64.0 / 127.0).abs() < 1e-6 && (io[0][63] - 64.0 / 127.0).abs() < 1e-6);
+    p.midi(0, [0xB0, 7, 0]);
+    p.process(&mut io, 64);
     // Notes in a later sub-block of a chunked call land at the right frame.
     p.prepare(48_000.0, 32, 2);
     let mut io = vec![vec![0.0f32; 96], vec![0.0f32; 96]];
@@ -206,6 +216,31 @@ fn state_saves_component_and_controller_and_restores_them() {
         assert!(!q.load_state(bad), "{bad:?}");
     }
     assert_eq!(q.param("7"), Some(1.0));
+}
+
+#[test]
+fn host_set_controller_param_survives_state_round_trip() {
+    // Freq lives only in the controller (the processor ignores it), so processing never carries
+    // the host's value there: the state save has to.
+    let id = id_of("Fixture Gain");
+    let mut p = soundcraft_vst3_host::create(&id).unwrap();
+    p.prepare(48_000.0, 64, 2);
+    assert!(p.set_param("7", 1.5));
+    assert!(p.set_param("12", 200.0));
+    let mut p = std::thread::spawn(move || {
+        let mut io = vec![vec![0.5f32; 64]; 2];
+        p.process(&mut io, 64);
+        assert!(io.iter().flatten().all(|&x| (x - 0.75).abs() < 1e-4));
+        p
+    })
+    .join()
+    .unwrap();
+    assert!((p.param("12").unwrap() - 200.0).abs() < 0.01);
+    let blob = p.save_state().expect("state");
+    let mut q = soundcraft_vst3_host::create(&id).unwrap();
+    assert!(q.load_state(&blob));
+    assert!((q.param("7").unwrap() - 1.5).abs() < 1e-4, "{:?}", q.param("7"));
+    assert!((q.param("12").unwrap() - 200.0).abs() < 0.01, "{:?}", q.param("12"));
 }
 
 #[test]
