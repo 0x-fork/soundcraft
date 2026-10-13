@@ -15,11 +15,10 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(noundo "edit.copy", "Copy", ["Edit"], Some("Cmd+C"), "{tracks?, start?, end?}", has_range, |e, p| cut_copy(e, p, false, "edit.copy")),
         cmd!("edit.paste", "Paste", ["Edit"], Some("Cmd+V"), "{tracks?, at?}", has_clipboard, paste),
         cmd!("edit.clear", "Clear", ["Edit"], Some("Cmd+B"), "{tracks?, start?, end?}", has_range, clear),
-        cmd!("edit.cut_clip_gain", "Clip Gain", ["Edit", "Cut Special"], Some("Cmd+Ctrl+X"), "{}", has_range, |e, p| reset_clip_gain(
-            e,
-            p,
-            "edit.cut_clip_gain"
-        )),
+        cmd!("edit.cut_clip_gain", "Clip Gain", ["Edit", "Cut Special"], Some("Cmd+Ctrl+X"), "{}", has_range, |e, p| {
+            super::edit_more::copy_clip_gain(e, p)?;
+            reset_clip_gain(e, p, "edit.cut_clip_gain")
+        }),
         cmd!("edit.clear_clip_gain", "Clip Gain", ["Edit", "Clear Special"], Some("Cmd+Ctrl+B"), "{}", has_range, |e, p| reset_clip_gain(
             e,
             p,
@@ -611,13 +610,13 @@ fn trim_to_file(e: &mut Engine, p: &Value) -> Result<Value> {
     let s = e.session_mut();
     let mut n = 0;
     for id in ids {
-        let frames =
-            s.find_clip(id).and_then(|(_, c)| c.source()).and_then(|src| s.source(src)).map(|src| i64::try_from(src.frames).unwrap_or(i64::MAX));
-        if let (Some(frames), Some(c)) = (frames, s.find_clip_mut(id)) {
+        if let Some((frames, lo, hi)) = trim_limits(s, id)
+            && let Some(c) = s.find_clip_mut(id)
+        {
             let off = c.source_offset();
             let new_start = c.start - off;
-            c.trim_start_to(new_start);
-            c.trim_end_to(new_start + frames);
+            c.trim_start_to(new_start.max(lo));
+            c.trim_end_to((new_start + frames).min(hi));
             n += 1;
         }
     }
@@ -630,16 +629,29 @@ fn trim_to_fill(e: &mut Engine, p: &Value) -> Result<Value> {
     let s = e.session_mut();
     let mut n = 0;
     for id in ids {
-        let frames =
-            s.find_clip(id).and_then(|(_, c)| c.source()).and_then(|src| s.source(src)).map(|src| i64::try_from(src.frames).unwrap_or(i64::MAX));
-        if let (Some(frames), Some(c)) = (frames, s.find_clip_mut(id)) {
+        if let Some((frames, lo, hi)) = trim_limits(s, id)
+            && let Some(c) = s.find_clip_mut(id)
+        {
             let file_start = c.start - c.source_offset();
-            c.trim_start_to(r.start.max(file_start));
-            c.trim_end_to(r.end.min(file_start + frames));
+            c.trim_start_to(r.start.max(file_start).max(lo));
+            c.trim_end_to(r.end.min(file_start + frames).min(hi));
             n += 1;
         }
     }
     Ok(json!({"trimmed": n}))
+}
+
+/// How far a trim may extend an audio clip: its source length in frames, and the earliest
+/// start and latest end before it would run over the clip before or after it on the playlist
+/// (an extension never overwrites, like the trim tool). An overlap the clip already has with
+/// a neighbour (a crossfade) is kept rather than trimmed away.
+fn trim_limits(s: &Session, id: ClipId) -> Option<(Samples, Samples, Samples)> {
+    let (track, c) = s.find_clip(id)?;
+    let frames = c.source().and_then(|src| s.source(src)).map(|src| i64::try_from(src.frames).unwrap_or(i64::MAX))?;
+    let others = || s.track(track).into_iter().flat_map(|t| t.clips()).filter(|x| x.id != id);
+    let lo = others().filter(|x| x.start < c.start).map(|x| x.end()).max().map_or(Samples::MIN, |end| end.min(c.start));
+    let hi = others().filter(|x| x.start > c.start).map(|x| x.start).min().map_or(Samples::MAX, |start| start.max(c.end()));
+    Some((frames, lo, hi))
 }
 
 fn mute_clips(e: &mut Engine, p: &Value) -> Result<Value> {
@@ -779,7 +791,7 @@ fn consolidate(e: &mut Engine, p: &Value) -> Result<Value> {
     }
     let mut n = 0;
     for t in tracks {
-        if crate::io::consolidate(e, t, r)? {
+        if crate::io::consolidate(e, "edit.consolidate", t, r)? {
             n += 1;
         }
     }
@@ -801,6 +813,60 @@ mod tests {
         assert_eq!(e.revision, rev);
         e.execute("edit.select", &json!({"tracks": [ids[0]], "start": 100, "end": 300})).unwrap();
         assert_ne!(e.revision, rev);
+    }
+
+    /// A 60,000-frame source with `clips` placed on one track as (start, length, source offset).
+    fn trim_session(clips: &[(Samples, Samples, Samples)]) -> (Engine, TrackId, Vec<ClipId>) {
+        use soundcraft_model::{ChannelFormat, Clip, TrackKind};
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        let buf = soundcraft_audio_io::AudioBuffer { sample_rate: s.sample_rate.hz(), channels: vec![vec![0.25; 60_000]] };
+        let src = crate::io::add_source(&mut s, "src", buf, None, soundcraft_audio_io::FileFormat::Wav);
+        let mut ids = Vec::new();
+        for &(start, len, off) in clips {
+            let id = s.new_clip_id();
+            ops::place_clip(&mut s, t, Clip::audio(id, "c", src, off, start, len));
+            ids.push(id);
+        }
+        (Engine::new(s), t, ids)
+    }
+
+    fn bounds(e: &Engine, t: TrackId) -> Vec<(Samples, Samples, Samples)> {
+        e.session().track(t).unwrap().clips().iter().map(|c| (c.start, c.end(), c.source_offset())).collect()
+    }
+
+    #[test]
+    fn trim_to_file_boundaries_stops_at_the_neighbours() {
+        let (mut e, t, ids) = trim_session(&[(0, 10_000, 0), (20_000, 10_000, 20_000), (40_000, 5_000, 0)]);
+        e.execute("edit.trim_to_file_boundaries", &json!({"clips": [ids[1].0]})).unwrap();
+        assert_eq!(bounds(&e, t), vec![(0, 10_000, 0), (10_000, 40_000, 10_000), (40_000, 45_000, 0)]);
+    }
+
+    #[test]
+    fn trim_to_fill_selection_stops_at_the_neighbours() {
+        let (mut e, t, ids) = trim_session(&[(0, 10_000, 0), (20_000, 10_000, 20_000), (40_000, 5_000, 0)]);
+        e.execute("edit.trim_to_fill_selection", &json!({"clips": [ids[1].0], "start": 5_000, "end": 45_000})).unwrap();
+        assert_eq!(bounds(&e, t), vec![(0, 10_000, 0), (10_000, 40_000, 10_000), (40_000, 45_000, 0)]);
+    }
+
+    #[test]
+    fn trims_without_neighbours_expand_fully() {
+        let (mut e, t, ids) = trim_session(&[(20_000, 10_000, 20_000)]);
+        e.execute("edit.trim_to_file_boundaries", &json!({"clips": [ids[0].0]})).unwrap();
+        assert_eq!(bounds(&e, t), vec![(0, 60_000, 0)]);
+        let (mut e, t, ids) = trim_session(&[(20_000, 10_000, 20_000)]);
+        e.execute("edit.trim_to_fill_selection", &json!({"clips": [ids[0].0], "start": 5_000, "end": 45_000})).unwrap();
+        assert_eq!(bounds(&e, t), vec![(5_000, 45_000, 5_000)]);
+    }
+
+    #[test]
+    fn trim_to_file_boundaries_keeps_an_existing_crossfade() {
+        let (mut e, t, ids) = trim_session(&[(0, 10_000, 0), (10_000, 10_000, 10_000)]);
+        e.execute("edit.fades_create", &json!({"tracks": [t], "start": 9_500, "end": 10_500})).unwrap();
+        let faded = bounds(&e, t);
+        assert_eq!((faded[0].1, faded[1].0), (10_500, 9_500), "the fixture needs an overlapping crossfade");
+        e.execute("edit.trim_to_file_boundaries", &json!({"clips": [ids[1].0]})).unwrap();
+        assert_eq!(bounds(&e, t), vec![faded[0], (9_500, 60_000, 9_500)]);
     }
 
     #[test]

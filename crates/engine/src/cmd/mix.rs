@@ -100,7 +100,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Set Plugin Parameters",
             [],
             None,
-            "{track?, slot, params: {id: value}, preset?: name}",
+            "{track?, slot, params: {id: value}, preset?: name} (unknown ids and non-numeric values are errors)",
             has_selection,
             insert_params
         ),
@@ -360,7 +360,8 @@ fn insert_param(e: &mut Engine, p: &Value) -> Result<Value> {
     Ok(json!({"value": v}))
 }
 
-/// Apply many parameters at once (preset recall); unknown ids are ignored, values clamped.
+/// Apply many parameters at once (preset recall); values are clamped. Unknown ids and
+/// non-numeric values are errors, not silent no-ops: a typo must not look like success.
 fn insert_params(e: &mut Engine, p: &Value) -> Result<Value> {
     let (t, slot) = track_slot(e, p, "mix.insert_params", INSERT_SLOTS)?;
     let obj = p.get("params").and_then(Value::as_object).cloned().ok_or_else(|| bad("mix.insert_params", "`params` must be an object"))?;
@@ -372,11 +373,29 @@ fn insert_params(e: &mut Engine, p: &Value) -> Result<Value> {
         .and_then(Option::as_mut)
         .ok_or_else(|| bad("mix.insert_params", "empty slot"))?;
     let info = super::clap::plugin_info(&ins.plugin).ok_or_else(|| bad("mix.insert_params", "unknown plugin"))?;
+    let mut unknown: Vec<&str> = Vec::new();
+    let mut non_numeric: Vec<&str> = Vec::new();
+    for (k, v) in &obj {
+        if !info.params.iter().any(|x| x.id == k.as_str()) {
+            unknown.push(k.as_str());
+        } else if v.as_f64().is_none_or(|f| !f.is_finite()) {
+            non_numeric.push(k.as_str());
+        }
+    }
+    if !unknown.is_empty() {
+        unknown.sort_unstable();
+        return Err(bad("mix.insert_params", format!("`{}` has no parameter(s): {}", info.id, unknown.join(", "))));
+    }
+    if !non_numeric.is_empty() {
+        non_numeric.sort_unstable();
+        return Err(bad("mix.insert_params", format!("parameter(s) need a numeric value: {}", non_numeric.join(", "))));
+    }
     let mut n = 0;
     for (k, v) in obj {
-        let (Some(pi), Some(f)) = (info.params.iter().find(|x| x.id == k), v.as_f64().filter(|f| f.is_finite())) else { continue };
-        ins.params.insert(k, (f as f32).clamp(pi.min, pi.max));
-        n += 1;
+        if let (Some(pi), Some(f)) = (info.params.iter().find(|x| x.id == k), v.as_f64().filter(|f| f.is_finite())) {
+            ins.params.insert(k, (f as f32).clamp(pi.min, pi.max));
+            n += 1;
+        }
     }
     if let Some(name) = preset {
         ins.preset = name;
@@ -800,6 +819,42 @@ mod tests {
             let delta = rms_db(&before[start..end], &after[start..end]);
             assert!(delta.abs() < 0.2, "{start}..{end} changed by {delta} dB");
         }
+    }
+
+    #[test]
+    fn insert_params_rejects_unknown_and_non_numeric_keys() {
+        let mut e = Engine::default();
+        e.execute("track.new", &json!({})).unwrap();
+        let t = e.session().tracks[0].id.0;
+        e.execute("mix.insert", &json!({"track": t, "slot": 0, "plugin": "gain"})).unwrap();
+        fn gain(e: &Engine) -> f32 {
+            e.session().tracks[0].mixer.inserts[0].as_ref().unwrap().params["gain"]
+        }
+
+        // A typo names no parameter: the call fails and says which key.
+        let err = e.execute("mix.insert_params", &json!({"track": t, "slot": 0, "params": {"gain_db": -14.0}})).unwrap_err();
+        assert!(err.to_string().contains("gain_db"), "{err}");
+
+        // Mixed keys fail as a whole and change nothing.
+        let err = e.execute("mix.insert_params", &json!({"track": t, "slot": 0, "params": {"gain": -14.0, "width": 1.0}})).unwrap_err();
+        assert!(err.to_string().contains("width"), "{err}");
+        assert_eq!(gain(&e), 0.0);
+
+        // Non-numeric and non-finite values are rejected too.
+        assert!(e.execute("mix.insert_params", &json!({"track": t, "slot": 0, "params": {"gain": "loud"}})).is_err());
+        assert!(e.execute("mix.insert_params", &json!({"track": t, "slot": 0, "params": {"gain": null}})).is_err());
+        assert_eq!(gain(&e), 0.0);
+
+        // Correct keys still apply, clamped to the parameter range.
+        let r = e.execute("mix.insert_params", &json!({"track": t, "slot": 0, "params": {"gain": -14.0}})).unwrap();
+        assert_eq!(r["set"], 1);
+        assert_eq!(gain(&e), -14.0);
+        e.execute("mix.insert_params", &json!({"track": t, "slot": 0, "params": {"gain": 999.0}})).unwrap();
+        assert_eq!(gain(&e), 24.0);
+
+        // Empty params with a preset name still recall (the rename path).
+        e.execute("mix.insert_params", &json!({"track": t, "slot": 0, "params": {}, "preset": "Saved"})).unwrap();
+        assert_eq!(e.session().tracks[0].mixer.inserts[0].as_ref().unwrap().preset, "Saved");
     }
 
     #[test]

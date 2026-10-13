@@ -341,7 +341,14 @@ pub fn pitch_shift(ch: &[Vec<f32>], semitones: f32, sample_rate: f32) -> Vec<Vec
         return ch.to_vec();
     }
     let factor = 2f64.powf(f64::from(st) / 12.0);
-    let stretched = time_stretch(ch, factor, sample_rate);
+    // time_stretch clamps to 0.1..=10, short of the 16x (or 1/16) that ±48 needs: stretch twice by
+    // the square root instead.
+    let stretched = if (0.1..=10.0).contains(&factor) {
+        time_stretch(ch, factor, sample_rate)
+    } else {
+        let half = factor.sqrt();
+        time_stretch(&time_stretch(ch, half, sample_rate), half, sample_rate)
+    };
     let len = max_len(ch);
     let slen = max_len(&stretched);
     if slen == 0 || len == 0 {
