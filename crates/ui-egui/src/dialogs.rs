@@ -91,7 +91,13 @@ impl Dialogs {
             }
             "session.new" => Dialog::NewSession { name: "Untitled".into(), sample_rate: 48_000, demo: false },
             "file.bounce_mix" => {
-                Dialog::Bounce { path: format!("{home}/{name} Bounce.wav"), format: "wav".into(), bit_depth: "24".into(), normalize: false }
+                let dir = e
+                    .path
+                    .as_deref()
+                    .and_then(|p| std::path::Path::new(p).parent())
+                    .filter(|d| !d.as_os_str().is_empty())
+                    .map_or(home.clone(), |d| d.display().to_string());
+                Dialog::Bounce { path: format!("{dir}/{name} Bounce.wav"), format: "wav".into(), bit_depth: "24".into(), normalize: false }
             }
             "file.import_audio" => Dialog::PathPrompt { cmd: id.into(), title: "Import Audio".into(), path: home, key: "path".into() },
             "file.import_midi" => Dialog::PathPrompt { cmd: id.into(), title: "Import MIDI".into(), path: home, key: "path".into() },
@@ -346,7 +352,19 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                 Dialog::Bounce { path, format, bit_depth, normalize } => {
                     ui.horizontal(|ui| {
                         ui.label("File");
-                        ui.add(egui::TextEdit::singleline(path).desired_width(360.0));
+                        ui.add(egui::TextEdit::singleline(path).desired_width(420.0));
+                        if let Some(pick) = &app.services.pick_save
+                            && ui.button("Browse…").clicked()
+                            && let Some(p) = pick("file.bounce_mix", path)
+                        {
+                            *path = p;
+                            match std::path::Path::new(path.as_str()).extension().map(|x| x.to_string_lossy().to_lowercase()).as_deref() {
+                                Some("wav") => *format = "wav".into(),
+                                Some("aif" | "aiff") => *format = "aiff".into(),
+                                Some("flac") => *format = "flac".into(),
+                                _ => {}
+                            }
+                        }
                     });
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_label("Format").selected_text(format.to_uppercase()).show_ui(ui, |ui| {
