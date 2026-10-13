@@ -47,3 +47,6 @@ display_name = "Jason Brashear"
 [people.Silvertree2010]
 display_name = "Netter"
 sync_github_name = false
+
+[people.Momentum96]
+sync_github_name = true
