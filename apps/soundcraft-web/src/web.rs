@@ -68,7 +68,8 @@ enum Purpose {
 }
 
 const SESSION_EXTS: &[&str] = &[io::BUNDLE_EXTENSION, soundcraft_model::SESSION_EXTENSION];
-const AUDIO_EXTS: &[&str] = &["wav", "wave", "bwf", "aif", "aiff", "aifc", "flac", "mp3", "ogg", "oga", "m4a", "aac", "mp4", "caf", "mkv", "webm"];
+const AUDIO_EXTS: &[&str] =
+    &["wav", "wave", "bwf", "aif", "aiff", "aifc", "flac", "mp3", "ogg", "oga", "m4a", "m4b", "aac", "mp4", "caf", "mkv", "webm"];
 const MIDI_EXTS: &[&str] = &["mid", "midi", "smf"];
 
 impl Purpose {
@@ -166,6 +167,9 @@ impl WebShell {
     }
 
     fn handle(&mut self, purpose: Purpose, name: &str, bytes: &[u8]) {
+        if matches!(purpose, Purpose::Session) && soundcraft_ui_egui::bounce::refuses_session_switch(&mut self.app) {
+            return;
+        }
         let e = &mut self.app.engine;
         let at = e.session().edit.selection.start.max(0);
         let result = match purpose {
