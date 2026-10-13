@@ -135,7 +135,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add Automation Breakpoint",
             [],
             None,
-            "{track?, param: volume|pan|mute|send_a_level|plugin:a:<id>, at, value}",
+            "{track?, param: volume|pan|mute|send_a_level|plugin:a:<id>, at, value, from?}",
             has_selection,
             set_point
         ),
@@ -461,15 +461,21 @@ fn lane_param(p: &Value, cmd: &str) -> Result<AutoParam> {
     str_param(p, "param").map_or(Ok(AutoParam::Volume), |s| AutoParam::parse(s).ok_or_else(|| bad(cmd, format!("unknown automation param `{s}`"))))
 }
 
+/// With `from` (a write pass's previous point), the points between `from` and `at` are removed first.
 fn set_point(e: &mut Engine, p: &Value) -> Result<Value> {
     let tracks = tracks_required(e, "automation.set_point", p)?;
     let param = lane_param(p, "automation.set_point")?;
     let at = position_param(e, "automation.set_point", p, "at")?.unwrap_or(e.session().edit.selection.start).max(0);
+    let from = position_param(e, "automation.set_point", p, "from")?;
     let v = p.get("value").and_then(Value::as_f64).filter(|v| v.is_finite()).ok_or_else(|| bad("automation.set_point", "`value` required"))? as f32;
     let s = e.session_mut();
     for t in &tracks {
         if let Some(tr) = s.track_mut(*t) {
-            tr.lane_mut(&param).set_point(at, v);
+            let lane = tr.lane_mut(&param);
+            if let Some(from) = from {
+                lane.clear_range(from.saturating_add(1), at);
+            }
+            lane.set_point(at, v);
         }
     }
     Ok(json!({"at": at, "value": v}))
@@ -805,6 +811,17 @@ mod tests {
             let delta = rms_db(&before[start..end], &after[start..end]);
             assert!(delta.abs() < 0.05, "{start}..{end} changed by {delta} dB");
         }
+    }
+
+    #[test]
+    fn set_point_from_drops_the_points_in_between() {
+        let (mut e, t) = tone_session(&[(100, -20.0), (150, -20.0), (200, -20.0), (250, -20.0), (300, -20.0)]);
+        e.execute("automation.set_point", &json!({"track": t.0, "from": 100, "at": 250, "value": 0.0})).unwrap();
+        // A loop wrap: `from` lies after `at`, so nothing goes.
+        e.execute("automation.set_point", &json!({"track": t.0, "from": 400, "at": 50, "value": -6.0})).unwrap();
+        let lane = e.session().track(t).unwrap().lane(&AutoParam::Volume).unwrap();
+        let points: Vec<(i64, f32)> = lane.points.iter().map(|p| (p.at, p.value)).collect();
+        assert_eq!(points, [(50, -6.0), (100, -20.0), (250, 0.0), (300, -20.0)]);
     }
 
     #[test]
