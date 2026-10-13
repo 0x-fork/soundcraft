@@ -105,6 +105,10 @@ pub struct Clip {
     /// Reversed playback (AudioSuite Reverse renders into a new source; this is for previews).
     #[serde(default)]
     pub group: Option<u64>,
+    /// Marks the clips made by `clip.loop` (the origin and its copies share one id), so
+    /// `clip.unloop` still recognises the loop after the source's content is edited.
+    #[serde(default)]
+    pub loop_id: Option<u64>,
 }
 
 fn one() -> f64 {
@@ -131,6 +135,7 @@ impl Clip {
             color: None,
             stretch: 1.0,
             group: None,
+            loop_id: None,
         }
     }
 

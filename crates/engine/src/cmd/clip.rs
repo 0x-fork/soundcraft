@@ -288,8 +288,15 @@ fn loop_clips(e: &mut Engine, p: &Value) -> Result<Value> {
     let s = e.session_mut();
     let mut made = 0;
     for id in ids {
-        let Some((tid, c)) = s.find_clip(id).map(|(t, c)| (t, c.clone())) else { continue };
+        let Some((tid, mut c)) = s.find_clip(id).map(|(t, c)| (t, c.clone())) else { continue };
         let reps = total.map_or(count - 1, |l| (l / c.length.max(1)).max(1) - 1).clamp(0, 1000);
+        if reps > 0 && c.loop_id.is_none() {
+            let lid = s.alloc();
+            if let Some(src) = s.find_clip_mut(id) {
+                src.loop_id = Some(lid);
+            }
+            c.loop_id = Some(lid);
+        }
         let mut copies = Vec::new();
         for k in 1..=reps {
             let mut nc = c.clone();
