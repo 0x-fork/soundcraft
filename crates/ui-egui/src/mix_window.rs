@@ -29,6 +29,10 @@ pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
             for id in ids {
                 strip(app, ui, id, snap.as_ref());
             }
+            let rest = Rect::from_min_max(pos2(ui.cursor().min.x, ui.clip_rect().min.y), ui.clip_rect().max);
+            if rest.width() > 4.0 && ui.interact(rest, ui.id().with("past_strips"), Sense::click()).double_clicked() {
+                let _ = app.dialogs.open_for_command(&app.engine, "track.new");
+            }
         });
     });
 }
