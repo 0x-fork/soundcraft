@@ -265,6 +265,11 @@ fn host_set_controller_param_survives_state_round_trip() {
     assert!(q.load_state(&blob));
     assert!((q.param("7").unwrap() - 1.5).abs() < 1e-4, "{:?}", q.param("7"));
     assert!((q.param("12").unwrap() - 200.0).abs() < 0.01, "{:?}", q.param("12"));
+    assert!(q.set_param("12", 300.0));
+    assert!(q.load_state(&blob));
+    let mut r = soundcraft_vst3_host::create(&id).unwrap();
+    assert!(r.load_state(&q.save_state().unwrap()));
+    assert!((r.param("12").unwrap() - 200.0).abs() < 0.01, "a loaded state replaces earlier edits: {:?}", r.param("12"));
 }
 
 #[test]
