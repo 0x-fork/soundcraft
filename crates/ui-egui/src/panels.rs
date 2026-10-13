@@ -562,10 +562,16 @@ fn preset_menu(
             if let Ok(text) = std::fs::read_to_string(dir.join(format!("{n}.json")))
                 && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
             {
-                let _ = app.run(
-                    "mix.insert_params",
-                    json!({"track": tid.0, "slot": slot, "params": v.get("params").cloned().unwrap_or_default(), "preset": n}),
-                );
+                // Old presets may carry parameters the plugin no longer exposes; drop them so recall succeeds.
+                let params: serde_json::Map<String, serde_json::Value> = v
+                    .get("params")
+                    .and_then(serde_json::Value::as_object)
+                    .into_iter()
+                    .flatten()
+                    .filter(|(k, val)| info.params.iter().any(|pi| pi.id == k.as_str()) && val.as_f64().is_some_and(f64::is_finite))
+                    .map(|(k, val)| (k.clone(), val.clone()))
+                    .collect();
+                let _ = app.run("mix.insert_params", json!({"track": tid.0, "slot": slot, "params": params, "preset": n}));
             }
             ui.close();
         }
