@@ -456,7 +456,8 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
 }
 
 /// An instrument track's INSTRUMENT row: click opens a hosted instrument's plugin window,
-/// right-click (or click, when none is set) picks another instrument.
+/// right-click (or click, when none is set) picks another instrument. A built-in's parameters
+/// open from that menu. Dropping an audio file on it loads the sampler.
 pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
     let t = Tokens::current();
     let (id, slot) = (track.id, soundcraft_mix::INSTRUMENT_SLOT);
@@ -476,6 +477,7 @@ pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r:
     let popup = if hosted { egui::Popup::context_menu(&menu_resp) } else { egui::Popup::menu(&menu_resp) };
     let popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
     popup.show(|ui| instrument_menu(app, ui, id));
+    crate::sampler_window::drop_target(app, ui.ctx(), r, id);
 }
 
 /// What a plugin slot shows at its left: a dot for inserts, the send's letter, or an arrow for
@@ -633,6 +635,12 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
     let current = app.engine.session().track(id).and_then(|t| t.instrument.clone());
     if let Some(info) = current.as_ref().and_then(|i| plugin_info(&i.plugin)) {
         ui.label(egui::RichText::new(info.name).strong());
+        if current.as_ref().is_some_and(|i| !soundcraft_mix::is_third_party(&i.plugin)) && ui.button("Edit Parameters…").clicked() {
+            if !app.ui.plugin_windows.contains(&(id, slot)) {
+                app.ui.plugin_windows.push((id, slot));
+            }
+            ui.close();
+        }
         if let Some(p) = &app.player
             && p.has_editor(id, slot)
         {
