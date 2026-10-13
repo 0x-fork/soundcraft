@@ -11,6 +11,7 @@ pub mod clip_group_file;
 pub mod cmd;
 pub mod demo;
 pub mod edit;
+pub mod file_access;
 pub mod inspect;
 pub mod io;
 pub mod score;
@@ -118,8 +119,13 @@ pub struct Engine {
     dirty_at: Cell<(u64, bool)>,
     /// Gesture key for undo coalescing (see `execute_merged`).
     merge_key: Option<String>,
+    /// The key every merged gesture takes while held (see `hold_merge`).
+    merge_hold: Option<String>,
     /// Messages for the UI status line / agents.
     pub messages: Vec<String>,
+    /// The edit selection (range, tracks) before the last change, for Restore Last Selection.
+    /// Kept out of the document so selecting never marks the session modified.
+    pub last_selection: Option<(soundcraft_time::Range, Vec<TrackId>)>,
 }
 
 impl Default for Engine {
@@ -147,7 +153,9 @@ impl Engine {
             dirty: false,
             dirty_at: Cell::new((0, false)),
             merge_key: None,
+            merge_hold: None,
             messages: Vec::new(),
+            last_selection: None,
         }
     }
 
@@ -181,6 +189,7 @@ impl Engine {
         self.saved = Arc::clone(&self.doc);
         self.undo.clear();
         self.redo.clear();
+        self.last_selection = None;
         self.revision = self.revision.wrapping_add(1);
         self.dirty = false;
     }
@@ -266,7 +275,6 @@ impl Engine {
         if spec.view {
             return self.execute_view(spec, params);
         }
-        self.merge_key = None;
         let before = Arc::clone(&self.doc);
         let rev = self.revision;
         let dirty = self.dirty;
@@ -280,8 +288,13 @@ impl Engine {
                 return Err(EngineError::Internal(id.to_string(), panic_message(&*p)));
             }
         };
+        if !Arc::ptr_eq(&before, &self.doc) {
+            // Only a change to the document ends a gesture, so Stop doesn't split the pass it ends.
+            self.merge_key = None;
+        }
         match result {
             Ok(v) => {
+                cmd::remember_selection(self, &before);
                 if spec.undoable && !Arc::ptr_eq(&before, &self.doc) {
                     self.push_undo(spec.label, before);
                 }
@@ -315,15 +328,24 @@ impl Engine {
     /// Execute as part of a continuous gesture (fader drag, knob turn, slider): consecutive calls
     /// with the same `key` collapse into a single undo step.
     pub fn execute_merged(&mut self, id: &str, params: &Value, key: &str) -> Result<Value> {
-        let continuing = self.merge_key.as_deref() == Some(key);
+        let key = self.merge_hold.clone().unwrap_or_else(|| key.to_string());
+        let continuing = self.merge_key.as_ref() == Some(&key);
         let before_len = self.undo.len();
         let r = self.execute(id, params)?;
         if continuing && self.undo.len() == before_len + 1 && before_len > 0 {
             // Drop the step just pushed; the earlier one still holds the pre-gesture document.
             self.undo.pop();
         }
-        self.merge_key = Some(key.to_string());
+        self.merge_key = Some(key);
         Ok(r)
+    }
+
+    /// While `key` is held, every `execute_merged` gesture takes it instead of its own, so they
+    /// all join one undo step (an automation pass and whatever is dragged during it).
+    pub fn hold_merge(&mut self, key: Option<&str>) {
+        if self.merge_hold.as_deref() != key {
+            self.merge_hold = key.map(str::to_string);
+        }
     }
 
     /// End a gesture started with `execute_merged`.
@@ -399,6 +421,34 @@ mod merge_tests {
         assert_eq!(e.undo_history().len(), 1);
         e.undo();
         assert_eq!(e.session().track(t).unwrap().mixer.volume_db, 0.0);
+    }
+
+    #[test]
+    fn a_held_merge_joins_other_gestures_into_its_step() {
+        let mut e = Engine::default();
+        let t = e.session_mut().add_track(soundcraft_model::TrackKind::Audio, soundcraft_model::ChannelFormat::Mono, None);
+        e.hold_merge(Some("pass"));
+        for db in [-1.0, -2.0, -3.0] {
+            e.execute_merged("mix.volume", &json!({"track": t.0, "db": db}), "fader").unwrap();
+            e.execute_merged("mix.pan", &json!({"track": t.0, "pan": db / 4.0}), "pan").unwrap();
+        }
+        assert_eq!(e.undo_history().len(), 1);
+        e.hold_merge(None);
+        e.execute_merged("mix.volume", &json!({"track": t.0, "db": -6.0}), "fader").unwrap();
+        assert_eq!(e.undo_history().len(), 2);
+    }
+
+    #[test]
+    fn only_a_change_to_the_document_ends_a_gesture() {
+        let mut e = Engine::default();
+        let t = e.session_mut().add_track(soundcraft_model::TrackKind::Audio, soundcraft_model::ChannelFormat::Mono, None);
+        e.execute_merged("mix.volume", &json!({"track": t.0, "db": -1.0}), "fader").unwrap();
+        e.execute("transport.stop", &json!({})).unwrap();
+        e.execute_merged("mix.volume", &json!({"track": t.0, "db": -2.0}), "fader").unwrap();
+        assert_eq!(e.undo_history().len(), 1);
+        e.execute("mix.mute", &json!({"track": t.0})).unwrap();
+        e.execute_merged("mix.volume", &json!({"track": t.0, "db": -3.0}), "fader").unwrap();
+        assert_eq!(e.undo_history().len(), 3);
     }
 }
 
