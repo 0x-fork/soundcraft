@@ -85,7 +85,12 @@ impl Dialogs {
             }
             "session.new" => Dialog::NewSession { name: "Untitled".into(), sample_rate: 48_000, demo: false },
             "file.bounce_mix" => {
-                let dir = e.path.as_deref().and_then(|p| std::path::Path::new(p).parent()).map_or(home.clone(), |d| d.display().to_string());
+                let dir = e
+                    .path
+                    .as_deref()
+                    .and_then(|p| std::path::Path::new(p).parent())
+                    .filter(|d| !d.as_os_str().is_empty())
+                    .map_or(home.clone(), |d| d.display().to_string());
                 Dialog::Bounce { path: format!("{dir}/{name} Bounce.wav"), format: "wav".into(), bit_depth: "24".into(), normalize: false }
             }
             "file.import_audio" => Dialog::PathPrompt { cmd: id.into(), title: "Import Audio".into(), path: home, key: "path".into() },

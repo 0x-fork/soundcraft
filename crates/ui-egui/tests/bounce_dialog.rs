@@ -34,3 +34,21 @@ fn bounce_starts_in_the_session_folder_and_browse_picks_the_file_and_format() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn bounce_of_a_session_with_a_relative_path_starts_in_the_default_folder() {
+    let mut engine = soundcraft_engine::demo::demo_engine();
+    engine.path = Some("Midnight Groove.scraft".into());
+    let name = engine.session().name.clone();
+    let mut app = SoundApp::new(engine, None, Services::default());
+    assert!(app.dialogs.open_for_command(&app.engine, "file.bounce_mix"));
+    let mut fresh = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    assert!(fresh.dialogs.open_for_command(&fresh.engine, "file.bounce_mix"));
+    match (&app.dialogs.open, &fresh.dialogs.open) {
+        (Some(Dialog::Bounce { path, .. }), Some(Dialog::Bounce { path: unsaved, .. })) => {
+            assert_ne!(path.as_str(), format!("/{name} Bounce.wav"));
+            assert_eq!(path, unsaved, "the same folder as a session never saved");
+        }
+        other => panic!("{other:?}"),
+    }
+}
