@@ -1080,11 +1080,11 @@ fn send_options_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, 
     }
     ui.horizontal(|ui| {
         let mut mute = send.mute;
-        if ui.checkbox(&mut mute, "Mute").changed() {
+        if crate::widgets::checkbox(ui, &mut mute, "Mute").changed() {
             let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "mute": mute}));
         }
         let mut pre = send.pre_fader;
-        if ui.checkbox(&mut pre, "Pre-fader").changed() {
+        if crate::widgets::checkbox(ui, &mut pre, "Pre-fader").changed() {
             let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "pre_fader": pre}));
         }
     });

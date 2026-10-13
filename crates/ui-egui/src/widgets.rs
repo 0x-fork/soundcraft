@@ -499,9 +499,140 @@ pub fn multi_meter(ui: &Ui, r: Rect, levels: &[f32], labels: &[String], clip: bo
     }
 }
 
+/// egui's checkbox, plus drag-to-set (#399): press one box and drag over its neighbours, and each
+/// box the pointer passes takes the state the first one switched to. A click toggles one box.
+pub fn checkbox(ui: &mut Ui, on: &mut bool, label: impl Into<egui::WidgetText>) -> Response {
+    // egui's own toggle works on a copy: `drag_toggle` decides clicks and drags alike.
+    let mut copy = *on;
+    let mut resp = ui.checkbox(&mut copy, label.into()).interact(Sense::drag());
+    if drag_toggle(ui, &resp, on) {
+        resp.mark_changed();
+    }
+    resp
+}
+
+/// The new state lives in the egui context from the first box's drag start until the button is
+/// released. Returns whether `on` changed.
+fn drag_toggle(ui: &Ui, resp: &Response, on: &mut bool) -> bool {
+    let ctx = ui.ctx();
+    let key = egui::Id::new("soundcraft-checkbox-drag-target");
+    if !ctx.input(|i| i.pointer.primary_down()) {
+        ctx.data_mut(|d| d.remove::<bool>(key));
+    }
+    if resp.drag_started_by(egui::PointerButton::Primary) {
+        *on = !*on;
+        ctx.data_mut(|d| d.insert_temp(key, *on));
+        return true;
+    }
+    if resp.clicked() {
+        *on = !*on;
+        return true;
+    }
+    let Some(target) = ctx.data(|d| d.get_temp::<bool>(key)) else { return false };
+    // Clipped and layer-aware: rows scrolled out of view or under another window stay as they are.
+    if ui.rect_contains_pointer(resp.rect) && *on != target {
+        *on = target;
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::{clip_gain_from_pos, clip_gain_to_pos};
+    use egui::{Event, Modifiers, PointerButton, Pos2};
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    fn press(h: &mut Harness<'_, [bool; 4]>, pos: Pos2, pressed: bool) {
+        h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+        h.run_steps(2);
+    }
+
+    fn boxes() -> (Harness<'static, [bool; 4]>, Vec<Pos2>) {
+        let mut h = Harness::new_ui_state(
+            |ui, s: &mut [bool; 4]| {
+                ui.vertical(|ui| {
+                    for b in s.iter_mut() {
+                        super::checkbox(ui, b, "Box");
+                    }
+                });
+            },
+            [false, true, false, false],
+        );
+        h.run();
+        let at = h.get_all_by_label("Box").map(|n| n.rect().center()).collect();
+        (h, at)
+    }
+
+    /// #399: pressing a box and dragging over its neighbours sets them all to the state the first
+    /// one switched to; the box past the drag stays as it was.
+    #[test]
+    fn dragging_across_checkboxes_sets_them_all_like_the_first() {
+        let (mut h, at) = boxes();
+        assert_eq!(at.len(), 4);
+        h.event(Event::PointerMoved(at[0]));
+        h.run_steps(1);
+        press(&mut h, at[0], true);
+        for p in &at[1..3] {
+            h.event(Event::PointerMoved(*p));
+            h.run_steps(2);
+        }
+        press(&mut h, at[2], false);
+        assert_eq!(*h.state(), [true, true, true, false]);
+    }
+
+    /// Dragging from a checked box unchecks; after release, moving over boxes changes nothing.
+    #[test]
+    fn dragging_from_a_checked_box_unchecks_and_release_ends_it() {
+        let (mut h, at) = boxes();
+        h.state_mut().copy_from_slice(&[true, true, true, true]);
+        h.run();
+        h.event(Event::PointerMoved(at[1]));
+        h.run_steps(1);
+        press(&mut h, at[1], true);
+        h.event(Event::PointerMoved(at[2]));
+        h.run_steps(2);
+        press(&mut h, at[2], false);
+        h.event(Event::PointerMoved(at[3]));
+        h.run_steps(2);
+        assert_eq!(*h.state(), [true, false, false, true]);
+    }
+
+    /// A row scrolled out of view isn't set when the drag passes over the place it would be.
+    #[test]
+    fn dragging_past_a_scroll_area_leaves_hidden_rows_alone() {
+        let mut h = Harness::new_ui_state(
+            |ui, s: &mut [bool; 4]| {
+                egui::ScrollArea::vertical().max_height(30.0).show(ui, |ui| {
+                    for b in s.iter_mut() {
+                        super::checkbox(ui, b, "Box");
+                    }
+                });
+            },
+            [false; 4],
+        );
+        h.run();
+        let at: Vec<Pos2> = h.get_all_by_label("Box").map(|n| n.rect().center()).collect();
+        assert_eq!(at.len(), 4);
+        h.event(Event::PointerMoved(at[0]));
+        h.run_steps(1);
+        press(&mut h, at[0], true);
+        h.event(Event::PointerMoved(at[3]));
+        h.run_steps(2);
+        press(&mut h, at[3], false);
+        assert_eq!(*h.state(), [true, false, false, false]);
+    }
+
+    /// A click still toggles just the one box, once.
+    #[test]
+    fn a_click_toggles_one_checkbox() {
+        let (mut h, at) = boxes();
+        h.event(Event::PointerMoved(at[1]));
+        h.run_steps(1);
+        press(&mut h, at[1], true);
+        press(&mut h, at[1], false);
+        assert_eq!(*h.state(), [false, false, false, false]);
+    }
 
     #[test]
     fn clip_gain_taper_spans_minus_144_to_plus_36_and_round_trips() {
