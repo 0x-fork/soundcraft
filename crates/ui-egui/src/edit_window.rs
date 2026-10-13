@@ -299,6 +299,19 @@ pub(crate) fn height_targets(s: &Session, m: egui::Modifiers, own: &[TrackId]) -
     s.tracks.iter().filter(|t| own.contains(&t.id) || (m.alt && extra(t))).map(|t| t.id.0).collect()
 }
 
+/// How many folders this track sits in, for the name's indent (at most 6 shown).
+fn folder_depth(s: &Session, track: &Track) -> usize {
+    let mut current = track.folder;
+    let mut depth = 0;
+    while let Some(folder) = current.and_then(|folder| s.track(folder))
+        && depth < 6
+    {
+        depth += 1;
+        current = folder.folder;
+    }
+    depth
+}
+
 /// Pro Tools' track-name click: Shift adds the tracks up to the nearest selected one, Cmd/Ctrl adds or removes one.
 pub(crate) fn click_track(app: &mut SoundApp, id: TrackId, mods: egui::Modifiers, shown: impl Fn(&Session, &Track) -> bool) {
     let s = app.engine.session();
@@ -969,7 +982,8 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
         }
     }
     // Name, highlighted when the track is selected, and the playlist menu beside it.
-    let name_r = at(16.0, 1.5, 97.0, 15.0);
+    let indent = folder_depth(app.engine.session(), track) as f32 * 10.0;
+    let name_r = at(16.0 + indent, 1.5, 97.0 - indent, 15.0);
     if selected {
         ui.painter().rect_filled(name_r, 2.0, t.name_field_sel);
     }
@@ -1408,21 +1422,46 @@ pub(crate) fn track_context_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
         ("Move to New Folder...", "track.move_to_new_folder"),
         ("Group...", "track.group"),
     ];
+    let selection: Vec<u64> = {
+        let selected = &app.engine.session().edit.selected_tracks;
+        if selected.contains(&id) { selected.iter().map(|track| track.0).collect() } else { vec![tid] }
+    };
     for (label, cmd) in items {
         if ui.button(label).clicked() {
             if cmd == "ui.rename_track" {
                 let name = app.engine.session().track(id).map(|t| t.name.clone()).unwrap_or_default();
                 app.dialogs.open_rename_track(id, &name);
             } else {
-                let _ = app.run(cmd, json!({"tracks": [tid]}));
+                let _ = app.run(cmd, json!({"tracks": selection}));
             }
         }
+    }
+    let folders: Vec<(u64, String)> = app
+        .engine
+        .session()
+        .tracks
+        .iter()
+        .filter(|track| track.is_folder() && !selection.contains(&track.id.0))
+        .map(|track| (track.id.0, track.name.clone()))
+        .collect();
+    if !folders.is_empty() {
+        ui.menu_button("Move to Folder", |ui| {
+            for (folder, name) in &folders {
+                if ui.button(name).clicked() {
+                    let _ = app.run("track.move_to_folder", json!({"tracks": selection, "folder": folder}));
+                }
+            }
+        });
+    }
+    if app.engine.session().track(id).is_some_and(|track| track.folder.is_some()) && ui.button("Remove from Folder").clicked() {
+        let _ = app.run("track.remove_from_folder", json!({"tracks": selection}));
     }
     ui.separator();
     ui.menu_button("Track Height", |ui| {
         for h in TrackHeight::ALL {
             if ui.button(h.label()).clicked() {
-                let tracks = height_targets(app.engine.session(), ui.input(|i| i.modifiers), &[id]);
+                let own: Vec<TrackId> = selection.iter().map(|&t| TrackId(t)).collect();
+                let tracks = height_targets(app.engine.session(), ui.input(|i| i.modifiers), &own);
                 let _ = app.run("track.height", json!({"tracks": tracks, "height": h.label()}));
             }
         }
@@ -1432,7 +1471,7 @@ pub(crate) fn track_context_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
             let (r, resp) = ui.allocate_exact_size(vec2(120.0, 14.0), Sense::click());
             ui.painter().rect_filled(r, 2.0, rgb(*c));
             if resp.clicked() {
-                let _ = app.run("track.color", json!({"tracks": [tid], "color": i}));
+                let _ = app.run("track.color", json!({"tracks": selection, "color": i}));
             }
         }
     });
