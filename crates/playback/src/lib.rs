@@ -332,7 +332,10 @@ impl Side {
     /// Drops retired instances (closing their editors first, inside the plugin's drop).
     fn collect_garbage(&mut self) {
         while let Ok(g) = self.garbage.try_recv() {
-            drop(g);
+            for p in g {
+                log::debug!("plugin instance released: {}", p.info().name);
+                drop(p);
+            }
         }
     }
 
@@ -681,6 +684,7 @@ impl Side {
             }
             self.forget(key);
             let made = soundcraft_mix::create_instance(&spec.id, spec.state.as_deref(), sr, BLOCK, spec.ch);
+            log::debug!("plugin instance for {:?} slot {}: {} ({} ch, created: {})", spec.track, spec.slot, spec.id, spec.ch, made.is_some());
             self.shadow.insert(key, (spec.id.clone(), spec.ch, made.is_some()));
             if let Some(mut plugin) = made {
                 if let Some(e) = plugin.editor() {
