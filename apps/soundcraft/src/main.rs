@@ -168,9 +168,15 @@ fn services() -> Services {
             };
             d.pick_file().map(|p| p.to_string_lossy().into_owned())
         })),
-        pick_save: Some(Box::new(|_purpose: &str, default: &str| {
+        pick_save: Some(Box::new(|purpose: &str, default: &str| {
             let path = std::path::Path::new(default);
-            let mut d = rfd::FileDialog::new().add_filter("SoundCraft Session", &["scraft"]);
+            let mut d = match purpose {
+                "file.bounce_mix" => rfd::FileDialog::new().add_filter("Audio", &["wav", "aif", "aiff", "flac"]),
+                _ => rfd::FileDialog::new().add_filter("SoundCraft Session", &["scraft"]),
+            };
+            if let Some(dir) = path.parent().filter(|dir| dir.is_dir()) {
+                d = d.set_directory(dir);
+            }
             if let Some(n) = path.file_name().and_then(|n| n.to_str()) {
                 d = d.set_file_name(n);
             }
