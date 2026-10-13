@@ -2722,11 +2722,10 @@ mod tests {
         let mut eng = MixEngine::new(48_000.0, 512);
         eng.set_external_instances(true);
         let sets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let make = |db: f32| {
+        let make = |blob: &[u8]| {
             let mut gain = soundcraft_dsp::create("gain").unwrap();
             gain.prepare(48_000.0, 512, 1);
-            gain.set_param("gain", db);
-            Box::new(Stateful { inner: gain, sets: Arc::clone(&sets) })
+            Box::new(Stateful { inner: gain, blob: blob.to_vec(), sets: Arc::clone(&sets) })
         };
         eng.adopt(vec![PreparedInstance { track: t, slot: 0, id: "clap:test.fake".into(), ch: 1, plugin: make(b"old") }]);
         render_block(&mut eng, &s, 0);

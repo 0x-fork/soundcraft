@@ -114,7 +114,6 @@ impl Vst3Plugin {
             })
             .collect();
         p.values = values;
-        p.inst.state_link().set_controller_pending(Arc::clone(&p.controller_pending));
         p
     }
 
@@ -235,7 +234,6 @@ impl Plugin for Vst3Plugin {
         } else if self.pending.len() < self.pending.capacity() {
             self.pending.push((vid, n));
         }
-        self.controller_pending.set(i, n);
         true
     }
 
