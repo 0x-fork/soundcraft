@@ -6,7 +6,7 @@ use crate::{SoundApp, icons};
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
 use soundcraft_model::{EditMode, Tool};
-use soundcraft_time::{TimeFormat, format_length, format_position};
+use soundcraft_time::{TimeFormat, format_length};
 
 pub const HEIGHT: f32 = 78.0;
 
@@ -23,18 +23,23 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     let full = ui.max_rect();
     ui.painter().rect_filled(full, 0.0, t.toolbar_bg);
     ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        ui.spacing_mut().item_spacing.x = 8.0;
-        edit_modes(app, ui);
-        zoom_group(app, ui);
-        tools(app, ui);
-        counters(app, ui);
-        grid_nudge(app, ui);
-        transport(app, ui);
-        tempo_meter(app, ui);
-        output_meter(app, ui);
-    });
+    egui::ScrollArea::horizontal()
+        .id_salt("edit_toolbar_scroll")
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.spacing_mut().item_spacing.x = 8.0;
+                edit_modes(app, ui);
+                zoom_group(app, ui);
+                tools(app, ui);
+                counters(app, ui);
+                grid_nudge(app, ui);
+                transport(app, ui);
+                tempo_meter(app, ui);
+                output_meter(app, ui);
+            });
+        });
 }
 
 fn edit_modes(app: &mut SoundApp, ui: &mut Ui) {
@@ -173,7 +178,7 @@ fn tools(app: &mut SoundApp, ui: &mut Ui) {
 
 fn fmt_pos(app: &SoundApp, at: i64, f: TimeFormat) -> String {
     let s = app.engine.session();
-    format_position(at, f, s.sample_rate, &s.tempo, s.frame_rate, s.timecode_start)
+    s.format_position(at, f)
 }
 
 fn counters(app: &mut SoundApp, ui: &mut Ui) {

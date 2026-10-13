@@ -6,11 +6,64 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Whether the Light palette is active. Dark is the default (the incumbent is dark-only).
 static LIGHT_THEME: AtomicBool = AtomicBool::new(false);
 
-/// Unit tests that change the process-wide palette must own it until their assertions finish.
+/// Unit tests that change or read the process-wide palette must own it until their assertions
+/// finish. The lock is re-entrant per thread, so a test may hold it and still build apps
+/// (`SoundApp::new` takes it too) without deadlocking itself.
 #[cfg(test)]
-pub(crate) fn lock_test_palette() -> std::sync::MutexGuard<'static, ()> {
-    static PALETTE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    PALETTE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+pub(crate) fn lock_test_palette() -> TestPaletteGuard {
+    TestPaletteGuard::acquire()
+}
+
+/// RAII handle for the re-entrant, per-thread test palette lock; see [`lock_test_palette`].
+#[cfg(test)]
+pub(crate) struct TestPaletteGuard;
+
+#[cfg(test)]
+impl TestPaletteGuard {
+    fn acquire() -> Self {
+        palette_lock::acquire();
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestPaletteGuard {
+    fn drop(&mut self) {
+        palette_lock::release();
+    }
+}
+
+#[cfg(test)]
+mod palette_lock {
+    use std::cell::{Cell, RefCell};
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    static PALETTE: Mutex<()> = Mutex::new(());
+
+    thread_local! {
+        /// How many guards this thread holds; the OS lock is taken on 0→1 and released on 1→0.
+        static DEPTH: Cell<usize> = const { Cell::new(0) };
+        static GUARD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn acquire() {
+        DEPTH.with(|depth| {
+            if depth.get() == 0 {
+                GUARD.with(|guard| *guard.borrow_mut() = Some(PALETTE.lock().unwrap_or_else(PoisonError::into_inner)));
+            }
+            depth.set(depth.get() + 1);
+        });
+    }
+
+    pub(super) fn release() {
+        DEPTH.with(|depth| {
+            let left = depth.get().saturating_sub(1);
+            depth.set(left);
+            if left == 0 {
+                GUARD.with(|guard| *guard.borrow_mut() = None);
+            }
+        });
+    }
 }
 
 /// The Appearance setting (`ui.theme {mode}`). Dark by default; System and Light are opt-in.
@@ -414,6 +467,26 @@ mod tests {
     use super::*;
     use crate::{Services, SoundApp, UiState};
     use serde_json::json;
+
+    #[test]
+    fn test_palette_lock_is_reentrant_and_excludes_other_threads() {
+        // Regression for the parallel-run flakes: the process-wide palette must be owned for a
+        // whole test, re-entrant on the owning thread (so `SoundApp::new` can take it too), and
+        // exclusive against other threads (so a frame cannot flip it mid-test).
+        let outer = lock_test_palette();
+        let inner = lock_test_palette();
+        let app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _held = lock_test_palette();
+            let _ = tx.send(());
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_millis(100)).is_err(), "another thread must wait for the palette lock");
+        drop(inner);
+        drop(outer);
+        drop(app);
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(), "the palette lock must be released when every holder drops it");
+    }
 
     #[test]
     fn dark_is_the_default() {

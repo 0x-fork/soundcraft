@@ -5,7 +5,6 @@ use crate::theme::{Tokens, bold, mono, regular, rgb};
 use egui::{Align2, Color32, Rect, Sense, Stroke, Ui, pos2, vec2};
 use serde_json::json;
 use soundcraft_model::{ClipId, SourceId};
-use soundcraft_time::format_position;
 
 fn panel_header(ui: &mut Ui, title: &str) {
     let t = Tokens::current();
@@ -218,7 +217,7 @@ fn transport_window(app: &mut SoundApp, ctx: &egui::Context) {
             }
         });
         let s = app.engine.session();
-        let fmt = |x: i64| format_position(x, s.edit.main_counter, s.sample_rate, &s.tempo, s.frame_rate, s.timecode_start);
+        let fmt = |x: i64| s.format_position(x, s.edit.main_counter);
         if flags.contains("view.transport.counters") || expanded || flags.is_empty() {
             ui.label(egui::RichText::new(fmt(app.position())).font(mono(20.0)).color(t.counter_text));
         }
@@ -271,7 +270,7 @@ fn big_counter(app: &mut SoundApp, ctx: &egui::Context) {
     }
     egui::Window::new("Big Counter").open(&mut open).default_size(vec2(520.0, 110.0)).show(ctx, |ui| {
         let s = app.engine.session();
-        let txt = format_position(app.position(), s.edit.main_counter, s.sample_rate, &s.tempo, s.frame_rate, s.timecode_start);
+        let txt = s.format_position(app.position(), s.edit.main_counter);
         let r = ui.available_rect_before_wrap();
         let t = Tokens::current();
         ui.painter().rect_filled(r, 4.0, t.big_counter_bg);
@@ -291,7 +290,7 @@ pub(crate) fn memory_locations(app: &mut SoundApp, ui: &mut Ui) {
     });
     let rows: Vec<(u32, String, String, String, String)> = {
         let s = app.engine.session();
-        let f = |x: i64| format_position(x, s.edit.main_counter, s.sample_rate, &s.tempo, s.frame_rate, s.timecode_start);
+        let f = |x: i64| s.format_position(x, s.edit.main_counter);
         s.markers
             .iter()
             .map(|m| {
@@ -563,10 +562,16 @@ fn preset_menu(
             if let Ok(text) = std::fs::read_to_string(dir.join(format!("{n}.json")))
                 && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
             {
-                let _ = app.run(
-                    "mix.insert_params",
-                    json!({"track": tid.0, "slot": slot, "params": v.get("params").cloned().unwrap_or_default(), "preset": n}),
-                );
+                // Old presets may carry parameters the plugin no longer exposes; drop them so recall succeeds.
+                let params: serde_json::Map<String, serde_json::Value> = v
+                    .get("params")
+                    .and_then(serde_json::Value::as_object)
+                    .into_iter()
+                    .flatten()
+                    .filter(|(k, val)| info.params.iter().any(|pi| pi.id == k.as_str()) && val.as_f64().is_some_and(f64::is_finite))
+                    .map(|(k, val)| (k.clone(), val.clone()))
+                    .collect();
+                let _ = app.run("mix.insert_params", json!({"track": tid.0, "slot": slot, "params": params, "preset": n}));
             }
             ui.close();
         }

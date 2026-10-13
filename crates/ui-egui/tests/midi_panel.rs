@@ -150,3 +150,23 @@ fn check_held_replacement(operation: &str) {
     assert_eq!(serde_json::to_value(&app.ui.docking).unwrap(), reset);
     assert_eq!(*app.engine.session(), session);
 }
+
+#[test]
+fn a_selected_video_clip_is_not_a_midi_target() {
+    use soundcraft_model::{ChannelFormat, Clip, ClipContent, SourceId, Track, TrackKind};
+    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    app.run("edit.select", json!({"tracks": ["Keys"]})).unwrap();
+    let midi = midi_editor::target_clip(&app).unwrap();
+    let s = app.engine.session_mut();
+    let track = s.add_track(TrackKind::Video, ChannelFormat::Mono, None);
+    let video = s.new_clip_id();
+    let source = SourceId(s.alloc());
+    s.track_mut(track).and_then(Track::playlist_mut).unwrap().clips.push(Clip::video(video, "picture", source, 0, 0, 48_000));
+
+    app.run("edit.select", json!({"clips": [video.0]})).unwrap();
+    assert_eq!(midi_editor::target_clip(&app), None, "a video clip alone leaves the MIDI editors without a target");
+    app.run("edit.select", json!({"clips": [video.0, midi.0]})).unwrap();
+    assert_eq!(midi_editor::target_clip(&app), Some(midi), "the MIDI clip after a video clip is the target");
+    let (_, clip) = app.engine.session().find_clip(midi).unwrap();
+    assert!(matches!(clip.content, ClipContent::Midi { .. }));
+}
