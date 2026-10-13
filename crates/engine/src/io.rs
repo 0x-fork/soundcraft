@@ -387,18 +387,27 @@ pub fn strip_silence(s: &mut Session, t: TrackId, r: Range, thr: f32, min_len: S
     keep.len()
 }
 
-/// Consolidate the selection on a track into one new clip backed by a rendered source.
-pub fn consolidate(e: &mut Engine, t: TrackId, r: Range) -> Result<bool> {
+/// Consolidate `r` on a track into one new clip backed by a rendered source. The clip covers the
+/// whole range, silence included; a range too long to render is refused rather than shortened.
+pub fn consolidate(e: &mut Engine, cmd: &str, t: TrackId, r: Range) -> Result<bool> {
     let s = e.session();
-    if s.track(t).is_none_or(|tr| !tr.kind.has_playlist() || tr.kind.is_midi()) {
+    let Some(tr) = s.track(t).filter(|tr| tr.kind.has_playlist() && !tr.kind.is_midi()) else { return Ok(false) };
+    let start = r.start.max(0);
+    let len = r.end.saturating_sub(start);
+    if len <= 0 {
         return Ok(false);
     }
-    let r = bounded_to_track(s, t, r);
-    if r.is_empty() {
-        return Ok(false);
+    let max = soundcraft_mix::MAX_RENDER_SAMPLES / tr.channels().max(1);
+    if usize::try_from(len).map_or(true, |n| n > max) {
+        let secs = max as f64 / s.sample_rate.as_f64();
+        return Err(crate::cmd::bad(cmd, format!("selection is too long to consolidate on `{}` (at most {secs:.0} s)", tr.name)));
     }
+    let r = Range::new(start, start + len);
     let audio = soundcraft_mix::render_clips(s, t, r);
-    let name = format!("{}_consolidated", s.track(t).map_or("Audio", |x| x.name.as_str()));
+    if audio.iter().any(|ch| ch.len() as i64 != len) {
+        return Err(EngineError::Internal(cmd.to_string(), "consolidate rendered the wrong length".into()));
+    }
+    let name = format!("{}_consolidated", tr.name);
     let buf = AudioBuffer { sample_rate: s.sample_rate.hz(), channels: audio };
     let s = e.session_mut();
     let src = add_source(s, &name, buf, None, FileFormat::Wav);
