@@ -18,6 +18,7 @@ pub mod mix_window;
 pub mod ops_windows;
 pub mod palette;
 pub mod panels;
+pub mod recovery;
 pub mod score_editor;
 pub mod shortcuts;
 pub mod theme;
@@ -30,7 +31,8 @@ pub mod windows;
 use serde_json::{Value, json};
 use soundcraft_engine::{Engine, TransportRequest};
 use soundcraft_model::TrackId;
-use soundcraft_playback::Player;
+use soundcraft_playback::record::Trouble;
+use soundcraft_playback::{OutputTrouble, Player};
 use soundcraft_time::{Range, Samples};
 use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
@@ -232,6 +234,10 @@ pub struct SoundApp {
     /// Punch range to trim the take to (pre/post-roll recordings).
     punch: Option<Range>,
     recorder_failed: bool,
+    /// Input this take lost to a slow disk, as last reported (ms).
+    lost_shown: u64,
+    /// Where the takes being recorded go, autosaved with the session so a crash can't lose them.
+    take_plan: Option<soundcraft_engine::io::Recording>,
     pub ui: UiState,
     pub audio_health_report: Option<Result<Value, String>>,
     pub services: Services,
@@ -239,6 +245,14 @@ pub struct SoundApp {
     pub native_menu_bar: bool,
     /// Folder for crash-recovery autosaves (native apps set it).
     pub autosave_dir: Option<std::path::PathBuf>,
+    /// Writes the open session's autosaves in the background, once there is something to write.
+    autosaver: Option<soundcraft_engine::autosave::Autosaver>,
+    /// The document revision last handed to the autosaver (0 once that autosave is stale).
+    autosaved_rev: u64,
+    /// Unsaved work that earlier runs left in the autosave folder, offered for recovery.
+    pub leftovers: Vec<soundcraft_engine::autosave::Leftover>,
+    /// The document revision last autosaved after a caught panic.
+    panic_rev: u64,
     /// Folder for user plugin presets (native apps set it).
     pub preset_dir: Option<std::path::PathBuf>,
     last_autosave: Option<std::time::Instant>,
@@ -305,11 +319,17 @@ impl SoundApp {
             record_start: 0,
             punch: None,
             recorder_failed: false,
+            lost_shown: 0,
+            take_plan: None,
             ui: UiState::default(),
             audio_health_report: None,
             services,
             native_menu_bar: false,
             autosave_dir: None,
+            autosaver: None,
+            autosaved_rev: 0,
+            leftovers: Vec::new(),
+            panic_rev: 0,
             preset_dir: None,
             last_autosave: None,
             dialogs: dialogs::Dialogs::default(),
@@ -360,8 +380,12 @@ impl SoundApp {
             // Third-party plugins keep state the session can't see: store it first.
             self.capture_plugin_states();
         }
+        let replacing = matches!(id, "session.new" | "session.open" | "session.close" | "session.revert");
         match self.engine.execute(id, &params) {
             Ok(v) => {
+                if replacing || (id.starts_with("session.save") && !self.engine.is_dirty()) {
+                    self.release_autosave(false);
+                }
                 if id == "app.quit" {
                     self.quit_requested = true;
                 }
@@ -470,10 +494,14 @@ impl SoundApp {
             return;
         }
         self.ensure_input();
-        if let Err(err) = self.arm_recorder() {
-            self.ui.status = format!("Cannot record: {err}");
-            return;
-        }
+        let takes = match self.arm_recorder() {
+            Ok(takes) => takes,
+            Err(err) => {
+                self.ui.status = format!("Cannot record: {err}");
+                return;
+            }
+        };
+        self.lost_shown = 0;
         if let Some(p) = &self.player {
             p.set_recording(true);
         }
@@ -483,6 +511,7 @@ impl SoundApp {
             // Punch in on the fly at the current playhead.
             self.record_start = self.position();
             self.punch = None;
+            self.plan_recording(takes, None);
             return;
         }
         let e = self.engine.session().edit.clone();
@@ -491,6 +520,7 @@ impl SoundApp {
             self.record_start = sel.start;
             self.punch = None;
             self.start_play(sel.start, None, Some(sel));
+            self.plan_recording(takes, Some(sel.len()));
         } else {
             // Record into the selection when there is one (punch), with pre/post-roll if enabled;
             // the take is trimmed back to the punch range afterwards.
@@ -500,12 +530,23 @@ impl SoundApp {
             self.punch = (!sel.is_empty()).then_some(sel);
             let end = (!sel.is_empty()).then_some(sel.end + post);
             self.start_play(from, end, None);
+            self.plan_recording(takes, None);
+        }
+    }
+
+    /// Remember where the armed `takes` go (split into passes of `pass` when loop recording) and
+    /// autosave that plan with the session.
+    fn plan_recording(&mut self, takes: Vec<soundcraft_engine::io::Take>, pass: Option<Samples>) {
+        let rate = self.recorder.as_ref().map_or(0, |r| r.sample_rate);
+        self.take_plan = Some(soundcraft_engine::io::Recording { start: self.record_start, pass, punch: self.punch, rate, takes });
+        if let Some(root) = self.autosave_dir.clone() {
+            self.queue_autosave(root);
         }
     }
 
     /// Arm the input for the record-enabled tracks; a session never saved records into its
-    /// autosave folder.
-    fn arm_recorder(&mut self) -> Result<(), String> {
+    /// autosave folder. Returns the takes it records.
+    fn arm_recorder(&mut self) -> Result<Vec<soundcraft_engine::io::Take>, String> {
         let name = soundcraft_engine::io::sanitize_name(&self.engine.session().name);
         let unsaved_dir = self.autosave_dir.as_ref().map_or_else(std::env::temp_dir, |d| d.join(name));
         let Some(r) = &mut self.recorder else { return Err("no audio input device".into()) };
@@ -513,7 +554,12 @@ impl SoundApp {
         if plan.is_empty() {
             return Err("no audio track is record-enabled".into());
         }
-        r.arm(plan)
+        let takes = plan
+            .iter()
+            .map(|(track, inputs, path)| soundcraft_engine::io::Take { track: *track, path: path.clone(), channels: inputs.len() })
+            .collect();
+        r.arm(plan)?;
+        Ok(takes)
     }
 
     /// Reads every live third-party plugin's state from the audio engine and stores it on its
@@ -551,14 +597,108 @@ impl SoundApp {
         }
         self.last_autosave = Some(std::time::Instant::now());
         self.capture_plugin_states();
-        let name = soundcraft_engine::io::sanitize_name(&self.engine.session().name);
-        let path = dir.join(&name).join(format!("{name}.scraft"));
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        self.autosave_to(&dir);
+    }
+
+    /// Autosave a modified session within a second of every change, also while recording. The
+    /// plugins' own state reaches the session every two minutes (`autosave`).
+    fn autosave_changes(&mut self) {
+        if let Some(e) = self.autosaver.as_ref().and_then(soundcraft_engine::autosave::Autosaver::failure) {
+            self.ui.status = format!("Autosave failed: {e}");
         }
-        match soundcraft_engine::io::save_copy(&self.engine, &path.to_string_lossy()) {
-            Ok(_) => log::info!("autosaved to {}", path.display()),
-            Err(e) => log::warn!("autosave failed: {e}"),
+        if self.autosave_dir.is_none() || self.engine.revision == self.autosaved_rev {
+            return;
+        }
+        self.autosaved_rev = self.engine.revision;
+        if !self.engine.is_dirty() {
+            self.release_autosave(false);
+        } else if let Some(root) = self.autosave_dir.clone() {
+            self.queue_autosave(root);
+        }
+    }
+
+    /// Hand the session to the autosaver for its folder under `root`.
+    fn queue_autosave(&mut self, root: std::path::PathBuf) {
+        self.autosaved_rev = self.engine.revision;
+        let w = self.autosaver.get_or_insert_with(|| soundcraft_engine::autosave::Autosaver::new(root));
+        w.write(self.engine.session_arc(), self.engine.path.clone(), self.take_plan.clone());
+    }
+
+    /// Write the session to its own folder under `root` and wait for it; false when that failed.
+    fn autosave_to(&mut self, root: &std::path::Path) -> bool {
+        self.queue_autosave(root.to_path_buf());
+        let Some(w) = &self.autosaver else { return false };
+        let written = w.flush();
+        if let Err(e) = &written {
+            self.ui.status = format!("Autosave failed: {e}");
+        }
+        written.is_ok()
+    }
+
+    /// Autosave now, if the app has an autosave folder.
+    fn write_autosave(&mut self) -> bool {
+        self.autosave_dir.clone().is_some_and(|root| self.autosave_to(&root))
+    }
+
+    /// Done with this session's autosave folder: keep it for the next launch, or delete it.
+    fn release_autosave(&mut self, keep: bool) {
+        if let Some(w) = &self.autosaver {
+            w.close(keep);
+        }
+    }
+
+    /// Done with the open session. Unsaved changes stay in its autosave folder for the next
+    /// launch, unless the user quit with SoundCraft's Quit; a take still recording is finished
+    /// and always stays.
+    pub fn close_autosave(&mut self) {
+        let recording = self.engine.transport.recording;
+        if recording {
+            self.stop_play();
+        }
+        let keep = self.engine.is_dirty() && (recording || !self.quit_requested);
+        if keep {
+            self.capture_plugin_states();
+            self.write_autosave();
+        }
+        self.release_autosave(keep);
+        if let Some(w) = &self.autosaver {
+            let _ = w.flush();
+        }
+    }
+
+    /// Run part of a frame. If it panics, the session is autosaved (once per change) and the app
+    /// carries on instead of quitting.
+    pub fn guarded(&mut self, f: impl FnOnce(&mut SoundApp)) {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self))).is_ok() || self.panic_rev == self.engine.revision {
+            return;
+        }
+        self.panic_rev = self.engine.revision;
+        let saved = self.engine.is_dirty() && self.write_autosave();
+        self.ui.status = if saved {
+            "SoundCraft hit an internal error (see the log). Your changes were autosaved: save them, then restart SoundCraft.".into()
+        } else {
+            "SoundCraft hit an internal error (see the log). Restart SoundCraft to be safe.".into()
+        };
+    }
+
+    /// Replace the open session with unsaved work an earlier run left behind.
+    pub fn recover(&mut self, left: &soundcraft_engine::autosave::Leftover) {
+        if self.engine.transport.recording {
+            self.ui.status = "Stop recording before recovering other work.".into();
+            return;
+        }
+        self.close_autosave();
+        match soundcraft_engine::autosave::recover(&mut self.engine, left) {
+            Ok(missing) => {
+                if self.write_autosave() {
+                    soundcraft_engine::autosave::discard(left);
+                }
+                self.ui.status = match missing.len() {
+                    0 => format!("Recovered “{}”. Save it to keep the changes.", left.name),
+                    n => format!("Recovered “{}”, but {n} audio file(s) are missing. Save it to keep the changes.", left.name),
+                };
+            }
+            Err(e) => self.ui.status = format!("Couldn't recover “{}”: {e}", left.name),
         }
     }
 
@@ -605,28 +745,96 @@ impl SoundApp {
         }
     }
 
+    /// Stop the transport, keeping a take in progress, when the audio output fails.
+    fn watch_output(&mut self) {
+        let Some(p) = &self.player else { return };
+        let Some(trouble) = p.trouble() else { return };
+        let name = p.device_name.clone();
+        let (cause, then) = match trouble {
+            OutputTrouble::Bug => (
+                "the audio engine hit an internal error (see the log)".to_string(),
+                "Use Reconnect audio device in Setup ▸ Playback Engine, or restart SoundCraft.",
+            ),
+            OutputTrouble::Gone => {
+                (format!("“{name}” was disconnected"), "Plug it back in, then use Reconnect audio device in Setup ▸ Playback Engine.")
+            }
+            OutputTrouble::Stalled => (format!("“{name}” stopped asking for audio"), "Use Reconnect audio device in Setup ▸ Playback Engine."),
+        };
+        let (recording, playing) = (self.engine.transport.recording, self.engine.transport.playing);
+        if recording || playing {
+            self.stop_play();
+        }
+        self.ui.status = if recording {
+            format!("Recording stopped: {cause}. The take is kept up to there. {then}")
+        } else if playing {
+            format!("Playback stopped: {cause}. {then}")
+        } else {
+            format!("Audio output: {cause}. {then}")
+        };
+    }
+
+    /// Stop recording, keeping the take, when the input device or the disk fails, and say as soon
+    /// as a slow disk loses input.
+    fn watch_input(&mut self) {
+        let recording = self.engine.transport.recording;
+        let Some(r) = &mut self.recorder else { return };
+        let Some(trouble) = r.trouble() else {
+            let lost = r.lost_ms();
+            if recording && lost > self.lost_shown {
+                self.lost_shown = lost;
+                self.ui.status = format!("The disk is too slow: this take has lost {lost} ms of input so far.");
+            }
+            return;
+        };
+        if recording {
+            self.stop_play();
+        }
+        let (what, then) = match trouble {
+            Trouble::Device(what) => {
+                self.recorder = None;
+                self.recorder_failed = true;
+                (what, "Reconnect it, then use Reconnect audio device in Setup ▸ Playback Engine.")
+            }
+            Trouble::Disk(what) => (what, "Check the disk, then record again."),
+        };
+        self.ui.status = if recording {
+            format!("Recording stopped: {what}. The take is kept up to there. {then}")
+        } else {
+            format!("Audio input: {what}. {then}")
+        };
+    }
+
+    /// Reopen the audio devices, keeping a take in progress.
+    pub fn reconnect_audio(&mut self) {
+        if self.is_playing() || self.engine.transport.recording {
+            self.stop_play();
+        }
+        self.recorder = None;
+        self.recorder_failed = false;
+        self.player = Some(Player::new(self.engine.session_arc()));
+    }
+
     fn finish_recording(&mut self) {
         self.engine.transport.recording = false;
         if let Some(p) = &self.player {
             p.set_recording(false);
         }
+        let plan = self.take_plan.take();
         let Some(r) = &mut self.recorder else { return };
         let (takes, problem) = r.finish();
         let tracks = takes.len().max(1);
-        let sel = self.engine.session().edit.selection;
-        let looped = self.engine.session().edit.loop_record && !sel.is_empty();
-        let (start, pass) = if looped { (sel.start, Some(sel.len())) } else { (self.record_start, None) };
-        let ids = soundcraft_engine::io::add_recording(&mut self.engine, start, takes, pass);
-        if let Some(p) = self.punch.take() {
-            // Keep only the punch range of each new take (merged into the Record undo step).
-            let clip_ids: Vec<u64> = ids.iter().map(|c| c.0).collect();
-            let _ = self.engine.execute_merged(
-                "edit.trim_to_fill_selection",
-                &serde_json::json!({"clips": clip_ids, "start": p.start, "end": p.end}),
-                "record",
-            );
-        }
-        self.ui.status = if looped { format!("Loop-recorded {} take(s)", ids.len() / tracks) } else { format!("Recorded {} clip(s)", ids.len()) };
+        let plan = plan.unwrap_or_else(|| soundcraft_engine::io::Recording {
+            start: self.record_start,
+            pass: None,
+            punch: self.punch,
+            rate: 0,
+            takes: Vec::new(),
+        });
+        self.punch = None;
+        self.autosaved_rev = 0;
+        let ids = soundcraft_engine::io::place_recording(&mut self.engine, &plan, takes);
+        self.ui.status =
+            if plan.pass.is_some() { format!("Loop-recorded {} take(s)", ids.len() / tracks) } else { format!("Recorded {} clip(s)", ids.len()) };
         if let Some(p) = problem {
             log::warn!("recording: {p}");
             self.ui.status = format!("{} ({p})", self.ui.status);
@@ -856,6 +1064,8 @@ impl SoundApp {
                 self.engine.end_merge();
             }
         }
+        self.watch_output();
+        self.watch_input();
         // Stop the old playback before sending a replacement session to the audio thread.
         self.handle_transport(dt);
         if self.engine.revision != self.last_rev {
@@ -864,6 +1074,7 @@ impl SoundApp {
                 p.update_session(self.engine.session_arc());
             }
         }
+        self.autosave_changes();
         self.write_automation(ctx);
         self.autosave();
         if self.recorder.is_none()
@@ -938,6 +1149,7 @@ impl SoundApp {
         video_window::show(self, &ctx);
         ops_windows::show(self, &ctx);
         extra_windows::show(self, &ctx);
+        recovery::show(self, &ctx);
         score_editor::show(self, &ctx);
         palette::show(self, &ctx);
         dialogs::show(self, &ctx);
