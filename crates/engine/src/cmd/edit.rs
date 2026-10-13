@@ -910,18 +910,20 @@ fn consolidate(e: &mut Engine, p: &Value) -> Result<Value> {
     if r.is_empty() {
         return Err(bad("edit.consolidate", "selection is empty"));
     }
+    let midi = tracks.iter().filter(|&&t| crate::edit::consolidate_midi(e.session_mut(), t, r)).count();
     let mut n = 0;
     for t in tracks {
         if crate::io::consolidate(e, "edit.consolidate", t, r)? {
             n += 1;
         }
     }
-    Ok(json!({"consolidated": n}))
+    Ok(json!({"consolidated": n + midi}))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soundcraft_model::{ChannelFormat, Clip, ClipContent, TrackId, TrackKind};
 
     #[test]
     fn selecting_what_is_already_selected_leaves_the_document_alone() {
@@ -934,6 +936,51 @@ mod tests {
         assert_eq!(e.revision, rev);
         e.execute("edit.select", &json!({"tracks": [ids[0]], "start": 100, "end": 300})).unwrap();
         assert_ne!(e.revision, rev);
+    }
+
+    fn keys() -> (Engine, TrackId, impl Fn(i64) -> i64) {
+        let mut e = Engine::default();
+        let t = e.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Keys"));
+        let (tempo, sr) = (e.session().tempo.clone(), e.session().sample_rate);
+        (e, t, move |q| tempo.tick_to_samples(q * soundcraft_time::TICKS_PER_QUARTER, sr))
+    }
+
+    fn note(start: i64, length: i64, pitch: u8) -> soundcraft_midi::Note {
+        let q = soundcraft_time::TICKS_PER_QUARTER;
+        soundcraft_midi::Note { pitch, velocity: 100, release_velocity: 64, channel: 0, start: start * q, length: length * q }
+    }
+
+    #[test]
+    fn consolidating_an_empty_midi_selection_makes_an_empty_clip() {
+        let (mut e, t, at) = keys();
+        e.execute("edit.select", &json!({"tracks": [t.0], "start": at(4), "end": at(12)})).unwrap();
+        assert_eq!(e.execute("edit.consolidate", &json!({})).unwrap()["consolidated"], 1);
+        let clips = e.session().track(t).unwrap().clips().to_vec();
+        assert_eq!(clips.iter().map(|c| (c.start, c.end())).collect::<Vec<_>>(), vec![(at(4), at(12))]);
+        assert!(matches!(&clips[0].content, ClipContent::Midi { sequence } if sequence.notes.is_empty()));
+    }
+
+    #[test]
+    fn consolidating_midi_merges_the_clips_as_they_sound() {
+        let (mut e, t, at) = keys();
+        let s = e.session_mut();
+        let cc = soundcraft_midi::CtrlEvent { tick: 0, channel: 0, kind: soundcraft_midi::CtrlKind::Cc(1), value: 64 };
+        let a = soundcraft_midi::Sequence { notes: vec![note(0, 1, 60), note(3, 2, 62), note(5, 1, 63)], ctrls: vec![] };
+        let b = soundcraft_midi::Sequence { notes: vec![note(0, 1, 64)], ctrls: vec![] };
+        let c = soundcraft_midi::Sequence { notes: vec![note(1, 1, 65)], ctrls: vec![cc] };
+        for (start, end, seq, muted) in [(0, 4, a, false), (6, 8, b, true), (8, 12, c, false)] {
+            let id = s.new_clip_id();
+            let mut clip = Clip::midi(id, "Keys", at(start), at(end) - at(start), seq);
+            clip.muted = muted;
+            ops::place_clip(s, t, clip);
+        }
+        e.execute("edit.select", &json!({"tracks": [t.0], "start": at(2), "end": at(10)})).unwrap();
+        e.execute("edit.consolidate", &json!({})).unwrap();
+        let clips = e.session().track(t).unwrap().clips().to_vec();
+        assert_eq!(clips.iter().map(|c| (c.start, c.end())).collect::<Vec<_>>(), vec![(0, at(2)), (at(2), at(10)), (at(10), at(12))]);
+        let ClipContent::Midi { sequence } = &clips[1].content else { panic!("not MIDI") };
+        assert_eq!(sequence.notes, vec![note(1, 1, 62), note(7, 1, 65)]);
+        assert_eq!(sequence.ctrls, vec![soundcraft_midi::CtrlEvent { tick: 6 * soundcraft_time::TICKS_PER_QUARTER, ..cc }]);
     }
 
     /// A 60,000-frame source with `clips` placed on one track as (start, length, source offset).
