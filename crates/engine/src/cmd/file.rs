@@ -66,7 +66,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("file.import_midi", "MIDI...", ["File", "Import"], Some("Cmd+Alt+I"), "{path, at?}", always, |e, p| {
             let path = str_param(p, "path").ok_or_else(|| bad("file.import_midi", "`path` required"))?.to_string();
             let at = position_param(e, "file.import_midi", p, "at")?.unwrap_or(0);
-            let bytes = std::fs::read(&path).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+            let bytes = crate::io::read_file(&path)?;
             let tracks = crate::io::import_midi_bytes(e, &bytes, at, bool_or(p, "tempo_map", true))?;
             Ok(json!({"tracks": tracks}))
         }),
@@ -80,7 +80,7 @@ pub fn specs() -> Vec<CommandSpec> {
             |e, p| {
                 let path = str_param(p, "path").ok_or_else(|| bad("file.import_video", "`path` required"))?.to_string();
                 let at = position_param(e, "file.import_video", p, "at")?.unwrap_or(0).max(0);
-                let bytes = std::fs::read(&path).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+                let bytes = crate::io::read_file(&path)?;
                 crate::io::import_video_bytes(e, &path, bytes, at)
             }
         ),
@@ -198,6 +198,8 @@ pub fn specs() -> Vec<CommandSpec> {
 
 /// Writing a session over an existing file needs `replace: true` (see `io::replaces`).
 fn refuse_replacing(e: &Engine, id: &str, file: &std::path::Path, p: &Value) -> Result<()> {
+    // First, so a path outside the write root is refused as such and never reported as existing.
+    crate::file_access::check_write(file).map_err(EngineError::Io)?;
     if crate::io::replaces(e, id, file) && !bool_or(p, "replace", false) {
         return Err(bad(id, format!("{} already exists: pass `replace: true` to replace it", file.display())));
     }
@@ -235,7 +237,7 @@ fn import_audio(e: &mut Engine, p: &Value) -> Result<Value> {
     let target = import_audio_target(e, p)?;
     let mut out = Vec::new();
     for path in &paths {
-        let bytes = std::fs::read(path).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+        let bytes = crate::io::read_file(path)?;
         let name = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("Audio").to_string();
         let r = crate::io::import_audio_bytes(e, &name, &bytes, Some(path.as_str()), target, at)?;
         out.push(r);
