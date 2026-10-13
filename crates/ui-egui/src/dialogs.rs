@@ -15,6 +15,7 @@ pub enum Dialog {
     Bounce { path: String, format: String, bit_depth: String, normalize: bool },
     RenameTrack { id: TrackId, name: String },
     RenameClip { id: ClipId, name: String },
+    RenameMarker { id: soundcraft_model::MarkerId, name: String },
     ClearClips { clips: Vec<ClipId>, sources: Vec<SourceId>, message: String },
     PathPrompt { cmd: String, title: String, path: String, key: String },
     Number { cmd: String, title: String, key: String, value: f64, suffix: String },
@@ -42,6 +43,7 @@ impl Dialogs {
             Dialog::Bounce { .. } => "bounce",
             Dialog::RenameTrack { .. } => "rename_track",
             Dialog::RenameClip { .. } => "rename_clip",
+            Dialog::RenameMarker { .. } => "rename_marker",
             Dialog::ClearClips { .. } => "clear_clips",
             Dialog::PathPrompt { .. } => "path",
             Dialog::Number { .. } => "number",
@@ -61,6 +63,10 @@ impl Dialogs {
 
     pub fn open_rename_clip(&mut self, id: ClipId, name: &str) {
         self.open = Some(Dialog::RenameClip { id, name: name.to_string() });
+    }
+
+    pub fn open_rename_marker(&mut self, id: soundcraft_model::MarkerId, name: &str) {
+        self.open = Some(Dialog::RenameMarker { id, name: name.to_string() });
     }
 
     /// Clip List › Clear: confirm before clips and files leave the session. False when there is nothing to clear.
@@ -267,6 +273,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         Dialog::Bounce { .. } => "Bounce Mix",
         Dialog::RenameTrack { .. } => "Rename Track",
         Dialog::RenameClip { .. } => "Rename Clip",
+        Dialog::RenameMarker { .. } => "Rename Marker",
         Dialog::ClearClips { .. } => "Clear",
         Dialog::PathPrompt { title, .. } | Dialog::Number { title, .. } => title.as_str(),
         Dialog::TempoChange { .. } => "Tempo Change (BPM)",
@@ -395,6 +402,12 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     name_field(ui, name);
                     if buttons(ui, "OK", enter) {
                         action = Some(("clip.rename".into(), json!({"clip": id.0, "name": name})));
+                    }
+                }
+                Dialog::RenameMarker { id, name } => {
+                    name_field(ui, name);
+                    if buttons(ui, "OK", enter) {
+                        action = Some(("markers.edit".into(), json!({"id": id.0, "rename": name})));
                     }
                 }
                 Dialog::ClearClips { clips, sources, message } => {
