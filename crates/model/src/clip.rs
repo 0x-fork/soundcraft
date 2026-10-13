@@ -1,8 +1,8 @@
 //! Clips: windows onto audio sources or MIDI sequences, placed on a playlist.
 
-use crate::{ClipId, SourceId};
+use crate::{ClipId, MAX_NAME_CHARS, SourceId, truncate_chars};
 use soundcraft_midi::Sequence;
-use soundcraft_time::{Range, Samples};
+use soundcraft_time::{MAX_POSITION, Range, Samples};
 
 /// Fade curve shapes (Pro Tools offers standard, equal-power, S-curve and custom presets).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
@@ -252,6 +252,39 @@ impl Clip {
             self.sync_point = 0;
         }
     }
+
+    /// Repair a clip read from a file: positions and lengths within ±[`MAX_POSITION`], as commands
+    /// keep theirs, fades within the clip, a name that can be drawn, and a usable gain and stretch.
+    pub fn sanitize(&mut self) {
+        bound(&mut self.start);
+        self.length = self.length.clamp(1, MAX_POSITION);
+        bound(&mut self.sync_point);
+        self.gain_env.iter_mut().for_each(|(at, _)| bound(at));
+        match &mut self.content {
+            ClipContent::Audio { offset, .. } | ClipContent::Video { offset, .. } => bound(offset),
+            ClipContent::Midi { sequence } => bound_sequence(sequence),
+        }
+        self.clamp_fades();
+        truncate_chars(&mut self.name, MAX_NAME_CHARS);
+        if !self.gain_db.is_finite() {
+            self.gain_db = 0.0;
+        }
+        if !self.stretch.is_finite() || self.stretch <= 0.0 {
+            self.stretch = 1.0;
+        }
+    }
+}
+
+pub(crate) fn bound(at: &mut Samples) {
+    *at = (*at).clamp(-MAX_POSITION, MAX_POSITION);
+}
+
+pub(crate) fn bound_sequence(s: &mut Sequence) {
+    for n in &mut s.notes {
+        bound(&mut n.start);
+        n.length = n.length.clamp(1, MAX_POSITION);
+    }
+    s.ctrls.iter_mut().for_each(|c| bound(&mut c.tick));
 }
 
 fn env_value(env: &[(Samples, f32)], at: Samples) -> f32 {
