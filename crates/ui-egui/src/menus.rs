@@ -26,23 +26,23 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.close", "Close Window", "Window > Close Window", Some("Cmd+W")),
     ("window.hide_floating", "Hide All Floating Windows", "Window > Hide All Floating Windows", Some("Cmd+Ctrl+W")),
     ("window.midi_editor", "MIDI Editor", "Window > MIDI Editor", None),
-    ("window.universe", "Universe", "View > Other Displays > Universe", None),
+    ("window.universe", "Universe", "View > Other Displays > Universe", Some("Alt+7")),
     ("window.video", "Video", "Window > Video", Some("Cmd+9")),
     ("window.video_universe", "Video Universe", "Window > Video Universe", None),
     ("window.automation", "Automation", "Window > Automation", Some("Cmd+4")),
     ("window.color_palette", "Color Palette", "Window > Color Palette", None),
     ("window.disk_usage", "Disk Usage", "Window > Disk Usage", None),
     ("window.system_usage", "System Usage", "Window > System Usage", None),
-    ("window.task_manager", "Task Manager", "Window > Task Manager", None),
+    ("window.task_manager", "Task Manager", "Window > Task Manager", Some("Alt+'")),
     ("window.metadata", "Metadata Inspector", "Window > Metadata Inspector", None),
-    ("window.event_list", "MIDI Event List", "Window > MIDI Event List", None),
-    ("window.midi_keyboard", "MIDI Keyboard", "Window > MIDI Keyboard", None),
-    ("window.workspace", "Workspace", "Window > New Workspace > Default", None),
+    ("window.event_list", "MIDI Event List", "Window > MIDI Event List", Some("Alt+=")),
+    ("window.midi_keyboard", "MIDI Keyboard", "Window > MIDI Keyboard", Some("Shift+K")),
+    ("window.workspace", "Workspace", "Window > New Workspace > Default", Some("Alt+I")),
     ("window.workspace_presets", "Workspace", "Window > New Workspace > Track Presets", None),
     ("window.workspace_sounds", "Workspace", "Window > New Workspace > Soundbase", None),
-    ("window.workspace_front", "Workspaces to Front", "Window > Workspaces > Bring to Front", None),
+    ("window.workspace_front", "Workspaces to Front", "Window > Workspaces > Bring to Front", Some("Alt+J")),
     ("window.workspace_close", "Close All Workspaces", "Window > Workspaces > Close All Workspaces", None),
-    ("window.configurations", "Window Configuration List", "Window > Configurations > Window Configuration List", None),
+    ("window.configurations", "Window Configuration List", "Window > Configurations > Window Configuration List", Some("Cmd+Alt+J")),
     ("window.config_new", "New Configuration", "Window > Configurations > New Configuration...", None),
     ("window.config_update", "Update Active Configuration", "Window > Configurations > Update Active Configuration", None),
     ("window.config_auto_update", "Auto-Update Active Configuration", "Window > Configurations > Auto-Update Active Configuration", None),
@@ -55,7 +55,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.midi_front", "MIDI Editors to Front", "Window > MIDI Editors > Bring to Front", None),
     ("window.midi_back", "MIDI Editors to Back", "Window > MIDI Editors > Send to Back", None),
     ("window.clip_effects", "Clip Effects", "Window > Clip Effects", None),
-    ("window.clip_effects_dock", "Clip Effects", "View > Other Displays > Lower Dock > Clip Effects", None),
+    ("window.clip_effects_dock", "Clip Effects", "View > Other Displays > Lower Dock > Clip Effects", Some("Alt+6")),
     ("window.search", "Search", "Window > Pro Tools Search", Some("Cmd+Ctrl+S")),
     ("window.score", "Score Editor", "Window > Score Editor", Some("Cmd+Ctrl+=")),
     ("window.beat_detective", "Beat Detective", "", None),
@@ -145,12 +145,14 @@ pub const AUDIOSUITE: &[(&str, &str)] = &[
 
 /// Commands that open a dialog when invoked from a menu (programmatic calls never do).
 const DIALOG_COMMANDS: &[&str] = &[
+    "clip.clear",
     "track.new",
     "file.bounce_mix",
     "session.new",
     "file.import_audio",
     "file.import_midi",
     "session.open",
+    "session.save",
     "session.save_as",
     "session.save_copy",
     "track.group",
@@ -161,6 +163,7 @@ const DIALOG_COMMANDS: &[&str] = &[
     "event.quantize",
     "event.transpose",
     "edit.strip_silence",
+    "clip.rename",
 ];
 
 /// Shared menu hierarchy for egui and native desktop hosts.
@@ -197,6 +200,12 @@ pub fn tree() -> Vec<MenuNode> {
         insert_path(&mut roots, line);
     }
     insert_path(&mut roots, "Window > Reset Panel Layout");
+    // Not in the incumbent catalog, but the only UI path to an empty MIDI clip (#282).
+    // It creates a clip rather than acting on the selected ones, so it leads the Clip menu.
+    insert_path(&mut roots, "Clip > New MIDI Clip");
+    if let Some(clip) = roots.iter_mut().find(|n| n.label == "Clip") {
+        clip.children.rotate_right(1);
+    }
     for (path, _) in MENU_WINDOWS {
         insert_path(&mut roots, path);
     }
@@ -221,7 +230,7 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                     }
                     ui.separator();
                     if ui.button("Quit").clicked() {
-                        let _ = app.run("app.quit", json!({}));
+                        let _ = crate::dialogs::run_or_ask(app, "app.quit", json!({}));
                     }
                 });
                 let extra = ui_aliases();
@@ -261,8 +270,9 @@ fn menu_node(app: &mut SoundApp, ui: &mut egui::Ui, n: &MenuNode, extra: &[(&str
     }
     let id = command_for_path(&n.path, extra);
     let (enabled, checked) = item_state(app, &n.path, id.as_deref());
-    let label = if checked { format!("✔ {}", n.label) } else { n.label.clone() };
-    let shortcut = id.as_deref().and_then(soundcraft_engine::find_command).and_then(|c| c.shortcut).unwrap_or("");
+    let label = live_label(app, id.as_deref()).unwrap_or_else(|| n.label.clone());
+    let label = if checked { format!("✔ {label}") } else { label };
+    let shortcut = id.as_deref().and_then(shortcut_for).unwrap_or("");
     let btn = egui::Button::new(label).shortcut_text(crate::shortcuts::shortcut_label(shortcut, ui.ctx().os().is_mac()));
     if ui.add_enabled(enabled, btn).clicked()
         && let Some(id) = id
@@ -393,6 +403,21 @@ const MENU_WINDOWS: &[(&str, &str)] = &[
     ("Event > MIDI Real-Time Properties", "window.rtp"),
 ];
 
+/// The shortcut of an engine or window command.
+pub fn shortcut_for(id: &str) -> Option<&'static str> {
+    soundcraft_engine::find_command(id).map_or_else(|| UI_COMMANDS.iter().find(|c| c.0 == id).and_then(|c| c.3), |c| c.shortcut)
+}
+
+/// Undo and Redo name the step they would undo or redo; other items keep their catalog label.
+pub fn live_label(app: &SoundApp, id: Option<&str>) -> Option<String> {
+    let e = &app.engine;
+    match id? {
+        "edit.undo" => Some(e.undo_label().map_or_else(|| "Can't Undo".into(), |l| format!("Undo {l}"))),
+        "edit.redo" => Some(e.redo_label().map_or_else(|| "Can't Redo".into(), |l| format!("Redo {l}"))),
+        _ => None,
+    }
+}
+
 /// Menu-style invocation: may open a dialog.
 pub fn invoke_menu(app: &mut SoundApp, id: &str, path: &str) {
     if let Some((_, w)) = MENU_WINDOWS.iter().find(|(p, _)| *p == path)
@@ -419,12 +444,13 @@ pub fn invoke_menu(app: &mut SoundApp, id: &str, path: &str) {
         return;
     }
     let params = params_for(path, id);
-    let _ = app.run(id, params);
+    let _ = crate::dialogs::run_or_ask(app, id, params);
 }
 
-/// Keyboard shortcut for a dialog command: open its dialog. Returns true when handled.
+/// Keyboard shortcut for a dialog command, or one that would close a modified session: open its
+/// dialog. Returns true when handled.
 pub fn invoke_shortcut_dialog(app: &mut SoundApp, id: &str) -> bool {
-    wants_dialog(id) && app.dialogs.open_for_command(&app.engine, id)
+    (wants_dialog(id) && app.dialogs.open_for_command(&app.engine, id)) || crate::dialogs::ask_to_save(app, id, &json!({}))
 }
 
 /// Commands that open a dialog first: the listed ones, Score Setup, and anything that needs a path.
@@ -470,7 +496,11 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
             toggle(&mut app.ui.show_audio_health)
         }
         "window.about" => toggle(&mut app.ui.show_about),
-        "window.midi_editor" | "window.midi_front" => toggle(&mut app.ui.show_midi_editor),
+        "window.midi_editor" => toggle(&mut app.ui.show_midi_editor),
+        "window.midi_front" => {
+            app.ui.show_midi_editor = true;
+            json!({"value": true})
+        }
         "window.midi_back" => {
             app.ui.show_midi_editor = false;
             json!({})
@@ -537,6 +567,7 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
             app.ui.show_undo_history = false;
             app.ui.show_session_info = false;
             app.ui.show_audio_health = false;
+            app.ui.show_automation = false;
             app.ui.plugin_windows.clear();
             app.ui.audiosuite = None;
             json!({})
@@ -637,5 +668,25 @@ mod tests {
         app.dialogs.open = None;
         invoke_menu(&mut app, "ui.bounce_dialog", "File > Bounce Mix...");
         assert_eq!(app.dialogs.open_name(), Some("bounce"));
+    }
+
+    #[test]
+    fn save_asks_for_a_path_until_the_session_has_one() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        invoke_menu(&mut app, "session.save", "File > Save Session");
+        assert!(matches!(&app.dialogs.open, Some(crate::dialogs::Dialog::PathPrompt { cmd, .. }) if cmd == "session.save_as"));
+        app.dialogs.open = None;
+        assert!(invoke_shortcut_dialog(&mut app, "session.save"));
+        app.dialogs.open = None;
+
+        let dir = std::env::temp_dir().join(format!("soundcraft-save-{}", std::process::id()));
+        let path = dir.join("Song.scraft");
+        app.run("session.save_as", json!({"path": path.to_string_lossy()})).unwrap();
+        app.run("track.new", json!({})).unwrap();
+        assert!(!invoke_shortcut_dialog(&mut app, "session.save"));
+        invoke_menu(&mut app, "session.save", "File > Save Session");
+        assert!(app.dialogs.open.is_none());
+        assert!(!app.engine.is_dirty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

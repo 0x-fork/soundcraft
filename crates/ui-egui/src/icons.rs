@@ -129,9 +129,6 @@ pub fn draw(painter: &Painter, r: Rect, name: &str, c: Color32) {
         "triangle_down" => {
             painter.add(Shape::convex_polygon(vec![p(r, 0.25, 0.35), p(r, 0.75, 0.35), p(r, 0.5, 0.68)], c, Stroke::NONE));
         }
-        "triangle_right" => {
-            painter.add(Shape::convex_polygon(vec![p(r, 0.35, 0.25), p(r, 0.68, 0.5), p(r, 0.35, 0.75)], c, Stroke::NONE));
-        }
         "note" => {
             painter.circle_filled(p(r, 0.38, 0.72), r.width() * 0.13, c);
             painter.line_segment([p(r, 0.5, 0.72), p(r, 0.5, 0.2)], s);

@@ -9,6 +9,9 @@ use soundcraft_time::{FrameRate, GridValue, Range, SampleRate, Samples, TempoMap
 /// Native session file extension.
 pub const SESSION_EXTENSION: &str = "scraft";
 
+/// `EditState::values` key holding the feet+frames reading of sample 0, in frames.
+pub const FEET_FRAMES_START: &str = "feet_frames.start";
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SessionError {
     #[error("not a SoundCraft session: {0}")]
@@ -168,6 +171,9 @@ pub struct EditState {
     /// Clips explicitly selected (Grabber selection).
     #[serde(default)]
     pub selected_clips: Vec<ClipId>,
+    /// Audio files selected in the Clip List.
+    #[serde(default)]
+    pub selected_sources: Vec<SourceId>,
     /// Playhead position when stopped.
     pub playhead: Samples,
     pub grid: GridValue,
@@ -244,6 +250,7 @@ impl Default for EditState {
             selection: Range::default(),
             selected_tracks: Vec::new(),
             selected_clips: Vec::new(),
+            selected_sources: Vec::new(),
             playhead: 0,
             grid: GridValue::default(),
             nudge: GridValue::Seconds(1.0),
@@ -319,6 +326,9 @@ pub struct Session {
     pub midi_originals: std::collections::BTreeMap<u64, soundcraft_midi::Sequence>,
     #[serde(skip)]
     pub pool: SourcePool,
+    /// The folder relative source paths point into: where the session was opened or last saved.
+    #[serde(skip)]
+    pub folder: Option<std::path::PathBuf>,
 }
 
 impl Default for Session {
@@ -352,6 +362,7 @@ impl Session {
             comments: String::new(),
             midi_originals: std::collections::BTreeMap::new(),
             pool: SourcePool::default(),
+            folder: None,
         };
         s.edit.pre_roll = sample_rate.samples(2.0);
         s.edit.post_roll = sample_rate.samples(2.0);
@@ -410,9 +421,33 @@ impl Session {
         self.tracks.iter_mut().find_map(|t| t.playlist_mut().and_then(|p| p.clip_mut(id)))
     }
 
+    /// Clips on every playlist, alternates included.
+    pub fn all_clips(&self) -> impl Iterator<Item = &Clip> {
+        self.tracks.iter().flat_map(|t| t.playlists.iter().flat_map(|p| &p.clips))
+    }
+
+    pub fn clips_using(&self, src: SourceId) -> impl Iterator<Item = &Clip> {
+        self.all_clips().filter(move |c| c.source() == Some(src))
+    }
+
     /// End of the last clip on any track (session length).
     pub fn content_end(&self) -> Samples {
         self.tracks.iter().filter_map(|t| t.playlist().map(|p| p.end())).max().unwrap_or(0)
+    }
+
+    /// Feet+frames reading of sample 0, in frames (Setup › Current Feet+Frames Position).
+    pub fn feet_frames_start(&self) -> i64 {
+        self.edit.value(FEET_FRAMES_START, 0.0) as i64
+    }
+
+    /// Format a position against this session's timecode and feet+frames references.
+    pub fn format_position(&self, at: Samples, fmt: TimeFormat) -> String {
+        soundcraft_time::format_position(at, fmt, self.sample_rate, &self.tempo, self.frame_rate, self.timecode_start, self.feet_frames_start())
+    }
+
+    /// Parse a position typed in `fmt` against this session's references.
+    pub fn parse_position(&self, text: &str, fmt: TimeFormat) -> Result<Samples, soundcraft_time::TimeError> {
+        soundcraft_time::parse_position(text, fmt, self.sample_rate, &self.tempo, self.frame_rate, self.timecode_start, self.feet_frames_start())
     }
 
     pub fn next_track_color(&self) -> [u8; 3] {

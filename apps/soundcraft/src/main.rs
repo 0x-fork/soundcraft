@@ -20,10 +20,19 @@ mod logging;
 mod native_menu;
 
 use soundcraft_engine::Engine;
-use soundcraft_ui_egui::{Services, SoundApp, UiState};
+use soundcraft_ui_egui::{Services, SoundApp, UiState, dialogs};
 use std::sync::Arc;
 
 struct App(SoundApp, Option<&'static logging::AppLogger>, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
+
+/// Sends the title only when it changes, remembered here as X11 and Wayland can't read it back.
+fn set_title(ctx: &egui::Context, title: String) {
+    let id = egui::Id::new("window_title");
+    if ctx.data(|d| d.get_temp::<String>(id)).as_deref() != Some(title.as_str()) {
+        ctx.data_mut(|d| d.insert_temp(id, title.clone()));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+    }
+}
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -48,7 +57,16 @@ impl eframe::App for App {
         }
         if self.0.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if ctx.input(|i| i.viewport().close_requested()) && dialogs::ask_to_save(&mut self.0, "app.quit", &serde_json::json!({})) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
+        soundcraft_ui_egui::fit_window_to_screen(ctx);
+        let (inner, maximized) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().maximized.unwrap_or(false)));
+        self.0.ui.window_maximized = maximized;
+        if let Some(r) = inner.filter(|_| !maximized) {
+            self.0.ui.window_size = (r.size() * ctx.zoom_factor()).round().into();
+        }
+        self.0.ui.ui_scale = self.0.extra.ui_scale;
         // With the system menu bar there is no egui bar showing the window and dirty state, so the
         // title carries them; elsewhere the egui menu bar already does.
         let title = if self.0.native_menu_bar {
@@ -61,7 +79,7 @@ impl eframe::App for App {
         } else {
             format!("{} — SoundCraft", self.0.engine.session().name)
         };
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        set_title(ctx, title);
     }
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         self.0.raw_input_hook(raw);
@@ -84,7 +102,7 @@ impl eframe::App for App {
 fn open_path(app: &mut SoundApp, p: &str) {
     let lower = p.to_ascii_lowercase();
     let r = if lower.ends_with(".scraft") {
-        app.run("session.open", serde_json::json!({"path": p}))
+        dialogs::run_or_ask(app, "session.open", serde_json::json!({"path": p}))
     } else if lower.ends_with(".mid") || lower.ends_with(".midi") || lower.ends_with(".smf") {
         app.run("file.import_midi", serde_json::json!({"path": p}))
     } else {
@@ -144,7 +162,7 @@ fn services() -> Services {
                 "file.import_midi" => d.add_filter("MIDI", &["mid", "midi", "smf"]),
                 _ => d.add_filter(
                     "Audio",
-                    &["wav", "wave", "bwf", "aif", "aiff", "aifc", "flac", "mp3", "ogg", "oga", "m4a", "aac", "mp4", "caf", "mkv", "webm"],
+                    &["wav", "wave", "bwf", "aif", "aiff", "aifc", "flac", "mp3", "ogg", "oga", "m4a", "m4b", "aac", "mp4", "caf", "mkv", "webm"],
                 ),
             };
             d.pick_file().map(|p| p.to_string_lossy().into_owned())
@@ -156,6 +174,9 @@ fn services() -> Services {
                 d = d.set_file_name(n);
             }
             d.save_file().map(|p| p.to_string_lossy().into_owned())
+        })),
+        pick_folder: Some(Box::new(|start: &str| {
+            rfd::FileDialog::new().set_directory(start).pick_folder().map(|p| p.to_string_lossy().into_owned())
         })),
     }
 }
@@ -213,10 +234,12 @@ fn main() -> eframe::Result {
     }
 
     let engine = if demo { soundcraft_engine::demo::demo_engine() } else { Engine::default() };
+    let prefs = load_prefs().unwrap_or_default();
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("SoundCraft")
-            .with_inner_size([1600.0, 1000.0])
+            .with_inner_size(sane_window_size(prefs.window_size))
+            .with_maximized(prefs.window_maximized)
             .with_min_inner_size([960.0, 600.0])
             .with_drag_and_drop(true)
             .with_app_id("ai.storyteller.soundcraft"),
@@ -236,9 +259,8 @@ fn main() -> eframe::Result {
             let mut app = SoundApp::new(engine, player, services());
             app.autosave_dir = prefs_path().and_then(|p| p.parent().map(|d| d.join("Autosave")));
             app.preset_dir = prefs_path().and_then(|p| p.parent().map(|d| d.join("Presets")));
-            if let Some(ui) = load_prefs() {
-                app.ui = ui;
-            }
+            app.extra.ui_scale = prefs.ui_scale;
+            app.ui = prefs;
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
                 app = app.with_control(rx);
@@ -266,4 +288,27 @@ fn main() -> eframe::Result {
             )))
         }),
     )
+}
+
+/// A saved window size, or the default when the prefs file holds nonsense (NaN, negative, tiny).
+fn sane_window_size([w, h]: [f32; 2]) -> [f32; 2] {
+    if w.is_finite() && h.is_finite() && w >= 960.0 && h >= 600.0 { [w.min(16_384.0), h.min(16_384.0)] } else { [1600.0, 1000.0] }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::set_title;
+
+    #[test]
+    fn the_title_is_sent_only_when_it_changes() {
+        let ctx = egui::Context::default();
+        let titles = |title: &str| {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| set_title(ui.ctx(), title.to_string()));
+            out.textures_delta.clear();
+            out.viewport_output.values().flat_map(|v| &v.commands).filter(|c| matches!(c, egui::ViewportCommand::Title(_))).count()
+        };
+        assert_eq!(titles("Song — SoundCraft"), 1);
+        assert_eq!(titles("Song — SoundCraft"), 0);
+        assert_eq!(titles("Song * — SoundCraft"), 1);
+    }
 }
