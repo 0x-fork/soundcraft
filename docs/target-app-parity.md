@@ -42,7 +42,7 @@ at 0.5–1.5 h each, features at about 200–300 tested lines per agent-hour, fr
   15–25, onboarding and user guide 15–25, save fixes 5–10.
 
 The previous figure in ROADMAP.md (2026-10-07: "~65 % overall feature parity", "110–150 h to 100 %")
-measured feature *presence*. This pass measures readiness, and found new evidence that pulls the
+measured feature *presence*. This pass measures readiness, and finds new evidence that pulls the
 numbers down: 37 open GitHub issues from the first public week (about 25 of them correctness bugs
 in features counted as done), no MIDI hardware input or output at all, no audio device or buffer
 size selection, no localization, and a macOS release that cannot load signed third-party VST3s
