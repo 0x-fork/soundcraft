@@ -112,7 +112,7 @@ pub fn specs() -> Vec<CommandSpec> {
             Ok(json!({"track": t}))
         }),
         cmd!("track.clear_clip_indicators", "Clear All Clip Indicators", ["Track"], Some("Alt+C"), "{}", always, |_, _| Ok(json!({"cleared": true}))),
-        cmd!("track.clear_trim_automation", "Clear Trim Automation", ["Track"], None, "{tracks?}", has_selection, |_, _| Ok(json!({}))),
+        cmd!("track.clear_trim_automation", "Clear Trim Automation", ["Track"], None, "{tracks?}", has_selection, super::track_more::clear_trim),
         cmd!("track.create_click", "Create Click Track", ["Track"], None, "{}", always, create_click),
         cmd!("track.playlist_new", "New Playlist", [], None, "{track?, name?}", has_selection, |e, p| new_playlist(e, p, false)),
         cmd!("track.playlist_duplicate", "Duplicate Playlist", [], None, "{track?, name?}", has_selection, |e, p| new_playlist(e, p, true)),
@@ -142,7 +142,10 @@ pub fn specs() -> Vec<CommandSpec> {
         }),
         cmd!("track.vca", "Assign to VCA", [], None, "{tracks?, vca: VCA track id|name | null}", has_selection, |e, p| {
             let tracks = tracks_required(e, "track.vca", p)?;
-            let vca = track_param(e, "track.vca", p, "vca")?;
+            let vca = match p.get("vca") {
+                Some(Value::Null) => None,
+                _ => track_param(e, "track.vca", p, "vca")?,
+            };
             if let Some(v) = vca
                 && e.session().track(v).is_none_or(|t| t.kind != TrackKind::Vca)
             {
@@ -188,7 +191,7 @@ pub fn specs() -> Vec<CommandSpec> {
                     tr.active_playlist = active;
                 }
                 let _ = src;
-                let ids = crate::edit::paste(s, t, r.start, &clips, r.len(), false);
+                let ids = crate::edit::paste(s, t, r.start, &clips, r.len(), false).unwrap_or_default();
                 Ok(json!({"clips": ids}))
             }
         ),
@@ -732,5 +735,25 @@ mod tests {
         assert_eq!(e.undo_history().len(), steps);
         e.execute("track.height_down", &json!({"tracks": ["Kick"]})).unwrap();
         assert_eq!(height(&e, "Kick"), Some(TrackHeight::Jumbo));
+    }
+
+    #[test]
+    fn vca_null_clears_the_assignment() {
+        let mut e = Engine::default();
+        e.execute("track.new", &json!({"name": "Member"})).unwrap();
+        e.execute("track.new", &json!({"kind": "vca", "name": "Master"})).unwrap();
+        let (member, master) = (e.session().tracks[0].id, e.session().tracks[1].id);
+        let vca = |e: &Engine| e.session().track(member).unwrap().mixer.vca;
+        e.execute("track.vca", &json!({"tracks": [member.0], "vca": master.0})).unwrap();
+        assert_eq!(vca(&e), Some(master.0));
+        // #237: null is documented as "no VCA"; anything else that is not a VCA is still an error.
+        for invalid in [json!(true), json!(999), json!("Missing"), json!(member.0)] {
+            assert!(e.execute("track.vca", &json!({"tracks": [member.0], "vca": invalid})).is_err());
+            assert_eq!(vca(&e), Some(master.0));
+        }
+        e.execute("track.vca", &json!({"tracks": [member.0], "vca": null})).unwrap();
+        assert_eq!(vca(&e), None);
+        assert!(e.undo());
+        assert_eq!(vca(&e), Some(master.0));
     }
 }
