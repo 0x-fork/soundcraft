@@ -123,6 +123,10 @@ pub fn specs() -> Vec<CommandSpec> {
             if ids.is_empty() {
                 return Err(bad("file.export_clips", "no clips selected"));
             }
+            for (t, c) in ids.iter().filter_map(|id| e.session().find_clip(*id)) {
+                let channels = e.session().track(t).map_or(1, |x| x.channels());
+                crate::io::refuse_longer(e.session(), "file.export_clips", &c.name, "export", c.length, crate::io::render_limit(channels))?;
+            }
             let n = crate::io::export_clips(e, &ids, &dir)?;
             Ok(json!({"written": n, "dir": dir}))
         }),
@@ -194,6 +198,8 @@ pub fn specs() -> Vec<CommandSpec> {
 
 /// Writing a session over an existing file needs `replace: true` (see `io::replaces`).
 fn refuse_replacing(e: &Engine, id: &str, file: &std::path::Path, p: &Value) -> Result<()> {
+    // First, so a path outside the write root is refused as such and never reported as existing.
+    crate::file_access::check_write(file).map_err(EngineError::Io)?;
     if crate::io::replaces(e, id, file) && !bool_or(p, "replace", false) {
         return Err(bad(id, format!("{} already exists: pass `replace: true` to replace it", file.display())));
     }
@@ -275,6 +281,21 @@ fn fold_down_param(p: &Value, id: &str) -> Result<bool> {
 }
 
 fn bounce(e: &mut Engine, p: &Value) -> Result<Value> {
+    let job = bounce_job(e, p)?;
+    let (path, seconds) = (job.path().to_string_lossy().into_owned(), e.session().sample_rate.seconds(job.range().len()));
+    let done = job.run()?;
+    Ok(json!({
+        "path": path,
+        "bytes": done.bytes,
+        "seconds": seconds,
+        "peak_db": done.peak_db,
+        "lufs": done.lufs,
+        "true_peak_db": done.true_peak_db,
+    }))
+}
+
+/// The bounce `file.bounce_mix` runs for `p`, not rendered yet.
+pub fn bounce_job(e: &Engine, p: &Value) -> Result<crate::io::Bounce> {
     let path = str_param(p, "path").ok_or_else(|| bad("file.bounce_mix", "`path` required"))?.to_string();
     let r = range_param(e, "file.bounce_mix", p)?;
     let r = if r.is_empty() { soundcraft_time::Range::new(0, e.session().content_end().max(1)) } else { r };
@@ -292,11 +313,7 @@ fn bounce(e: &mut Engine, p: &Value) -> Result<Value> {
     let normalize = bool_or(p, "normalize", false);
     let fold = fold_down_param(p, "file.bounce_mix")?;
     let bus = bounce_bus(e, p)?;
-    let (bytes, stats) = crate::io::bounce_source(e, r, &opts, normalize, fold, bus)?;
-    crate::io::write_file(&path, &bytes)?;
-    Ok(
-        json!({"path": path, "bytes": bytes.len(), "seconds": e.session().sample_rate.seconds(r.len()), "peak_db": stats.0, "lufs": stats.1, "true_peak_db": stats.2}),
-    )
+    crate::io::Bounce::new(e.session_arc(), std::path::Path::new(&path), r, &opts, bus, normalize, fold)
 }
 
 /// Write the score of the chosen MIDI tracks as MusicXML (or SVG when `svg`).

@@ -105,6 +105,10 @@ pub struct Clip {
     /// Reversed playback (AudioSuite Reverse renders into a new source; this is for previews).
     #[serde(default)]
     pub group: Option<u64>,
+    /// Marks the clips made by `clip.loop` (the origin and its copies share one id), so
+    /// `clip.unloop` still recognises the loop after the source's content is edited.
+    #[serde(default)]
+    pub loop_id: Option<u64>,
 }
 
 fn one() -> f64 {
@@ -131,6 +135,7 @@ impl Clip {
             color: None,
             stretch: 1.0,
             group: None,
+            loop_id: None,
         }
     }
 
@@ -214,14 +219,24 @@ impl Clip {
         // MIDI note ticks are re-anchored by the engine, which knows the tempo map.
         self.length -= delta;
         self.start = new_start;
+        if self.sync_point != 0 {
+            self.sync_point = self.sync_point.saturating_sub(delta);
+        }
+        self.drop_stray_sync();
         self.clamp_fades();
-        self.gain_env = self.gain_env.iter().filter_map(|&(t, v)| (t - delta >= 0).then_some((t - delta, v))).collect();
+        // Keep the gain at the cut when earlier breakpoints are dropped.
+        if self.gain_env.iter().any(|&(t, _)| t < delta) && self.gain_env.iter().all(|&(t, _)| t != delta) {
+            self.gain_env.insert(0, (delta, env_value(&self.gain_env, delta)));
+        }
+        self.gain_env.retain(|&(t, _)| t >= delta);
+        self.gain_env.iter_mut().for_each(|(t, _)| *t = t.saturating_sub(delta));
     }
 
     /// Move the end edge to `new_end`.
     pub fn trim_end_to(&mut self, new_end: Samples) {
         let new_end = new_end.max(self.start + 1);
         self.length = new_end - self.start;
+        self.drop_stray_sync();
         self.clamp_fades();
     }
 
@@ -229,6 +244,13 @@ impl Clip {
     pub fn clamp_fades(&mut self) {
         self.fade_in.len = self.fade_in.len.clamp(0, self.length);
         self.fade_out.len = self.fade_out.len.clamp(0, self.length);
+    }
+
+    /// A sync point (0 means none) that a trim left outside the clip no longer marks anything.
+    fn drop_stray_sync(&mut self) {
+        if !(0..self.length).contains(&self.sync_point) {
+            self.sync_point = 0;
+        }
     }
 
     /// Repair a clip read from a file: positions and lengths within ±[`MAX_POSITION`], as commands
@@ -313,6 +335,27 @@ mod tests {
         let mut c = Clip::audio(ClipId(1), "a", SourceId(1), 0, 0, 1000);
         c.gain_env = vec![(0, 0.0), (1000, -20.0)];
         assert!((c.gain_at(500) - db_to_gain(-10.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn trim_start_keeps_gain_envelope_at_cut() {
+        for (env, cut, expected) in [
+            (vec![(0, 0.0), (1000, -20.0)], 500, vec![(0, -10.0), (500, -20.0)]),
+            (vec![(0, 0.0), (100, -20.0)], 500, vec![(0, -20.0)]),
+            (vec![(0, 0.0), (500, -10.0), (1000, -20.0)], 500, vec![(0, -10.0), (500, -20.0)]),
+            (vec![], 500, vec![]),
+            (vec![(100, -3.0)], 0, vec![(100, -3.0)]),
+            (vec![(100, -3.0)], -100, vec![(200, -3.0)]),
+        ] {
+            let mut clip = Clip::audio(ClipId(1), "a", SourceId(1), 100, 0, 1000);
+            clip.gain_env = env;
+            let gain_at_cut = clip.gain_at(cut);
+            clip.trim_start_to(cut);
+            assert_eq!(clip.gain_env, expected);
+            if cut > 0 {
+                assert!((clip.gain_at(0) - gain_at_cut).abs() < 1e-6);
+            }
+        }
     }
 
     #[test]

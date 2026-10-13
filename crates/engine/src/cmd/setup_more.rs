@@ -146,7 +146,9 @@ fn prepare_dpe(e: &mut Engine, p: &Value) -> Result<Value> {
     let r = soundcraft_time::Range::new(0, end);
     let mut n = 0;
     for t in tracks {
-        if crate::io::consolidate(e, t, r)? {
+        // Each track keeps its own length (its material plus a second), as before.
+        let tr = crate::io::bounded_to_track(e.session(), t, r);
+        if crate::io::consolidate(e, id, t, tr)? {
             n += 1;
         }
     }
@@ -317,7 +319,7 @@ fn current_feet_frames(e: &mut Engine, p: &Value) -> Result<Value> {
     let at = s.edit.selection.start.max(0);
     let frames_at = s.frame_rate.frames_at(at, s.sample_rate);
     let start = ft * 16 + fr - frames_at;
-    s.edit.values.insert("feet_frames.start".into(), start as f64);
+    s.edit.values.insert(soundcraft_model::FEET_FRAMES_START.into(), start as f64);
     Ok(json!({"feet_frames_start": start}))
 }
 
@@ -541,8 +543,7 @@ mod tests {
         e.execute("edit.select", &json!({"start": 48_000})).unwrap();
         e.execute("setup.current_timecode", &json!({"timecode": "01:00:00:00"})).unwrap();
         let s = e.session();
-        let shown =
-            soundcraft_time::format_position(48_000, soundcraft_time::TimeFormat::Timecode, s.sample_rate, &s.tempo, s.frame_rate, s.timecode_start);
+        let shown = s.format_position(48_000, soundcraft_time::TimeFormat::Timecode);
         assert_eq!(shown, "01:00:00:00");
     }
 
