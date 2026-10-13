@@ -1041,6 +1041,37 @@ pub fn plan_takes(e: &Engine, unsaved_dir: &Path, input_channels: usize) -> Vec<
         .collect()
 }
 
+/// A recording's plan, made when it starts: each record-enabled track's take file, where the
+/// takes start on the timeline, the loop length they split into when loop recording, and the
+/// punch range they're trimmed to.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Recording {
+    pub start: Samples,
+    pub pass: Option<Samples>,
+    pub punch: Option<Range>,
+    /// The input's sample rate, which the take files are written at.
+    pub rate: u32,
+    pub takes: Vec<Take>,
+}
+
+/// One track's take file.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Take {
+    pub track: TrackId,
+    pub path: PathBuf,
+    pub channels: usize,
+}
+
+/// Place recorded take files as `plan` says, as one undo step ("Record").
+pub fn place_recording(e: &mut Engine, plan: &Recording, takes: Vec<(TrackId, PathBuf)>) -> Vec<soundcraft_model::ClipId> {
+    let ids = add_recording(e, plan.start, takes, plan.pass);
+    if let Some(p) = plan.punch {
+        let clips: Vec<u64> = ids.iter().map(|c| c.0).collect();
+        let _ = e.execute_merged("edit.trim_to_fill_selection", &json!({"clips": clips, "start": p.start, "end": p.end}), "record");
+    }
+    ids
+}
+
 /// Turn recorded take files into clips at `start`, as one undo step ("Record"); each file is the
 /// source of its clips. With `pass` (loop recording), a take becomes one clip per pass (at most
 /// 1000), each pass after the first on a new playlist.
