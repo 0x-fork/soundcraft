@@ -847,6 +847,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-docpath"
+version = "0.1.0"
+
+[[package]]
 name = "craft-ui"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=5c874d51eeb3de70e735c8ce87a59a7dedd47675#5c874d51eeb3de70e735c8ce87a59a7dedd47675"
@@ -3654,6 +3658,7 @@ dependencies = [
 name = "soundcraft-engine"
 version = "0.7.0"
 dependencies = [
+ "craft-docpath",
  "log",
  "proptest",
  "serde",
