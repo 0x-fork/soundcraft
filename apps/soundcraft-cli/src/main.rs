@@ -4,7 +4,8 @@
 //! soundcraft-cli info FILE                       audio file or .scraft summary
 //! soundcraft-cli convert IN OUT [--bit-depth 16|24|32f] [--rate HZ] [--normalize]
 //! soundcraft-cli run [--in S.scraft | --demo] [--cmd ID[=JSON]]… [--bounce OUT] [--start T --end T] [--save S.scraft] [--inspect]
-//! soundcraft-cli script FILE [--in S | --demo] [--save S] [--bounce OUT]   (one `ID JSON` per line)
+//! soundcraft-cli script FILE [--in S | --demo] [--save S] [--bounce OUT [--start T --end T]]   (one `ID JSON` per line;
+//!                                                 without --start/--end, --bounce covers the whole session)
 //! soundcraft-cli commands [FILTER]               list commands
 //! soundcraft-cli describe ID                     one command's details
 //! soundcraft-cli app [--port P] METHOD [JSON]     call a running app's control channel
@@ -211,6 +212,11 @@ fn finish(e: &mut Engine, args: &[String]) -> ExitCode {
         }
         if let Some(s) = arg_value(args, "--end") {
             p["end"] = time_arg(&s);
+        }
+        // No range given: bounce the whole session, not whatever edit selection the commands left.
+        if p.get("start").is_none() && p.get("end").is_none() {
+            p["start"] = json!(0);
+            p["end"] = json!(e.session().content_end().max(1));
         }
         match e.execute("file.bounce_mix", &p) {
             Ok(v) => outln!("{v}"),
