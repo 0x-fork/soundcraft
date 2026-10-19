@@ -33,7 +33,7 @@ Legend: ✅ supported and tested · 🟡 partial · ❌ missing · — not appli
 
 | Format | Pro Tools | Read | Write | Tests / notes |
 |---|---|---|---|---|
-| WAV / BWF (PCM 16/24/32, float 32), `bext` | native | ✅ | ✅ | Native reader/writer, TPDF dither option; also 8-bit and float 64 read An empty data chunk followed by metadata reads as no audio; an unfinalised recording's audio is still read (#466). |
+| WAV / BWF (PCM 16/24/32, float 32), `bext` | native | ✅ | ✅ | Native reader/writer, TPDF dither option; also 8-bit and float 64 read. An empty data chunk followed by metadata reads as no audio; an unfinalised recording's audio is still read (#466). |
 | RF64 / BW64 (> 4 GiB) | read/write | ✅ | ✅ | `encode_wav_rf64` |
 | WAV `WAVE_FORMAT_EXTENSIBLE` multichannel with channel mask | read/write | ✅ | ✅ | `encode_with_channel_mask`; default 5.1 import creates a stereo track (#89, PR #128) |
 | AIFF / AIFF-C | native | ✅ | ✅ (`fl32`) | Native |
