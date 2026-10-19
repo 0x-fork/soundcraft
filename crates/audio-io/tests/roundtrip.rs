@@ -309,3 +309,10 @@ fn flac_claiming_frames_but_holding_none_still_errors() {
     bytes[25] = 1; // STREAMINFO total samples (low byte of the 36-bit field) = 1
     assert!(decode(&bytes, None).is_err());
 }
+
+#[test]
+fn float_wav_header_rejects_a_frame_count_whose_total_size_overflows() {
+    // 4 bytes per frame: the data length fits in u64, but adding the header to it does not.
+    let frames = u64::MAX / 4;
+    assert!(matches!(wav_float_header(1, 48_000, frames), Err(soundcraft_audio_io::AudioError::TooLarge(_))));
+}
