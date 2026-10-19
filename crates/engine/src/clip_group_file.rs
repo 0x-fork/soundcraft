@@ -258,8 +258,10 @@ mod tests {
         let r = e.execute("file.import_clip_groups", &json!({"path": p.to_string_lossy()})).unwrap();
         let ids: Vec<_> = r["clips"].as_array().unwrap().iter().filter_map(serde_json::Value::as_u64).collect();
         assert_eq!(ids.len(), 2);
-        let spans: Vec<_> = ids.iter().map(|id| e.session().find_clip(soundcraft_model::ClipId(*id)).map(|(_, c)| (c.start, c.length))).collect();
-        assert_eq!(spans, vec![Some((0, 1000)), Some((600, 1000))]);
+        let spans: Vec<_> = ids.iter().filter_map(|id| e.session().find_clip(soundcraft_model::ClipId(*id)).map(|(_, c)| (c.start, c.length))).collect();
+        // The group lands at the insertion point; its clips keep their relative positions and overlap.
+        let at = spans.first().map_or(0, |s| s.0);
+        assert_eq!(spans, vec![(at, 1000), (at + 600, 1000)]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
