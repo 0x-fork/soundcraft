@@ -1,4 +1,4 @@
-//! The FFI boundary: the only module of this rate allowed to use `unsafe`.
+//! The FFI boundary: the only module of this crate allowed to use `unsafe`.
 //!
 //! It loads VST3 binaries (`libloading`), runs the platform module entry, calls the COM
 //! interfaces of the factory, component, audio processor and edit controller (`vst3` raw
