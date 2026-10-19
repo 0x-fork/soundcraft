@@ -694,9 +694,13 @@ fn clip_gain_to_vol(e: &mut Engine, p: &Value) -> Result<Value> {
 
 fn copy_to_send(e: &mut Engine, p: &Value) -> Result<Value> {
     let tracks = tracks_required(e, "automation.copy_to_send", p)?;
-    let slot = slot_of(p, "send", SEND_SLOTS).ok_or_else(|| {
-        bad("automation.copy_to_send", format!("`send` must be 0..{} or a..{}", SEND_SLOTS - 1, (b'a' + SEND_SLOTS as u8 - 1) as char))
-    })? as u8;
+    // No `send` means Send A (the menu item passes none); a given one must be valid.
+    let slot = match p.get("send") {
+        None | Some(Value::Null) => 0,
+        Some(_) => slot_of(p, "send", SEND_SLOTS).ok_or_else(|| {
+            bad("automation.copy_to_send", format!("`send` must be 0..{} or a..{}", SEND_SLOTS - 1, (b'a' + SEND_SLOTS as u8 - 1) as char))
+        })?,
+    } as u8;
     let s = e.session_mut();
     for t in &tracks {
         if let Some(tr) = s.track_mut(*t) {
@@ -882,12 +886,15 @@ mod tests {
         let history = e.undo_history().len();
         let lanes = |e: &Engine| e.session().tracks.iter().filter(|t| t.lane(&AutoParam::SendLevel(0)).is_some_and(|l| !l.points.is_empty())).count();
         let before = lanes(&e);
-        for bad_params in [json!({"track": "Kick", "send": 99}), json!({"track": "Kick", "send": "zz"}), json!({"track": "Kick"})] {
+        for bad_params in [json!({"track": "Kick", "send": 99}), json!({"track": "Kick", "send": "zz"})] {
             let r = e.execute("automation.copy_to_send", &bad_params);
             assert!(r.is_err(), "{bad_params} accepted: {r:?}");
             assert_eq!(e.undo_history().len(), history, "{bad_params} pushed an undo step");
             assert_eq!(lanes(&e), before, "{bad_params} edited Send A");
         }
+        // No `send` (the menu item's call) still means Send A.
+        e.execute("automation.copy_to_send", &json!({"track": "Kick"})).unwrap();
+        assert_eq!(lanes(&e), before + 1);
         // A valid slot still copies.
         e.execute("automation.copy_to_send", &json!({"track": "Kick", "send": "a"})).unwrap();
         assert_eq!(lanes(&e), before + 1);
