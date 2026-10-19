@@ -123,6 +123,7 @@ mutated and truncated movies. Field reports from the first public week are track
 ## Progress log
 
 - **2026-10-16:** Master fader volume automation uses each render block's actual last sample, matching track faders. Breakpoints in the next block no longer pull the preceding block's level toward them, and ramps reach their last-sample value. Regression tests cover nonzero starts, one-sample callbacks and several block sizes. No readiness percentage change.
+- **2026-10-16:** Aux, folder and master latency calculations exclude inserts already taken out for producing NaN or infinity, matching audio tracks. Subsequent blocks no longer compensate for an insert that is bypassed after failure. Regression tests check impulse timing, healthy insert latency and reset/retry at 64- and 512-sample blocks. No readiness percentage change.
 - **2026-10-14:** MCP `batch` rejects more than 1000 calls before executing any command, instead of silently running only the first 1000 (#460). No readiness percentage change.
 - **2026-10-13:** WAV: an empty data chunk followed by metadata (LIST, bext) reads as no audio; a recording that was never finalised (sizes left at 0) still gives what was written (#466)
 - **2026-10-13:** Sampler: a ping-pong loop keeps its phase and direction when a step is wider than the loop (a narrow loop with high transposition), instead of reflecting once and dropping the rest of the travel (#463)
@@ -160,6 +161,7 @@ mutated and truncated movies. Field reports from the first public week are track
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-16 | trivial | Master volume automation block boundaries corrected; readiness estimates unchanged |
+| 2026-10-16 | trivial | Failed inserts no longer contribute aux, folder or master latency after containment; readiness estimates unchanged |
 | 2026-10-14 | trivial | Progress log: oversized MCP batches rejected before execution (#460) |
 | 2026-10-13 | trivial | Progress log: empty WAV data chunk followed by metadata (#466) |
 | 2026-10-13 | trivial | Progress log: sampler ping-pong phase for wide steps (#463) |
