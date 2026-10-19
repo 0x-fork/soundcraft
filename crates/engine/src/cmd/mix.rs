@@ -73,7 +73,8 @@ pub fn specs() -> Vec<CommandSpec> {
         )),
         cmd!("mix.trim", "Input Trim", [], None, "{tracks?, db}", has_selection, |e, p| {
             let tracks = tracks_required(e, "mix.trim", p)?;
-            let db = f32_or(p, "db", 0.0).clamp(-144.0, 24.0);
+            let db = (p.get("db").and_then(Value::as_f64).filter(|v| v.is_finite()).ok_or_else(|| bad("mix.trim", "`db` (number) required"))? as f32)
+                .clamp(-144.0, 24.0);
             let s = e.session_mut();
             for t in tracks {
                 if let Some(tr) = s.track_mut(t) {
@@ -234,7 +235,8 @@ fn volume(e: &mut Engine, p: &Value) -> Result<Value> {
 
 fn pan(e: &mut Engine, p: &Value) -> Result<Value> {
     let tracks = tracks_required(e, "mix.pan", p)?;
-    let v = f32_or(p, "pan", 0.0).clamp(-1.0, 1.0);
+    let v = (p.get("pan").and_then(Value::as_f64).filter(|v| v.is_finite()).ok_or_else(|| bad("mix.pan", "`pan` (number) required"))? as f32)
+        .clamp(-1.0, 1.0);
     let idx = i64_or(p, "index", 0).clamp(0, 1) as usize;
     let s = e.session_mut();
     for t in &tracks {
@@ -287,17 +289,30 @@ fn slot_of(p: &Value, key: &str, max: usize) -> Option<usize> {
     (i < max).then_some(i)
 }
 
+fn slot_error(cmd: &str, max: usize) -> EngineError {
+    bad(cmd, format!("`slot` must be 0..{} or a..{}", max - 1, (b'a' + max as u8 - 1) as char))
+}
+
 fn track_slot(e: &Engine, p: &Value, cmd: &str, max: usize) -> Result<(TrackId, usize)> {
     let t = tracks_required(e, cmd, p)?.first().copied().ok_or_else(|| bad(cmd, "no track"))?;
-    let slot = slot_of(p, "slot", max).ok_or_else(|| bad(cmd, format!("`slot` must be 0..{} or a..{}", max - 1, (b'a' + max as u8 - 1) as char)))?;
+    let slot = slot_of(p, "slot", max).ok_or_else(|| slot_error(cmd, max))?;
     Ok((t, slot))
+}
+
+/// An optional `slot`: absent (or null) means "first free"; a present but invalid value is
+/// an error, never silently treated as absent.
+fn optional_slot(p: &Value, cmd: &str, max: usize) -> Result<Option<usize>> {
+    match p.get("slot") {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => slot_of(p, "slot", max).map(Some).ok_or_else(|| slot_error(cmd, max)),
+    }
 }
 
 fn insert(e: &mut Engine, p: &Value) -> Result<Value> {
     let plugin = str_param(p, "plugin").ok_or_else(|| bad("mix.insert", "`plugin` required"))?.to_string();
     let info = super::clap::plugin_info(&plugin).ok_or_else(|| bad("mix.insert", format!("unknown plugin `{plugin}`")))?;
     let t = tracks_required(e, "mix.insert", p)?.first().copied().ok_or_else(|| bad("mix.insert", "no track"))?;
-    let explicit = slot_of(p, "slot", INSERT_SLOTS);
+    let explicit = optional_slot(p, "mix.insert", INSERT_SLOTS)?;
     let s = e.session_mut();
     let tr = s.track_mut(t).ok_or_else(|| bad("mix.insert", "no track"))?;
     let slot =
@@ -416,7 +431,7 @@ fn insert_move(e: &mut Engine, p: &Value) -> Result<Value> {
 fn send(e: &mut Engine, p: &Value) -> Result<Value> {
     let bus = str_param(p, "bus").ok_or_else(|| bad("mix.send", "`bus` required"))?.to_string();
     let t = tracks_required(e, "mix.send", p)?.first().copied().ok_or_else(|| bad("mix.send", "no track"))?;
-    let explicit = slot_of(p, "slot", SEND_SLOTS);
+    let explicit = optional_slot(p, "mix.send", SEND_SLOTS)?;
     let s = e.session_mut();
     let bid = s.add_bus(&bus, soundcraft_model::ChannelFormat::Stereo);
     let tr = s.track_mut(t).ok_or_else(|| bad("mix.send", "no track"))?;
@@ -694,7 +709,13 @@ fn clip_gain_to_vol(e: &mut Engine, p: &Value) -> Result<Value> {
 
 fn copy_to_send(e: &mut Engine, p: &Value) -> Result<Value> {
     let tracks = tracks_required(e, "automation.copy_to_send", p)?;
-    let slot = slot_of(p, "send", SEND_SLOTS).unwrap_or(0) as u8;
+    // No `send` means Send A (the menu item passes none); a given one must be valid.
+    let slot = match p.get("send") {
+        None | Some(Value::Null) => 0,
+        Some(_) => slot_of(p, "send", SEND_SLOTS).ok_or_else(|| {
+            bad("automation.copy_to_send", format!("`send` must be 0..{} or a..{}", SEND_SLOTS - 1, (b'a' + SEND_SLOTS as u8 - 1) as char))
+        })?,
+    } as u8;
     let s = e.session_mut();
     for t in &tracks {
         if let Some(tr) = s.track_mut(*t) {
@@ -875,6 +896,26 @@ mod tests {
     }
 
     #[test]
+    fn copy_to_send_rejects_an_invalid_send_slot() {
+        let mut e = crate::demo::demo_engine();
+        let history = e.undo_history().len();
+        let lanes = |e: &Engine| e.session().tracks.iter().filter(|t| t.lane(&AutoParam::SendLevel(0)).is_some_and(|l| !l.points.is_empty())).count();
+        let before = lanes(&e);
+        for bad_params in [json!({"track": "Kick", "send": 99}), json!({"track": "Kick", "send": "zz"})] {
+            let r = e.execute("automation.copy_to_send", &bad_params);
+            assert!(r.is_err(), "{bad_params} accepted: {r:?}");
+            assert_eq!(e.undo_history().len(), history, "{bad_params} pushed an undo step");
+            assert_eq!(lanes(&e), before, "{bad_params} edited Send A");
+        }
+        // No `send` (the menu item's call) still means Send A.
+        e.execute("automation.copy_to_send", &json!({"track": "Kick"})).unwrap();
+        assert_eq!(lanes(&e), before + 1);
+        // A valid slot still copies.
+        e.execute("automation.copy_to_send", &json!({"track": "Kick", "send": "a"})).unwrap();
+        assert_eq!(lanes(&e), before + 1);
+    }
+
+    #[test]
     fn retargeting_a_send_keeps_its_settings() {
         let mut e = Engine::default();
         e.execute("track.new", &json!({"count": 1, "name": "Gtr", "format": "mono"})).unwrap();
@@ -900,5 +941,28 @@ mod tests {
         assert_eq!(count(&e), 1, "named param cleared the wrong lanes");
         e.execute("automation.clear", &json!({"track": t.0})).unwrap();
         assert_eq!(count(&e), 0, "absent param must still clear every lane");
+    }
+
+    #[test]
+    fn insert_and_send_reject_invalid_slot() {
+        let mut e = Engine::default();
+        e.execute("track.new", &json!({"count": 1, "name": "Gtr", "format": "mono"})).unwrap();
+        for slot in [json!(12), json!("k"), json!("x1")] {
+            let r = e.execute("mix.insert", &json!({"track": "Gtr", "slot": slot, "plugin": "compressor"}));
+            assert!(r.is_err(), "insert slot {slot} accepted: {r:?}");
+        }
+        for slot in [json!(12), json!("k")] {
+            let r = e.execute("mix.send", &json!({"track": "Gtr", "slot": slot, "bus": "Verb"}));
+            assert!(r.is_err(), "send slot {slot} accepted: {r:?}");
+        }
+        let mixer = &e.session().tracks[0].mixer;
+        assert!(mixer.inserts.iter().all(Option::is_none));
+        assert!(mixer.sends.iter().all(Option::is_none));
+
+        // Leaving `slot` out still picks the first free slot.
+        let r = e.execute("mix.insert", &json!({"track": "Gtr", "plugin": "compressor"})).unwrap();
+        assert_eq!(r["slot"], 0);
+        let r = e.execute("mix.send", &json!({"track": "Gtr", "bus": "Verb"})).unwrap();
+        assert_eq!(r["slot"], 0);
     }
 }
