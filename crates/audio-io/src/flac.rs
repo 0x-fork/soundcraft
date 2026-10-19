@@ -480,7 +480,8 @@ pub(crate) fn empty_stream_info(b: &[u8], at: usize) -> Option<AudioInfo> {
         pos = end;
     }
     // STREAMINFO, from the sample rate on: 20 bits rate, 3 channels - 1, 5 bits per sample - 1, 36 bits total.
-    let packed = u64::from_be_bytes(b.get(at + 4 + 4 + 10..at + 4 + 4 + 18)?.try_into().ok()?);
+    let si = at.checked_add(4 + 4 + 10)?;
+    let packed = u64::from_be_bytes(b.get(si..si.checked_add(8)?)?.try_into().ok()?);
     let sample_rate = (packed >> 44) as u32;
     let channels = ((packed >> 41) & 0x7) as u16 + 1;
     let bps = ((packed >> 36) & 0x1f) as u32 + 1;
