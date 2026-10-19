@@ -405,6 +405,11 @@ pub fn trim_end_to(s: &mut Session, track: TrackId, at: Samples) -> usize {
     n
 }
 
+/// Source samples covered by `length` timeline samples of a clip with the given `stretch`.
+fn source_len(length: Samples, stretch: f64) -> Samples {
+    if stretch.is_finite() && stretch > 0.0 && (stretch - 1.0).abs() >= 1e-9 { (length as f64 / stretch).round() as Samples } else { length }
+}
+
 /// Heal separations inside `range`: merge neighbouring audio clips that continue the same file.
 pub fn heal(s: &mut Session, track: TrackId, range: Range) -> usize {
     let Some(pl) = s.track_mut(track).and_then(|t| t.playlist_mut()) else { return 0 };
@@ -415,7 +420,9 @@ pub fn heal(s: &mut Session, track: TrackId, range: Range) -> usize {
         if let Some(prev) = out.last_mut() {
             let contiguous = prev.end() == c.start && c.start >= range.start && c.start <= range.end;
             let same = match (&prev.content, &c.content) {
-                (ClipContent::Audio { source: a, offset: oa }, ClipContent::Audio { source: b, offset: ob }) => a == b && oa + prev.length == *ob,
+                (ClipContent::Audio { source: a, offset: oa }, ClipContent::Audio { source: b, offset: ob }) => {
+                    a == b && oa.saturating_add(source_len(prev.length, prev.stretch)) == *ob
+                }
                 _ => false,
             };
             if contiguous && same && (prev.gain_db - c.gain_db).abs() < 1e-6 {
@@ -874,6 +881,18 @@ mod tests {
         assert_eq!(separate_at(&mut s, t, 3000), 1);
         assert_eq!(clips(&s, t), vec![(1000, 2000, 1000), (3000, 2000, 3000)]);
         assert_eq!(separate_at(&mut s, t, 1000), 0);
+        assert_eq!(heal(&mut s, t, Range::new(0, 10_000)), 1);
+        assert_eq!(clips(&s, t), vec![(1000, 4000, 1000)]);
+    }
+
+    #[test]
+    fn split_then_heal_rejoins_stretched_clip() {
+        let (mut s, t) = session_with_clip();
+        if let Some(c) = s.track_mut(t).and_then(|t| t.playlist_mut()).and_then(|p| p.clips.first_mut()) {
+            c.stretch = 2.0;
+        }
+        assert_eq!(separate_at(&mut s, t, 3000), 1);
+        assert_eq!(clips(&s, t), vec![(1000, 2000, 1000), (3000, 2000, 2000)]);
         assert_eq!(heal(&mut s, t, Range::new(0, 10_000)), 1);
         assert_eq!(clips(&s, t), vec![(1000, 4000, 1000)]);
     }
