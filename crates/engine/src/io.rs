@@ -309,17 +309,19 @@ pub fn import_midi_bytes(e: &mut Engine, bytes: &[u8], at: Samples, tempo_map: b
     let base_tick = s.tempo.samples_to_ticks(at, s.sample_rate);
     let mut out = Vec::new();
     for (i, tr) in smf.tracks.iter().enumerate() {
-        if tr.sequence.notes.is_empty() {
+        if tr.sequence.notes.is_empty() && tr.sequence.ctrls.is_empty() {
             continue;
         }
         let mut name = if tr.name.trim().is_empty() { format!("MIDI {}", i + 1) } else { tr.name.clone() };
         soundcraft_model::truncate_chars(&mut name, soundcraft_model::MAX_NAME_CHARS);
         let id = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some(&name));
-        let drums = tr.sequence.notes.iter().all(|n| n.channel == 9);
+        let drums = !tr.sequence.notes.is_empty() && tr.sequence.notes.iter().all(|n| n.channel == 9);
         if let Some(t) = s.track_mut(id) {
             t.instrument = Some(soundcraft_model::Insert::new(if drums { "drum_synth" } else { "subtractive_synth" }));
         }
-        let end_tick = base_tick.saturating_add(tr.sequence.end_tick().max(1));
+        // A controller on the clip's last tick would not play, so the clip runs one tick past the last one.
+        let past_ctrls = tr.sequence.ctrls.iter().map(|c| c.tick.saturating_add(1)).max().unwrap_or(0);
+        let end_tick = base_tick.saturating_add(tr.sequence.end_tick().max(past_ctrls).max(1));
         let len = s.tempo.tick_to_samples(end_tick, s.sample_rate).saturating_sub(at);
         if len > s.sample_rate.samples(86_400.0) {
             return Err(EngineError::Io(format!("MIDI track {}: longer than 24 hours", i + 1)));
@@ -1041,6 +1043,18 @@ fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     f.sync_all()
 }
 
+/// Copies `from` to `to`, which must not exist yet; an existing entry, even a link, is never followed.
+fn copy_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut src = std::fs::File::open(from)?;
+    let mut dst = std::fs::OpenOptions::new().write(true).create_new(true).open(to)?;
+    if let Err(err) = std::io::copy(&mut src, &mut dst) {
+        drop(dst);
+        let _ = std::fs::remove_file(to);
+        return Err(err);
+    }
+    Ok(())
+}
+
 /// Copy the session file about to be replaced to `Backups/<name> backup <n>.<ext>`, keeping the
 /// newest ten.
 fn back_up(file: &Path) {
@@ -1061,9 +1075,16 @@ fn back_up(file: &Path) {
         .flatten()
         .filter_map(|f| f.file_name().to_str()?.strip_prefix(&prefix)?.strip_suffix(&suffix)?.parse().ok())
         .collect();
-    let next = numbers.iter().max().map_or(1, |n| n.saturating_add(1));
-    let copied = std::fs::create_dir_all(&backups).and_then(|()| std::fs::copy(file, backups.join(format!("{prefix}{next}{suffix}"))));
-    if let Err(err) = copied {
+    let Some(next) = numbers.iter().max().map_or(Some(1), |n| n.checked_add(1)) else {
+        log::warn!("no backup of {}: backup numbers are exhausted", file.display());
+        return;
+    };
+    let dest = backups.join(format!("{prefix}{next}{suffix}"));
+    if let Err(err) = crate::file_access::check_write(&dest) {
+        log::warn!("no backup of {}: {err}", file.display());
+        return;
+    }
+    if let Err(err) = std::fs::create_dir_all(&backups).and_then(|()| copy_new(file, &dest)) {
         log::warn!("no backup of {}: {err}", file.display());
         return;
     }
@@ -1286,14 +1307,32 @@ pub fn open_session_bytes(e: &mut Engine, name: &str, bytes: &[u8]) -> Result<Ve
     };
     let mut s = Session::from_json(&text).map_err(|err| EngineError::Io(format!("{name}: {err}")))?;
     let mut missing = Vec::new();
+    // Several sources may share one file (native sessions do): decode each path once and share the result.
+    let mut decoded: std::collections::HashMap<String, Option<Arc<SourceAudio>>> = std::collections::HashMap::new();
     for src in &s.sources {
-        match files.remove(&src.path) {
-            Some(audio) => match decode_source(&audio, Path::new(&src.path).extension().and_then(|x| x.to_str()), s.sample_rate.hz()) {
-                Ok(audio) => s.pool.insert(src.id, audio),
-                Err(err) => missing.push(format!("{}: {err}", src.path)),
-            },
-            None => missing.push(src.path.clone()),
+        if let Some(audio) = decoded.get(&src.path) {
+            if let Some(audio) = audio {
+                s.pool.insert(src.id, Arc::clone(audio));
+            }
+            continue;
         }
+        let audio = match files.remove(&src.path) {
+            Some(bytes) => match decode_source(&bytes, Path::new(&src.path).extension().and_then(|x| x.to_str()), s.sample_rate.hz()) {
+                Ok(audio) => Some(audio),
+                Err(err) => {
+                    missing.push(format!("{}: {err}", src.path));
+                    None
+                }
+            },
+            None => {
+                missing.push(src.path.clone());
+                None
+            }
+        };
+        if let Some(audio) = &audio {
+            s.pool.insert(src.id, Arc::clone(audio));
+        }
+        decoded.insert(src.path.clone(), audio);
     }
     // Movies are referenced by path, never copied into a session: none can be found here.
     missing.extend(s.videos.iter().map(|v| v.path.clone()));
@@ -1725,6 +1764,43 @@ mod save_tests {
     }
 
     #[test]
+    fn backup_never_overwrites_an_existing_entry_when_numbers_run_out() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-backups-full-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Backups")).unwrap();
+        let path = dir.join("Song.scraft");
+        std::fs::write(&path, b"session").unwrap();
+        let last = dir.join(format!("Backups/Song backup {}.scraft", u32::MAX));
+        std::fs::write(&last, b"sentinel").unwrap();
+        back_up(&path);
+        assert_eq!(std::fs::read(&last).unwrap(), b"sentinel");
+        let dest = dir.join("Backups/Song backup 1.scraft");
+        std::fs::write(&dest, b"taken").unwrap();
+        assert!(copy_new(&path, &dest).is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"taken");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_never_writes_through_a_link_to_an_outside_file() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-backups-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Project/Backups")).unwrap();
+        let outside = dir.join("outside.txt");
+        std::fs::write(&outside, b"sentinel").unwrap();
+        let path = dir.join("Project/Song.scraft");
+        std::fs::write(&path, b"session").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join(format!("Project/Backups/Song backup {}.scraft", u32::MAX))).unwrap();
+        back_up(&path);
+        let link = dir.join("Project/Backups/Song backup 1.scraft");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(copy_new(&path, &link).is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"sentinel");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn save_gives_sources_that_share_a_path_their_own_files() {
         let mut s = Session::default();
         let loud = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 64]] };
@@ -1879,6 +1955,28 @@ mod name_tests {
     }
 
     #[test]
+    fn a_controller_only_midi_track_is_imported_with_its_events() {
+        let ctrls = vec![
+            soundcraft_midi::CtrlEvent { tick: 0, channel: 0, kind: soundcraft_midi::CtrlKind::Cc(7), value: 100 },
+            soundcraft_midi::CtrlEvent { tick: 480, channel: 0, kind: soundcraft_midi::CtrlKind::Cc(7), value: 64 },
+            soundcraft_midi::CtrlEvent { tick: 960, channel: 0, kind: soundcraft_midi::CtrlKind::Cc(7), value: 20 },
+        ];
+        let sequence = soundcraft_midi::Sequence { ctrls: ctrls.clone(), ..Default::default() };
+        let smf = soundcraft_midi::Smf { tracks: vec![soundcraft_midi::SmfTrack { name: "Vol".into(), sequence }], ..Default::default() };
+        let mut e = Engine::default();
+        let ids = import_midi_bytes(&mut e, &soundcraft_midi::write_smf(&smf).unwrap(), 0, false).unwrap();
+        assert_eq!(ids.len(), 1);
+        let track = e.session().track(ids[0]).unwrap();
+        assert_eq!(track.instrument.as_ref().map(|i| i.plugin.as_str()), Some("subtractive_synth"));
+        // The clip must reach past the last event, or playback skips it.
+        assert!(track.clips()[0].end() > e.session().tempo.tick_to_samples(960, e.session().sample_rate));
+        match &track.clips()[0].content {
+            ClipContent::Midi { sequence } => assert_eq!(sequence.ctrls, ctrls),
+            _ => panic!("expected a MIDI clip"),
+        }
+    }
+
+    #[test]
     fn midi_longer_than_a_day_is_refused() {
         let held = soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: (1 << 28) - 1 };
         let sequence = soundcraft_midi::Sequence { notes: vec![held], ..Default::default() };
@@ -2014,6 +2112,31 @@ mod bundle_tests {
         }
         assert!(!r.is_dirty());
         assert_eq!(r.path.as_deref(), Some("Midnight Groove.scraftz"));
+    }
+
+    #[test]
+    fn sources_sharing_one_file_all_load_from_a_bundle() {
+        use std::io::Write as _;
+        let e = crate::demo::demo_engine();
+        let (bytes, _) = session_bundle(e.session()).unwrap();
+        let (text, files) = read_bundle(&bytes).unwrap();
+        let mut s = Session::from_json(&text).unwrap();
+        s.sources[1].path = s.sources[0].path.clone();
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for path in s.sources.iter().map(|x| &x.path).collect::<std::collections::BTreeSet<_>>() {
+            w.start_file(path.as_str(), opts).unwrap();
+            w.write_all(&files[path]).unwrap();
+        }
+        w.start_file("Song.scraft", opts).unwrap();
+        w.write_all(s.to_json().unwrap().as_bytes()).unwrap();
+        let bundle = w.finish().unwrap().into_inner();
+        let mut r = Engine::default();
+        let missing = open_session_bytes(&mut r, "Song.scraftz", &bundle).unwrap();
+        assert!(missing.is_empty(), "{missing:?}");
+        for src in &r.session().sources {
+            assert!(r.session().pool.get(src.id).is_some(), "{} has no audio", src.name);
+        }
     }
 
     #[test]
