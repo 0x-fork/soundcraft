@@ -768,12 +768,14 @@ impl MixEngine {
                         }
                     }
                 }
+                // Match track faders: the next block's first sample must not ramp this one.
+                let last = pos.saturating_add(frames.saturating_sub(1) as i64);
                 let v0 = volume_db_at(t, pos);
-                let v1 = volume_db_at(t, pos + frames as i64);
+                let v1 = volume_db_at(t, last);
                 for (ch, src) in strip.buf.iter().enumerate().take(self.main.len()) {
                     if let Some(m) = self.main.get_mut(ch) {
                         for i in 0..frames {
-                            let g = lerp_gain(v0, v1, i, frames);
+                            let g = lerp_gain(v0, v1, i, frames.saturating_sub(1));
                             if let (Some(d), Some(x)) = (m.get_mut(i), src.get(i)) {
                                 *d = x * g;
                             }
@@ -1647,7 +1649,7 @@ fn note_insert_latency(t: &Track, strip: &mut Strip, pos: Samples) {
     let mut latency = 0usize;
     for (i, ins) in t.mixer.inserts.iter().enumerate() {
         let (Some(ins), Some(Some(slot))) = (ins, strip.plugins.get_mut(i)) else { continue };
-        if !ins.active || ins.bypass {
+        if !ins.active || ins.bypass || slot.failed {
             continue;
         }
         apply_params(slot, ins, t, i, pos);
@@ -2483,6 +2485,52 @@ mod tests {
     }
 
     #[test]
+    fn master_volume_breakpoint_does_not_ramp_the_previous_block() {
+        for block in [1, 2, 37, 512, 1024] {
+            let start = 37;
+            let boundary = start + block as i64;
+            let end = boundary + block as i64;
+            let (mut s, t) = session_with_dc(0.5, end as usize);
+            s.track_mut(t).unwrap().mixer.pan = vec![-1.0];
+            let master = s.add_track(TrackKind::Master, ChannelFormat::Stereo, None);
+            let lane = s.track_mut(master).unwrap().lane_mut(&AutoParam::Volume);
+            lane.set_point(start, 0.0);
+            lane.set_point(boundary - 1, 0.0);
+            lane.set_point(boundary, -60.0);
+            lane.set_point(end - 1, -60.0);
+
+            let mut mixer = MixEngine::new(48_000.0, block);
+            let mut out = vec![vec![0.0; block]; 2];
+            for (pos, expected) in [(start, 0.5), (boundary, 0.0005)] {
+                mixer.render(&s, pos, block, &mut out);
+                for (i, &sample) in out[0].iter().enumerate() {
+                    assert!((sample - expected).abs() < 1e-6, "block {block}, position {pos}, sample {i}: {sample} vs {expected}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn master_volume_ramp_reaches_the_last_sample_of_the_block() {
+        for block in [2, 37, 512, 1024] {
+            let start = 37;
+            let end = start + block as i64;
+            let (mut s, t) = session_with_dc(0.5, end as usize);
+            s.track_mut(t).unwrap().mixer.pan = vec![-1.0];
+            let master = s.add_track(TrackKind::Master, ChannelFormat::Stereo, None);
+            let lane = s.track_mut(master).unwrap().lane_mut(&AutoParam::Volume);
+            lane.set_point(start, 0.0);
+            lane.set_point(end - 1, -12.0);
+
+            let out = render_range(&s, Range::new(start, end), block);
+            assert_eq!(out[0].len(), block);
+            assert!((out[0][0] - 0.5).abs() < 1e-6);
+            let expected = 0.5 * db_to_gain(-12.0);
+            assert!((out[0][block - 1] - expected).abs() < 1e-6, "block {block}: {} vs {expected}", out[0][block - 1]);
+        }
+    }
+
+    #[test]
     fn inserts_process_and_survive_unknown_plugins() {
         let (mut s, t) = session_with_dc(0.5, 4800);
         s.track_mut(t).unwrap().mixer.inserts[0] = Some(Insert::new("does-not-exist"));
@@ -2749,6 +2797,9 @@ mod tests {
         fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
             io.iter_mut().for_each(|c| c.iter_mut().take(frames).for_each(|x| *x = f32::NAN));
         }
+        fn latency(&self) -> usize {
+            self.0.latency()
+        }
     }
 
     fn nan(track: TrackId, slot: usize, ch: usize) -> Vec<PreparedInstance> {
@@ -2793,6 +2844,71 @@ mod tests {
         assert_eq!(render_block(&mut eng, &s, 512), 0.0);
         assert_eq!(eng.meters[&m].plugin_failures, PluginFailures { count: 1, last: 0 });
         assert_eq!(render_block(&mut eng, &s, 1024), only_b);
+    }
+
+    #[test]
+    fn failed_inserts_stop_contributing_latency_until_reset() {
+        for kind in [TrackKind::Audio, TrackKind::Aux, TrackKind::Folder, TrackKind::Master] {
+            for block in [64, 512] {
+                let mut s = Session::default();
+                s.edit.delay_compensation = true;
+                let source = s.add_track(TrackKind::Audio, ChannelFormat::Stereo, None);
+                let mut impulse = vec![0.0; block * 6];
+                for at in [block, block * 2, block * 4] {
+                    impulse[at] = 0.25;
+                }
+                s.pool
+                    .insert(SourceId(900), Arc::new(SourceAudio::new(AudioBuffer { sample_rate: 48_000, channels: vec![impulse.clone(), impulse] })));
+                let cid = s.new_clip_id();
+                s.track_mut(source).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(
+                    cid,
+                    "impulses",
+                    SourceId(900),
+                    0,
+                    0,
+                    (block * 6) as i64,
+                ));
+                let target = if kind == TrackKind::Audio { source } else { s.add_track(kind, ChannelFormat::Stereo, None) };
+                if matches!(kind, TrackKind::Aux | TrackKind::Folder) {
+                    let bus = s.add_bus("Return", ChannelFormat::Stereo);
+                    s.track_mut(source).unwrap().mixer.output = Route::Bus(bus);
+                    s.track_mut(target).unwrap().mixer.input = Route::Bus(bus);
+                }
+                let mut failed = Insert::new("clap:test.nan");
+                failed.params.insert("lookahead".into(), 5.0);
+                let mut healthy = Insert::new("compressor");
+                healthy.params.insert("lookahead".into(), 1.0);
+                healthy.params.insert("ratio".into(), 1.0);
+                let tr = s.track_mut(target).unwrap();
+                tr.mixer.inserts[0] = Some(failed);
+                tr.mixer.inserts[1] = Some(healthy);
+                let mut plugin = soundcraft_dsp::create("compressor").unwrap();
+                plugin.prepare(48_000.0, block, 2);
+                let mut eng = MixEngine::new(48_000.0, block);
+                eng.set_external_instances(true);
+                eng.adopt(vec![PreparedInstance { track: target, slot: 0, id: "clap:test.nan".into(), ch: 2, plugin: Box::new(Nan(plugin)) }]);
+                let mut out = vec![vec![0.0; block]; 2];
+                eng.render(&s, 0, block, &mut out);
+                assert!(out.iter().flatten().all(|x| *x == 0.0));
+                assert_eq!(eng.meters[&target].plugin_failures.count, 1);
+
+                for b in [1, 2, 4] {
+                    if b == 4 {
+                        // Reset retries the failed plugin once; the next block must drop its
+                        // latency again, while keeping the healthy insert's 48-sample delay.
+                        eng.reset();
+                        eng.render(&s, (block * 3) as i64, block, &mut out);
+                        assert_eq!(eng.meters[&target].plugin_failures.count, 2);
+                    }
+                    eng.render(&s, (block * b) as i64, block, &mut out);
+                    assert_eq!(eng.latency, 48, "{kind:?}, block {block}, pass {b}: only the healthy insert delays audio");
+                    for channel in &out {
+                        assert_eq!(impulse_at(channel), vec![48], "{kind:?}, block {block}, pass {b}: no compensation for the failed insert");
+                        assert!((channel[48] - 0.25).abs() < 1e-5);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
