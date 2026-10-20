@@ -362,8 +362,7 @@ impl AudioState {
             let sample = |c: usize| {
                 let ch = self.pending.get(c);
                 let a = ch.and_then(|v| v.get(i0)).copied().unwrap_or(0.0);
-                // Holds the last sample at the block edge (`pending` is BLOCK long,
-                // only `pending_len` is valid); carry the next block's first sample if audible.
+                // `pending` is BLOCK long; only `pending_len` frames are valid. Hold the last one at the edge.
                 let b = if i0 + 1 < self.pending_len { ch.and_then(|v| v.get(i0 + 1)).copied().unwrap_or(a) } else { a };
                 a + (b - a) * fr
             };
@@ -1213,6 +1212,26 @@ mod tests {
                     assert!((actual - expected[at % expected.len()]).abs() < 1e-6, "callback {callback}, sample {at}: {actual}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn resampling_at_a_short_block_edge_does_not_mix_in_stale_frames() {
+        use soundcraft_model::ChannelFormat;
+        // DC for the first long block, then silence. The device runs slower than the session, so
+        // reads land between frames; a short block leaves the long block's DC past `pending_len`.
+        let mut st = audio_output_state(ChannelFormat::Stereo, vec![vec![0.8; BLOCK]; 2]);
+        st.device_rate = 44_100.0;
+        let mut long = vec![0.0; 2 * 470];
+        st.fill(&mut long, 2);
+        assert_eq!(st.pending_len, BLOCK);
+        let mut short = [0.0; 2 * 8];
+        for call in 0..20 {
+            st.fill(&mut short, 2);
+            assert!(st.pending_len < BLOCK);
+            // The first frame of the first short call still reads the DC block's last frame.
+            let from = if call == 0 { 2 } else { 0 };
+            assert!(short[from..].iter().all(|x| x.abs() < 1e-6), "call {call}: {short:?}");
         }
     }
 
