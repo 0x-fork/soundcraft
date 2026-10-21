@@ -150,3 +150,19 @@ fn the_command_takes_a_track_by_name_from_the_control_channel() {
     assert!(h.state_mut().run("view.scroll_into_view", json!({"track": "T99"})).is_err());
 }
 
+#[test]
+fn a_hidden_track_leaves_no_scroll_waiting_in_the_mix() {
+    let mut h = harness(20);
+    h.state_mut().ui.window = MainWindow::Mix;
+    h.state_mut().run("track.hide", json!({"tracks": ["T08"], "hidden": true})).unwrap();
+    h.run_steps(4);
+    let first = plate(&h, "T01").expect("the first strip's name").x;
+    h.state_mut().run("view.scroll_into_view", json!({"track": "T08"})).unwrap();
+    h.run_steps(4);
+
+    // Shown again later, T08 must not pull the Mix to itself: the request was for frames long gone.
+    h.state_mut().run("track.hide", json!({"tracks": ["T08"], "hidden": false})).unwrap();
+    h.run_steps(4);
+    let now = plate(&h, "T01").expect("T01 still on screen").x;
+    assert!((now - first).abs() < 1.0, "the Mix stayed put: T01 at {now}, was at {first}");
+}
