@@ -319,6 +319,8 @@ pub struct SoundApp {
     touched: std::collections::HashSet<TrackId>,
     /// The pass's last point; `i64::MIN` after a stop or a jump, so the next point erases nothing it skipped.
     last_write_at: Samples,
+    /// Plugins changed in their editors whose state the session hasn't taken yet (see `editor_states_due`).
+    editor_states: Vec<(TrackId, usize)>,
     pub frame_ms: f32,
     last_frame: Option<f64>,
     last_meter_poll: f64,
@@ -330,6 +332,29 @@ pub struct SoundApp {
     /// and colour assertions in one test can never straddle another test's palette change.
     #[cfg(test)]
     _palette_lock: theme::TestPaletteGuard,
+}
+
+/// The plugins whose state the session takes this frame, out of those changed in their editors
+/// (`pending`, kept across frames). A plugin editor doesn't say when a gesture ends: a plugin's
+/// gesture lasts while its editor reports a change every frame, and its state is read on the first
+/// frame its editor reports none, or as soon as the editor is closed. A drag reads and stores the
+/// state once, not every frame, and a plugin that keeps changing doesn't hold back the others.
+fn editor_states_due(
+    pending: &mut Vec<(TrackId, usize)>,
+    edits: &[soundcraft_playback::EditorEdit],
+    changed: Vec<(TrackId, usize)>,
+    closed: impl Fn((TrackId, usize)) -> bool,
+) -> Vec<(TrackId, usize)> {
+    let instruments = edits.iter().filter(|e| e.1 == soundcraft_mix::INSTRUMENT_SLOT).map(|e| (e.0, e.1));
+    let reported: Vec<(TrackId, usize)> = instruments.chain(changed).collect();
+    for k in &reported {
+        if !pending.contains(k) {
+            pending.push(*k);
+        }
+    }
+    let (due, rest) = std::mem::take(pending).into_iter().partition(|&k| !reported.contains(&k) || closed(k));
+    *pending = rest;
+    due
 }
 
 /// Whether another automation-write pass is due: the transport moved at least
@@ -395,6 +420,7 @@ impl SoundApp {
             arrange_request: false,
             touched: std::collections::HashSet::new(),
             last_write_at: i64::MIN,
+            editor_states: Vec::new(),
             frame_ms: 0.0,
             last_frame: None,
             last_meter_poll: f64::NEG_INFINITY,
@@ -631,21 +657,27 @@ impl SoundApp {
     /// Parameter edits made in plugin editors go into the session (one undo step per gesture).
     /// Hosted instruments keep their parameters in their own state, which the session takes
     /// instead, as it does for plugins that said their state changed: either way the session is
-    /// modified, so it is autosaved and asks to be saved.
+    /// modified, so it is autosaved and asks to be saved. The state is read once per gesture (see
+    /// `editor_states_due`).
     fn apply_editor_edits(&mut self) {
-        let Some(p) = &self.player else { return };
-        let mut instruments = Vec::new();
-        for (t, slot, param, value) in p.idle() {
+        let Some(p) = &self.player else {
+            self.editor_states.clear();
+            return;
+        };
+        let edits = p.idle();
+        let due = editor_states_due(&mut self.editor_states, &edits, p.changed_states(), |(t, slot)| !p.editor_open(t, slot));
+        let states = if due.is_empty() { Vec::new() } else { p.capture_states_of(&due) };
+        self.store_editor_changes(edits, states);
+    }
+
+    fn store_editor_changes(&mut self, edits: Vec<soundcraft_playback::EditorEdit>, states: soundcraft_playback::PluginStates) {
+        for (t, slot, param, value) in edits {
             if slot == soundcraft_mix::INSTRUMENT_SLOT {
-                if !instruments.contains(&(t, slot)) {
-                    instruments.push((t, slot));
-                }
                 continue;
             }
             let key = format!("param:{}:{slot}:{param}", t.0);
             let _ = self.engine.execute_merged("mix.insert_param", &json!({"track": t.0, "slot": slot, "param": param, "value": value}), &key);
         }
-        let states = p.capture_changed_states(&instruments);
         self.store_plugin_states(states);
     }
 
@@ -1324,6 +1356,7 @@ fn failed_plugin_status(s: &soundcraft_model::Session, track: TrackId, slot: usi
 mod tests {
     use super::{Services, SoundApp, automation_step_due};
     use serde_json::json;
+    use soundcraft_model::TrackId;
 
     #[test]
     fn new_session_stops_playback_and_the_old_clock() {
@@ -1536,6 +1569,108 @@ mod tests {
         }
         assert_eq!(app.engine.undo_history().len(), steps + 1);
         assert_eq!(app.engine.session().track(kick).unwrap().mixer.inserts[0].as_ref().unwrap().state_bytes(), Some(vec![59, 1]));
+    }
+
+    /// One UI frame of plugin editors: the instruments edited in theirs, the plugins that said
+    /// their state changed, the editors closed, and the state every plugin has now. Returns the
+    /// plugins whose state was read.
+    fn editor_frame(app: &mut SoundApp, edited: &[TrackId], changed: &[(TrackId, usize)], closed: &[TrackId], now: u8) -> Vec<(TrackId, usize)> {
+        let slot = soundcraft_mix::INSTRUMENT_SLOT;
+        let edits: Vec<_> = edited.iter().map(|&t| (t, slot, "cutoff".to_string(), f32::from(now))).collect();
+        let due = super::editor_states_due(&mut app.editor_states, &edits, changed.to_vec(), |(t, _)| closed.contains(&t));
+        let states = due.iter().map(|&(t, slot)| (t, slot, vec![now, 1])).collect();
+        app.store_editor_changes(edits, states);
+        due
+    }
+
+    fn instrument_state(app: &SoundApp, t: TrackId) -> Option<Vec<u8>> {
+        app.engine.session().track(t).unwrap().instrument.as_ref().unwrap().state_bytes()
+    }
+
+    #[test]
+    fn an_instrument_editor_drag_reads_and_stores_its_state_once() {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let keys = app.engine.session().track_by_name("Keys").unwrap().id;
+        let mut reads = Vec::new();
+        let mut revisions = Vec::new();
+        for now in 0..60 {
+            reads.extend(editor_frame(&mut app, &[keys], &[], &[], now));
+            revisions.push(app.engine.revision);
+        }
+        reads.extend(editor_frame(&mut app, &[], &[], &[], 59));
+        revisions.push(app.engine.revision);
+        assert_eq!(reads, [(keys, soundcraft_mix::INSTRUMENT_SLOT)]);
+        // The session goes to the audio thread on each new revision: once, not every frame.
+        revisions.dedup();
+        assert_eq!(revisions.len(), 2, "{revisions:?}");
+        assert_eq!(instrument_state(&app, keys), Some(vec![59, 1]));
+    }
+
+    #[test]
+    fn two_instrument_editor_drags_store_its_state_twice() {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let keys = app.engine.session().track_by_name("Keys").unwrap().id;
+        let mut reads = Vec::new();
+        for now in 0..10 {
+            reads.extend(editor_frame(&mut app, &[keys], &[], &[], now));
+        }
+        reads.extend(editor_frame(&mut app, &[], &[], &[], 9));
+        assert_eq!(instrument_state(&app, keys), Some(vec![9, 1]));
+        for now in 20..30 {
+            reads.extend(editor_frame(&mut app, &[keys], &[], &[], now));
+        }
+        reads.extend(editor_frame(&mut app, &[], &[], &[], 29));
+        assert_eq!(reads.len(), 2);
+        assert_eq!(instrument_state(&app, keys), Some(vec![29, 1]));
+    }
+
+    #[test]
+    fn closing_an_instrument_editor_mid_gesture_still_stores_its_state() {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let keys = app.engine.session().track_by_name("Keys").unwrap().id;
+        let lead = app.engine.session().track_by_name("Lead").unwrap().id;
+        let lead_before = instrument_state(&app, lead);
+        for now in 0..10 {
+            editor_frame(&mut app, &[keys, lead], &[], &[], now);
+        }
+        // Keys' editor closes on a frame it still reports a change in.
+        let reads = editor_frame(&mut app, &[keys, lead], &[], &[keys], 10);
+        assert_eq!(reads, [(keys, soundcraft_mix::INSTRUMENT_SLOT)]);
+        assert_eq!(instrument_state(&app, keys), Some(vec![10, 1]));
+        assert_eq!(instrument_state(&app, lead), lead_before);
+    }
+
+    #[test]
+    fn a_plugin_that_keeps_changing_does_not_hold_back_another_ones_state() {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let keys = app.engine.session().track_by_name("Keys").unwrap().id;
+        let kick = app.engine.session().track_by_name("Kick").unwrap().id;
+        app.run("mix.insert", json!({"track": kick.0, "plugin": "gain", "slot": 0})).unwrap();
+        // A plugin on Kick marks its state changed on every frame while Keys is dragged, then
+        // keeps doing it after the drag.
+        for now in 0..10 {
+            editor_frame(&mut app, &[keys], &[(kick, 0)], &[], now);
+        }
+        let reads = editor_frame(&mut app, &[], &[(kick, 0)], &[], 10);
+        assert_eq!(reads, [(keys, soundcraft_mix::INSTRUMENT_SLOT)]);
+        assert_eq!(instrument_state(&app, keys), Some(vec![10, 1]));
+        assert_eq!(app.editor_states, [(kick, 0)]);
+    }
+
+    #[test]
+    fn a_preset_changed_in_an_effect_editor_is_stored_once() {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let kick = app.engine.session().track_by_name("Kick").unwrap().id;
+        app.run("mix.insert", json!({"track": kick.0, "plugin": "gain", "slot": 0})).unwrap();
+        // No parameter edits: the plugin only says its state changed, frame after frame.
+        let mut reads = Vec::new();
+        for now in 0..5 {
+            reads.extend(editor_frame(&mut app, &[], &[(kick, 0)], &[], now));
+        }
+        reads.extend(editor_frame(&mut app, &[], &[], &[], 4));
+        assert_eq!(reads, [(kick, 0)]);
+        let state = app.engine.session().track(kick).unwrap().mixer.inserts[0].as_ref().unwrap().state_bytes();
+        assert_eq!(state, Some(vec![4, 1]));
     }
 
     #[test]

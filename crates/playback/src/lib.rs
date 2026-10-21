@@ -673,10 +673,15 @@ impl Player {
         self.side().capture_states()
     }
 
-    /// Reads the state of the plugins in `slots` and of those that said their state changed since
-    /// the last call, so the session keeps changes made only in plugin editors.
-    pub fn capture_changed_states(&self, slots: &[(TrackId, usize)]) -> PluginStates {
-        self.side().capture_changed_states(slots)
+    /// The plugins that said their state changed since the last call, so the session can keep
+    /// changes made only in plugin editors.
+    pub fn changed_states(&self) -> Vec<(TrackId, usize)> {
+        self.side().changed_states()
+    }
+
+    /// Reads the state of the plugins in `slots`.
+    pub fn capture_states_of(&self, slots: &[(TrackId, usize)]) -> PluginStates {
+        self.side().capture_states_of(slots)
     }
 
     /// Per-UI-frame housekeeping: drops retired instances and services plugin editors. Returns
@@ -801,11 +806,14 @@ impl Side {
         self.states.iter_mut().filter(|(k, _)| !self.refused.contains(*k)).filter_map(|(&(t, slot), r)| Some((t, slot, r.save_state()?))).collect()
     }
 
-    fn capture_changed_states(&mut self, slots: &[(TrackId, usize)]) -> PluginStates {
-        let changed: Vec<(TrackId, usize)> = self.editors.iter_mut().filter_map(|(k, e)| e.state_changed().then_some(*k)).collect();
+    fn changed_states(&mut self) -> Vec<(TrackId, usize)> {
+        self.editors.iter_mut().filter_map(|(k, e)| e.state_changed().then_some(*k)).collect()
+    }
+
+    fn capture_states_of(&mut self, slots: &[(TrackId, usize)]) -> PluginStates {
         self.states
             .iter_mut()
-            .filter(|(k, _)| !self.refused.contains(*k) && (slots.contains(k) || changed.contains(k)))
+            .filter(|(k, _)| !self.refused.contains(*k) && slots.contains(k))
             .filter_map(|(&(t, slot), r)| Some((t, slot, r.save_state()?)))
             .collect()
     }
@@ -1215,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_states_are_read_once_for_the_session() {
+    fn changed_states_are_reported_once_and_read_for_the_session() {
         let mut side = Side::new(48_000.0, channel().1);
         let (a, b) = (TrackId(1), TrackId(2));
         let synth = (a, soundcraft_mix::INSTRUMENT_SLOT);
@@ -1227,9 +1235,12 @@ mod tests {
         side.editors.insert((a, 1), Box::new(Dirty(false)));
         side.editors.insert((b, 0), Box::new(Dirty(true)));
         side.refused.insert((b, 0));
+        let mut changed = side.changed_states();
+        changed.sort();
+        assert_eq!(changed, vec![(a, 0), (b, 0)]);
+        assert!(side.changed_states().is_empty(), "each change is reported once");
         let want = vec![(a, 0, b"a0".to_vec()), (a, soundcraft_mix::INSTRUMENT_SLOT, b"synth".to_vec())];
-        assert_eq!(side.capture_changed_states(&[synth]), want);
-        assert!(side.capture_changed_states(&[]).is_empty(), "each change is read once");
+        assert_eq!(side.capture_states_of(&[(a, 0), synth, (b, 0)]), want);
     }
 
     #[test]
@@ -1238,7 +1249,7 @@ mod tests {
         let k = (TrackId(1), 0);
         side.states.insert(k, Box::new(|| Some(b"loaded".to_vec())));
         side.add_editor(k, Box::new(Dirty(true)));
-        assert!(side.capture_changed_states(&[]).is_empty());
+        assert!(side.changed_states().is_empty());
     }
 
     #[test]
