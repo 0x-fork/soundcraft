@@ -681,12 +681,18 @@ impl SoundApp {
         self.store_plugin_states(states);
     }
 
+    /// The session is modified, or a plugin editor gesture still holds a state the session hasn't
+    /// taken (see `editor_states_due`): both read the plugins' states before autosaving.
+    fn has_unsaved_changes(&self) -> bool {
+        self.engine.is_dirty() || !self.editor_states.is_empty()
+    }
+
     /// Every two minutes, copy a modified session to the autosave folder (not while recording).
     /// Timed by the wall clock: egui's stands still while the window is hidden.
     fn autosave(&mut self) {
         let Some(dir) = self.autosave_dir.clone() else { return };
         let last = *self.last_autosave.get_or_insert_with(std::time::Instant::now);
-        if last.elapsed().as_secs() < 120 || !self.engine.is_dirty() || self.engine.transport.recording {
+        if last.elapsed().as_secs() < 120 || !self.has_unsaved_changes() || self.engine.transport.recording {
             return;
         }
         self.last_autosave = Some(std::time::Instant::now());
@@ -749,7 +755,7 @@ impl SoundApp {
         if recording {
             self.stop_play();
         }
-        let keep = self.engine.is_dirty() && (recording || !self.quit_requested);
+        let keep = self.has_unsaved_changes() && (recording || !self.quit_requested);
         if keep {
             self.capture_plugin_states();
             self.write_autosave();
@@ -1442,6 +1448,41 @@ mod tests {
         let _ = egui::Context::default().run_logic(&raw, |ctx| app.logic(ctx));
         assert!(app.latest_autosave().is_some());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A clean demo session with its autosave folder, and an editor gesture still open on Keys
+    /// when `gesture` is set (its state hasn't reached the session yet).
+    fn app_with_editor_gesture(name: &str, gesture: bool) -> (SoundApp, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("soundcraft-{name}-{}-{gesture}", std::process::id()));
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        app.autosave_dir = Some(dir.clone());
+        if gesture {
+            let keys = app.engine.session().track_by_name("Keys").unwrap().id;
+            app.editor_states.push((keys, soundcraft_mix::INSTRUMENT_SLOT));
+        }
+        assert!(!app.engine.is_dirty());
+        (app, dir)
+    }
+
+    #[test]
+    fn an_open_plugin_editor_gesture_is_autosaved() {
+        for gesture in [false, true] {
+            let (mut app, dir) = app_with_editor_gesture("gesture-autosave", gesture);
+            app.last_autosave = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(121));
+            app.autosave();
+            assert_eq!(app.latest_autosave().is_some(), gesture);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn closing_during_a_plugin_editor_gesture_keeps_the_autosave() {
+        for gesture in [false, true] {
+            let (mut app, dir) = app_with_editor_gesture("gesture-close", gesture);
+            app.close_autosave();
+            assert_eq!(app.latest_autosave().is_some(), gesture);
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]
