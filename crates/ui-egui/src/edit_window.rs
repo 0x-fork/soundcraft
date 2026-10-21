@@ -1480,8 +1480,7 @@ pub(crate) fn track_context_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
     }
     // Only the track clicked: the command has one target, and the selection stays as it is.
     if ui.button("Scroll Into View").clicked() {
-        app.edit_scroll_into_view = Some(id);
-        app.mix_scroll_into_view = Some(id);
+        let _ = app.run("view.scroll_into_view", json!({"track": id.0}));
     }
     ui.separator();
     ui.menu_button("Track Height", |ui| {

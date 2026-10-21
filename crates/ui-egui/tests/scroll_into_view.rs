@@ -132,3 +132,21 @@ fn a_track_in_a_closed_folder_scrolls_the_mix_but_not_the_edit_window() {
     h.run_steps(4);
     assert_eq!(h.state().edit_layout.scroll_y, 0.0);
 }
+
+#[test]
+fn the_command_takes_a_track_by_name_from_the_control_channel() {
+    let mut h = harness(20);
+    h.state_mut().ui.window = MainWindow::Mix;
+    h.run_steps(4);
+    let first = plate(&h, "T01").expect("the first strip's name").x;
+    h.state_mut().run("view.scroll_into_view", json!({"track": "T08"})).unwrap();
+    h.run_steps(4);
+
+    let now = plate(&h, "T08").expect("T08 on screen").x;
+    assert!((now - first).abs() < 1.0, "T08 is the leftmost strip: at {now}, the first was at {first}");
+    h.state_mut().ui.window = MainWindow::Edit;
+    h.run_steps(4);
+    assert_eq!(edit_row(&h, "T08")[1], h.state().edit_layout.timeline[1], "the Edit window scrolled too");
+    assert!(h.state_mut().run("view.scroll_into_view", json!({"track": "T99"})).is_err());
+}
+

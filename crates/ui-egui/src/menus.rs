@@ -69,6 +69,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.io_setup", "I/O Setup", "", None),
     ("window.shortcuts", "Keyboard Shortcuts", "", None),
     ("view.mix_section", "Mix Window View", "", None),
+    ("view.scroll_into_view", "Scroll Into View", "", None),
     ("ui.new_tracks_dialog", "New Tracks…", "", None),
     ("ui.bounce_dialog", "Bounce Mix…", "", None),
     ("ui.set", "Set UI State", "", None),
@@ -646,6 +647,20 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
                 }
             }
             json!({"mix_views": app.ui.mix_views})
+        }
+        "view.scroll_into_view" => {
+            // `track` (id or name), else the first selected track: the palette passes no params.
+            let track = match soundcraft_engine::cmd::track_param(&app.engine, id, p, "track") {
+                Ok(Some(t)) => t,
+                Ok(None) => match app.engine.session().edit.selected_tracks.first() {
+                    Some(t) => *t,
+                    None => return Some(Err("view.scroll_into_view: pass `track` or select a track".into())),
+                },
+                Err(e) => return Some(Err(e.to_string())),
+            };
+            app.edit_scroll_into_view = Some(track);
+            app.mix_scroll_into_view = Some(track);
+            json!({"track": track.0})
         }
         "ui.new_tracks_dialog" => {
             return Some(Err("ui.new_tracks_dialog opens a dialog from the menu only; call track.new with parameters".into()));
