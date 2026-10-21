@@ -70,7 +70,7 @@ impl AutoParam {
         match self {
             AutoParam::Volume => "volume".into(),
             AutoParam::Pan(0) => "pan".into(),
-            AutoParam::Pan(i) => format!("pan {}", i + 1),
+            AutoParam::Pan(i) => format!("pan {}", u16::from(*i) + 1),
             AutoParam::Mute => "mute".into(),
             AutoParam::SendLevel(i) => format!("send {} level", slot_letter(*i)),
             AutoParam::SendPan(i) => format!("send {} pan", slot_letter(*i)),
@@ -250,6 +250,11 @@ impl AutomationLane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pan_label_max_does_not_overflow() {
+        assert_eq!(AutoParam::Pan(255).label(), "pan 256");
+    }
 
     #[test]
     fn interpolation_and_steps() {
