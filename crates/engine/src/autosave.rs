@@ -541,8 +541,7 @@ mod tests {
         assert_eq!((mode(&new), mode(&session), mode(&session.join("Audio Files"))), (0o700, 0o700, 0o700));
         w.close(false);
         w.flush().unwrap();
-        // A root that already exists keeps its mode; the folders made inside it are owner-only,
-        // also the one a session never saved records its takes into.
+        // A root that already exists keeps its mode; the folders made inside it are owner-only.
         let old = base.join("old");
         std::fs::create_dir_all(&old).unwrap();
         std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -550,8 +549,17 @@ mod tests {
         w.write(e.session_arc(), None, None);
         w.flush().unwrap();
         let session = std::fs::read_dir(&old).unwrap().flatten().map(|d| d.path()).next().unwrap();
-        create_folder(&old.join("Untitled")).unwrap();
-        assert_eq!((mode(&old), mode(&session), mode(&old.join("Untitled"))), (0o755, 0o700, 0o700));
+        assert_eq!((mode(&old), mode(&session)), (0o755, 0o700));
+        // A session never saved records its takes into `<name>/Audio Files` under the root. Both
+        // are made owner-only, and so is `Audio Files` in a take folder an earlier version left.
+        let takes = old.join("Untitled").join("Audio Files");
+        create_folder(&takes).unwrap();
+        assert_eq!((mode(&old.join("Untitled")), mode(&takes)), (0o700, 0o700));
+        let earlier = old.join("Earlier");
+        std::fs::create_dir_all(&earlier).unwrap();
+        std::fs::set_permissions(&earlier, std::fs::Permissions::from_mode(0o755)).unwrap();
+        create_folder(&earlier.join("Audio Files")).unwrap();
+        assert_eq!((mode(&earlier), mode(&earlier.join("Audio Files"))), (0o755, 0o700));
         w.close(false);
         w.flush().unwrap();
         let _ = std::fs::remove_dir_all(&base);
