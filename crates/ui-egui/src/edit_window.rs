@@ -2471,11 +2471,16 @@ fn automation_id(p: &AutoParam) -> String {
         AutoParam::Pan(0) => "pan".into(),
         AutoParam::Pan(_) => "pan2".into(),
         AutoParam::Mute => "mute".into(),
-        AutoParam::SendLevel(i) => format!("send_{}_level", (b'a' + i) as char),
-        AutoParam::SendPan(i) => format!("send_{}_pan", (b'a' + i) as char),
-        AutoParam::SendMute(i) => format!("send_{}_mute", (b'a' + i) as char),
-        AutoParam::Plugin { slot, param } => format!("plugin:{}:{param}", (b'a' + slot) as char),
+        AutoParam::SendLevel(i) => format!("send_{}_level", slot_id(*i)),
+        AutoParam::SendPan(i) => format!("send_{}_pan", slot_id(*i)),
+        AutoParam::SendMute(i) => format!("send_{}_mute", slot_id(*i)),
+        AutoParam::Plugin { slot, param } => format!("plugin:{}:{param}", slot_id(*slot)),
     }
+}
+
+/// A slot as `AutoParam::parse` reads it: a letter for 0..=25, the number beyond that.
+fn slot_id(i: u8) -> String {
+    if i < 26 { char::from(b'a' + i).to_string() } else { i.to_string() }
 }
 
 /// Grid snapping while dragging; holding Cmd/Ctrl swaps Grid and Slip.
@@ -2780,6 +2785,17 @@ fn overlay(app: &mut SoundApp, ui: &mut Ui, tl: Rect, area: Rect) {
 mod tests {
     use super::*;
     use egui_kittest::Harness;
+
+    #[test]
+    fn automation_id_round_trips_for_high_slots() {
+        for slot in [0u8, 25, 26, 155, 156, 255] {
+            for p in
+                [AutoParam::SendLevel(slot), AutoParam::SendPan(slot), AutoParam::SendMute(slot), AutoParam::Plugin { slot, param: "trim".into() }]
+            {
+                assert_eq!(AutoParam::parse(&automation_id(&p)), Some(p));
+            }
+        }
+    }
 
     #[test]
     fn follow_jumps_to_offscreen_playhead_while_playing() {
