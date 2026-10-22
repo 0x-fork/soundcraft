@@ -199,7 +199,11 @@ impl AutomationLane {
         }
         self.set_point(start, value);
         self.set_point(end, value);
-        self.set_point(end.saturating_add(1), after);
+        let anchor = end.saturating_add(1);
+        // A real breakpoint already at `end + 1` keeps its own value.
+        if self.points.binary_search_by(|p| p.at.cmp(&anchor)).is_err() {
+            self.set_point(anchor, after);
+        }
     }
 
     /// Thin: remove points whose removal changes the curve by less than `tolerance`.
@@ -269,6 +273,15 @@ mod tests {
         m.set_point(100, 1.0);
         assert_eq!(m.value_at(99, 0.0), 0.0);
         assert_eq!(m.value_at(100, 0.0), 1.0);
+    }
+
+    #[test]
+    fn write_range_keeps_point_right_after_end() {
+        let mut l = AutomationLane::new(AutoParam::Volume);
+        l.set_point(0, 0.0);
+        l.set_point(11, -100.0);
+        l.write_range(2, 10, -20.0, 0.0);
+        assert_eq!(l.value_at(11, 0.0), -100.0);
     }
 
     #[test]
