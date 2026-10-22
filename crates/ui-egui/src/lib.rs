@@ -600,6 +600,11 @@ impl SoundApp {
         if plan.is_empty() {
             return Err("no audio track is record-enabled".into());
         }
+        // The takes are unsaved work: the folder under the autosave root is owner-only, like the
+        // autosaves, before the recorder makes anything in it.
+        if self.engine.path.is_none() && self.autosave_dir.is_some() {
+            soundcraft_engine::autosave::create_folder(&unsaved_dir).map_err(|e| format!("{}: {e}", unsaved_dir.display()))?;
+        }
         let takes = plan
             .iter()
             .map(|(track, inputs, path)| soundcraft_engine::io::Take { track: *track, path: path.clone(), channels: inputs.len() })
