@@ -316,6 +316,7 @@ impl Engine {
         let before = Arc::clone(&self.doc);
         let rev = self.revision;
         let dirty = self.dirty;
+        let side_effects = (self.clipboard.clone(), self.messages.clone(), self.transport_requests.clone(), self.last_selection.clone());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (spec.run)(self, params)));
         let result = match result {
             Ok(r) => r,
@@ -323,6 +324,7 @@ impl Engine {
                 self.doc = before;
                 self.revision = rev.wrapping_add(1);
                 self.dirty = dirty;
+                (self.clipboard, self.messages, self.transport_requests, self.last_selection) = side_effects;
                 return Err(EngineError::Internal(id.to_string(), panic_message(&*p)));
             }
         };
@@ -519,5 +521,23 @@ mod dirty_tests {
         assert!(e.is_dirty());
         e.undo();
         assert!(!e.is_dirty());
+    }
+}
+
+#[cfg(test)]
+mod panic_tests {
+    use super::*;
+
+    #[test]
+    fn a_panicking_command_restores_side_effect_state() {
+        let mut e = Engine::default();
+        let (clipboard, messages, requests, selection) =
+            (e.clipboard.clone(), e.messages.clone(), e.transport_requests.clone(), e.last_selection.clone());
+        let r = e.execute("test.panic_probe", &json!({"panic": true}));
+        assert!(matches!(r, Err(EngineError::Internal(..))));
+        assert_eq!(e.clipboard, clipboard);
+        assert_eq!(e.messages, messages);
+        assert_eq!(e.transport_requests, requests);
+        assert_eq!(e.last_selection, selection);
     }
 }

@@ -38,6 +38,27 @@ mod view_more;
 mod vst3;
 mod zoom_toggle;
 
+#[cfg(test)]
+mod panic_probe {
+    use super::*;
+    use crate::cmd;
+
+    pub fn specs() -> Vec<CommandSpec> {
+        vec![cmd!(noundo "test.panic_probe", "Panic Probe", [], None, "{}", always, probe)]
+    }
+
+    fn probe(e: &mut Engine, p: &Value) -> Result<Value> {
+        if p.get("panic").is_none() {
+            return Ok(Value::Null);
+        }
+        e.clipboard.length = 123;
+        e.message("probe");
+        e.transport_requests.push(crate::TransportRequest::Play);
+        e.last_selection = Some((soundcraft_time::Range::new(0, 10), Vec::new()));
+        panic!("probe")
+    }
+}
+
 pub use file::bounce_job;
 
 pub(crate) use edit::remember_selection;
@@ -136,6 +157,8 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(sampler::specs());
         v.extend(video::specs());
         v.extend(zoom_toggle::specs());
+        #[cfg(test)]
+        v.extend(panic_probe::specs());
         v
     })
 }
