@@ -224,13 +224,19 @@ pub fn tracks_param(e: &Engine, cmd: &str, p: &Value) -> Result<Vec<TrackId>> {
     if let Some(arr) = p.get("tracks").and_then(Value::as_array) {
         let s = e.session();
         let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for v in arr {
             let id = match (v.as_u64(), v.as_str()) {
                 (Some(n), _) => s.track(TrackId(n)).map(|t| t.id),
                 (_, Some(name)) => s.track_by_name(name).map(|t| t.id),
                 _ => None,
             };
-            out.push(id.ok_or_else(|| bad(cmd, format!("unknown track {v}")))?);
+            let id = id.ok_or_else(|| bad(cmd, format!("unknown track {v}")))?;
+            // Duplicates multiply the work (each entry renders and keeps its own result), so drop
+            // repeated ids instead of letting them blow the budget.
+            if seen.insert(id) {
+                out.push(id);
+            }
         }
         return Ok(out);
     }
