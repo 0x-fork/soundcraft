@@ -4,6 +4,7 @@
 //! executing commands. It can be replaced without touching anything below it.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod appearance;
 pub mod bounce;
 pub mod control;
 pub mod credits;
