@@ -573,15 +573,10 @@ impl<'a> SliceDecoder<'a> {
     fn temporal_direct_mvs(dsf: i32, mv_col: [i16; 2]) -> ([i16; 2], [i16; 2]) {
         const MV_MIN: i32 = -(1 << 15);
         const MV_MAX: i32 = (1 << 15) - 1;
-        let scaled = |c: i16| ((dsf * i32::from(c) + 128) >> 8).clamp(MV_MIN, MV_MAX) as i16;
-        let m0 = [scaled(mv_col[0]), scaled(mv_col[1])];
-        (
-            m0,
-            [
-                (i32::from(m0[0]) - i32::from(mv_col[0])).clamp(MV_MIN, MV_MAX) as i16,
-                (i32::from(m0[1]) - i32::from(mv_col[1])).clamp(MV_MIN, MV_MAX) as i16,
-            ],
-        )
+        // mvL1 comes from the unclamped scaled value, as in the spec; only the results are clamped.
+        let m0 = mv_col.map(|c| (dsf * i32::from(c) + 128) >> 8);
+        let clamp = |v: i32| v.clamp(MV_MIN, MV_MAX) as i16;
+        (m0.map(clamp), [clamp(m0[0] - i32::from(mv_col[0])), clamp(m0[1] - i32::from(mv_col[1]))])
     }
 
     /// Derive direct-mode motion for the 8x8 blocks in `b8_mask` of the current MB.
@@ -1505,6 +1500,10 @@ mod tests {
         let (m0, m1) = SliceDecoder::temporal_direct_mvs(-1024, [-32768, 32767]);
         assert_eq!(m0, [32767, -32768]);
         assert_eq!(m1, [32767, -32768]);
+        // mvL1 is derived from the unclamped mvL0: (512 * 32767 + 128) >> 8 = 65534, minus 32767.
+        let (m0, m1) = SliceDecoder::temporal_direct_mvs(512, [32767, 0]);
+        assert_eq!(m0, [32767, 0]);
+        assert_eq!(m1, [32767, 0]);
         // DistScaleFactor 256 (tb == td) reproduces the co-located mv: mvL1 = 0.
         let (m0, m1) = SliceDecoder::temporal_direct_mvs(256, [40, -4]);
         assert_eq!(m0, [40, -4]);
