@@ -80,7 +80,10 @@ pub fn stored_path(stored: &str, session: &Path) -> std::result::Result<PathBuf,
 /// Create `dir` and its parents, inside the automation write root when there is one.
 pub(crate) fn make_dir(dir: impl AsRef<Path>) -> Result<()> {
     let dir = dir.as_ref();
-    crate::file_access::check_write(dir).map_err(EngineError::Io)?;
+    // The empty folder of a bare file name ("t.scraft") is the working directory, which the root
+    // check would refuse as an empty path.
+    let checked = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+    crate::file_access::check_write(checked).map_err(EngineError::Io)?;
     std::fs::create_dir_all(dir).map_err(|err| EngineError::Io(format!("{}: {err}", dir.display())))
 }
 
