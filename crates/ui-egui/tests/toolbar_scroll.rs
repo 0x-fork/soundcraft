@@ -5,13 +5,10 @@ use soundcraft_ui_egui::{Services, SoundApp};
 
 const WIDTH: f32 = 700.0;
 
-/// Left edge of the toolbar's tempo field (the last group but one), once painted.
-fn tempo_x(h: &egui_kittest::Harness<'_, SoundApp>) -> Option<(f32, f32)> {
+/// The toolbar's tempo text (the last group but one) and the clip rect it is painted in, once painted.
+fn tempo(h: &egui_kittest::Harness<'_, SoundApp>) -> Option<(egui::Rect, egui::Rect)> {
     h.output().shapes.iter().find_map(|c| match &c.shape {
-        Shape::Text(t) if t.galley.text() == "120.0000" => {
-            let r = t.galley.rect.translate(t.pos.to_vec2());
-            Some((r.min.x, r.center().y))
-        }
+        Shape::Text(t) if t.galley.text() == "120.0000" => Some((t.galley.rect.translate(t.pos.to_vec2()), c.clip_rect)),
         _ => None,
     })
 }
@@ -32,7 +29,7 @@ fn a_narrow_window_scrolls_the_toolbar_to_reach_the_tempo() {
         h.step();
     }
     // Off the right edge, so egui culls it (or paints it beyond the window).
-    assert!(tempo_x(&h).is_none_or(|(x, _)| x > WIDTH), "the tempo should start off-screen in a {WIDTH} pt window");
+    assert!(tempo(&h).is_none_or(|(r, _)| r.min.x > WIDTH), "the tempo should start off-screen in a {WIDTH} pt window");
     let y = 40.0;
 
     // Wheel over the toolbar (a vertical wheel does not scroll a horizontal-only area, a horizontal one does).
@@ -46,6 +43,9 @@ fn a_narrow_window_scrolls_the_toolbar_to_reach_the_tempo() {
         });
         h.step();
     }
-    let at = tempo_x(&h).map(|(x, _)| x);
-    assert!(at.is_some_and(|x| x < WIDTH - 20.0), "scrolling the toolbar must bring the tempo into the window, it is at {at:?}");
+    let at = tempo(&h);
+    assert!(
+        at.is_some_and(|(r, clip)| r.min.x >= 0.0 && r.max.x <= WIDTH && clip.contains_rect(r)),
+        "scrolling the toolbar must bring the whole tempo into the window, unclipped: (text, clip) = {at:?}"
+    );
 }
