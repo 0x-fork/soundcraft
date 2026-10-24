@@ -1,4 +1,5 @@
-// Regression test for #264: the Edit toolbar clipped its tools in a narrow window; it now scrolls horizontally.
+//! Regression test for #264: the Edit toolbar clipped its tools in a narrow window; it now scrolls horizontally.
+
 use egui::{Event, Pos2, Shape, vec2};
 use serde_json::json;
 use soundcraft_ui_egui::{Services, SoundApp};
