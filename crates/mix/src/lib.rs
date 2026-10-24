@@ -682,7 +682,7 @@ impl MixEngine {
         let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
         run_strips(&mut work, |(i, st)| {
             if let Some(t) = s.tracks.get(*i) {
-                process_strip(s, t, st, &busses, &live_in, pos, frames, any_solo);
+                process_strip(s, t, st, &busses, &live_in, Block { pos, frames, any_solo });
             }
         });
         self.busses = busses;
@@ -761,7 +761,7 @@ impl MixEngine {
                 st.scratch.resize(self.max_block, 0.0);
             }
             let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
-            process_strip(s, t, &mut st, &self.busses, &live_in, pos, frames, any_solo);
+            process_strip(s, t, &mut st, &self.busses, &live_in, Block { pos, frames, any_solo });
             let ch = st.buf.len();
             st.align.set(if pdc { lmax_a.saturating_sub(st.latency) } else { 0 }, ch);
             st.align.process(&mut st.buf, frames);
@@ -924,16 +924,16 @@ struct LiveInput<'a> {
     recording: bool,
 }
 
-fn process_strip(
-    s: &Session,
-    t: &Track,
-    strip: &mut Strip,
-    busses: &HashMap<BusId, BusBuf>,
-    live: &LiveInput<'_>,
+/// The block being rendered: its timeline position, length in frames, and whether any track is soloed.
+#[derive(Clone, Copy)]
+struct Block {
     pos: Samples,
     frames: usize,
     any_solo: bool,
-) {
+}
+
+fn process_strip(s: &Session, t: &Track, strip: &mut Strip, busses: &HashMap<BusId, BusBuf>, live: &LiveInput<'_>, block: Block) {
+    let Block { pos, frames, any_solo } = block;
     for c in strip.buf.iter_mut() {
         c.iter_mut().take(frames).for_each(|x| *x = 0.0);
     }
