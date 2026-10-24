@@ -1,6 +1,5 @@
 //! Aux and routing-folder dependencies preserve PCM beyond eight hops. Cyclic graphs keep
 //! the established whole-graph fallback, including its session-order-dependent audio.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use soundcraft_audio_io::AudioBuffer;
 use soundcraft_mix::{MixEngine, render_range};

@@ -1,6 +1,6 @@
 //! Track presets capture the hosted plugin's current state before writing the model.
 
-#[path = "../../clap-host/tests/common/mod.rs"]
+#[path = "../../../clap-host/tests/common/mod.rs"]
 mod common;
 
 use serde_json::{Value, json};

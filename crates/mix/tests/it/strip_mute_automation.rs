@@ -1,5 +1,4 @@
 //! Ordinary strip mute changes sample gates without splitting processor blocks.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use soundcraft_audio_io::AudioBuffer;
 use soundcraft_dsp::Plugin;
 use soundcraft_mix::{MixEngine, PreparedInstance, render_range};
