@@ -96,6 +96,9 @@ regression tests verify rendered impulse timing, retained healthy latency and re
 instead of discarding the right side. Surround mixes average both sides of the ITU stereo
 fold-down. Regression tests cover right-only and left-only audio, equal and opposite-polarity
 channels, clipping order, centered mono tracks, each 5.1 channel and 1-, 37- and 512-frame callbacks.
+**Fixed (2026-10-16):** Split into Mono now gives each output track its own source channel,
+including surround channels, instead of repeating channel zero. Clip edits, source timestamps,
+Undo/Redo and save/reopen are covered by regression tests; missing or empty media fails atomically.
 
 Open on 2026-10-10 (several have PRs open):
 editing #3, #5, #140, #144; clip/session #86 (PR #123), #88 (PR #130), #91 (PR #124), #92 (PR #132);
@@ -180,8 +183,10 @@ varispeed, high-quality offline) plus Elastic Pitch and warp-marker editing dept
 
 ### G-16. Session management
 
-No session templates, track presets, workspace/sound browser with previews, batch rename (new in
-2026.4), disk-usage and relink depth. ≈ 25–40 h.
+Session templates, track-preset recall UI and browser, workspace/sound browser with previews,
+batch rename (new in 2026.4), disk-usage and relink depth remain. Track-preset saves capture the
+current hosted-plugin state before writing (#661); recall UI, partial recall and preset browsing remain
+tracked in #639. ≈ 25–40 h.
 
 ### G-17. Video and post
 
@@ -220,6 +225,8 @@ missing. Out of scope unless the owner decides otherwise.
 | 2026-10-18 | trivial | G-04: mono device stereo/surround fold-down fixed and regression-tested; estimates unchanged |
 | 2026-10-16 | trivial | G-04: master volume automation block boundaries fixed and regression-tested; estimates unchanged |
 | 2026-10-16 | trivial | G-04: failed aux/folder/master inserts excluded from latency compensation after containment; estimates unchanged |
+| 2026-10-16 | trivial | G-04: Split into Mono channel preservation fixed and regression-tested; estimates unchanged |
+| 2026-10-16 | minor | G-16: capture current hosted-plugin state before saving a track preset (#661); broader preset work remains (#639) |
 | 2026-10-12 | minor | G-01 shrunk: audio device, rate and buffer choice; opt-in ASIO |
 | 2026-10-10 | minor | Marked the alpha blockers (G-01, G-02, G-03; parts of G-05 and G-06) from the core-workflow gate |
 | 2026-10-10 | major | Created from the full re-measure against Pro Tools Ultimate 2026.4.1: 22 ranked gaps with evidence and estimates |
