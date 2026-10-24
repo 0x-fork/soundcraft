@@ -247,7 +247,9 @@ impl Clip {
         // #907: these are public APIs, so they have to survive arguments a command would never
         // pass (commands clamp to `MAX_POSITION` first). `Samples` is `i64`, so an extreme
         // `new_start` against an extreme `start` wrapped in release and panicked in debug.
-        let new_start = new_start.clamp(-MAX_POSITION, MAX_POSITION).min(self.end().saturating_sub(1));
+        // Never so far back that the length would pass `MAX_POSITION`: trimming the start keeps the end.
+        let end = self.end();
+        let new_start = new_start.max(end.saturating_sub(MAX_POSITION)).clamp(-MAX_POSITION, MAX_POSITION).min(end.saturating_sub(1));
         let delta = new_start.saturating_sub(self.start);
         if let ClipContent::Audio { offset, .. } | ClipContent::Video { offset, .. } = &mut self.content {
             *offset = offset.saturating_add(delta);
@@ -495,6 +497,7 @@ mod tests {
             c.trim_start_to(new_start);
             assert!((-(MAX_POSITION as i128)..=(MAX_POSITION as i128)).contains(&(c.start as i128)), "start {new_start}: {}", c.start);
             assert!((1..=MAX_POSITION).contains(&c.length), "start {new_start}: length {}", c.length);
+            assert_eq!(c.end(), MAX_POSITION / 2 + 1000, "start {new_start} moved the end");
         }
         for &new_end in &[Samples::MIN, -(MAX_POSITION * 2), -1, 0, MAX_POSITION, MAX_POSITION * 2, Samples::MAX] {
             let mut c = Clip::audio(ClipId(2), "b", SourceId(1), 1000, -(MAX_POSITION / 2), 1000);
