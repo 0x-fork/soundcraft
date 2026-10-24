@@ -2,7 +2,7 @@
 // Integration tests: unwrapping and panicking on failure is fine here, unlike in shipped code (AGENTS.md).
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
@@ -27,7 +27,16 @@ fn tmpdir(tag: &str) -> PathBuf {
 /// Send `calls` (tool name, arguments) to `soundcraft-cli mcp <args>`; returns whether it exited
 /// cleanly, its stderr, and the stdout lines after `initialize`, one per call.
 fn mcp_session(args: &[&str], calls: &[(&str, Value)]) -> (bool, String, Vec<Value>) {
-    let mut child = bin().arg("mcp").args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    mcp_session_in(None, args, calls)
+}
+
+/// [`mcp_session`] with the server started in the working directory `cwd`.
+fn mcp_session_in(cwd: Option<&Path>, args: &[&str], calls: &[(&str, Value)]) -> (bool, String, Vec<Value>) {
+    let mut cmd = bin();
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    let mut child = cmd.arg("mcp").args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     {
         let stdin = child.stdin.as_mut().unwrap();
         writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-06-18"}}}}"#).unwrap();
@@ -99,6 +108,24 @@ fn mcp_automation_roots_confine_the_server() {
     assert!(success);
     assert_eq!(replies[0]["result"]["isError"], false, "{}", replies[0]);
     let _ = std::fs::remove_dir_all(base);
+}
+
+#[test]
+fn a_bare_save_session_name_lands_in_the_working_directory_inside_the_roots() {
+    let work = tmpdir("bare-name");
+    let work_s = work.to_str().unwrap();
+    let calls = [
+        ("new_session", serde_json::json!({"name": "t", "sample_rate": 48000})),
+        ("execute", serde_json::json!({"command": "track.new", "params": {"kind": "audio", "name": "Tone", "format": "mono"}})),
+        ("save_session", serde_json::json!({"path": "t.scraft"})),
+    ];
+    let (success, stderr, replies) = mcp_session_in(Some(&work), &["--automation-read-root", work_s, "--automation-write-root", work_s], &calls);
+    assert!(success, "{stderr}");
+    for reply in &replies {
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+    }
+    assert!(work.join("t.scraft").is_file());
+    let _ = std::fs::remove_dir_all(work);
 }
 
 #[test]
