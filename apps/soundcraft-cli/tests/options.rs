@@ -120,3 +120,11 @@ fn run_bounces_with_the_inline_value_form() {
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert!(out.exists(), "--bounce=PATH should write the file");
 }
+
+#[test]
+fn run_executes_the_inline_cmd_form() {
+    let o = run(&["run", "--cmd=track.new", "--cmd", "track.new"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(stdout.lines().filter(|l| l.starts_with("track.new: ")).count(), 2, "both --cmd forms should run: {stdout}");
+}

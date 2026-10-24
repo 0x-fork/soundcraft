@@ -354,22 +354,24 @@ fn run(args: &[String]) -> ExitCode {
         Ok(e) => e,
         Err(err) => return fail(err),
     };
-    let mut i = 0;
-    while i < args.len() {
-        if args.get(i).is_some_and(|a| a == "--cmd")
-            && let Some(spec) = args.get(i + 1)
-        {
-            let (id, params) = match parse_cmd_spec(spec) {
-                Ok(v) => v,
-                Err(err) => return fail(err),
-            };
-            match e.execute(&id, &params) {
-                Ok(v) => outln!("{id}: {v}"),
-                Err(err) => return fail(format!("{id}: {err}")),
-            }
-            i += 1;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let spec = match a.strip_prefix("--cmd=") {
+            Some(inline) => inline,
+            None if a == "--cmd" => match it.next() {
+                Some(next) => next,
+                None => continue,
+            },
+            None => continue,
+        };
+        let (id, params) = match parse_cmd_spec(spec) {
+            Ok(v) => v,
+            Err(err) => return fail(err),
+        };
+        match e.execute(&id, &params) {
+            Ok(v) => outln!("{id}: {v}"),
+            Err(err) => return fail(format!("{id}: {err}")),
         }
-        i += 1;
     }
     finish(&mut e, args)
 }
