@@ -30,9 +30,10 @@ pub struct OpsState {
     pub rtp_transpose: i64,
     pub rtp_duration: f64,
     pub rtp_delay: i64,
-    /// The MIDI tracks the Real-Time Properties form was last filled from: the form re-reads the
-    /// tracks when the target selection changes (#444).
+    /// The MIDI tracks the Real-Time Properties form was last filled from, and the values it read:
+    /// the form re-reads the tracks when either changes (#444).
     pub rtp_targets: Vec<soundcraft_model::TrackId>,
+    pub rtp_loaded: Option<RtpValues>,
     pub identify_bars: u32,
 }
 
@@ -61,6 +62,7 @@ impl Default for OpsState {
             rtp_duration: 100.0,
             rtp_delay: 0,
             rtp_targets: Vec::new(),
+            rtp_loaded: None,
             identify_bars: 1,
         }
     }
@@ -265,17 +267,8 @@ fn rtp(app: &mut SoundApp, ctx: &egui::Context) {
     if !open {
         return;
     }
-    // Fill the form from the tracks it edits whenever the target selection changes, so it never
-    // shows (and a control change never writes back) stale defaults (#444).
     let targets = app.engine.target_tracks();
-    if app.ops.rtp_targets != targets {
-        app.ops.rtp_targets = targets.clone();
-        let (velocity, transpose, duration, delay) = rtp_form_values(app.engine.session(), &targets);
-        app.ops.rtp_velocity = velocity;
-        app.ops.rtp_transpose = transpose;
-        app.ops.rtp_duration = duration;
-        app.ops.rtp_delay = delay;
-    }
+    sync_rtp_form(&mut app.ops, app.engine.session(), targets, ctx.dragged_id().is_some());
     egui::Window::new("MIDI Real-Time Properties").open(&mut open).default_size(vec2(340.0, 200.0)).show(ctx, |ui| {
         ui.label("Non-destructive, applied at playback to the selected MIDI tracks.");
         let mut changed = RtpChanged::default();
@@ -330,9 +323,28 @@ fn rtp_params(changed: RtpChanged, ops: &OpsState) -> Option<Value> {
     (!p.is_empty()).then_some(Value::Object(p))
 }
 
+/// Velocity, transpose, duration % and delay, as the form shows them.
+pub type RtpValues = (i64, i64, f64, i64);
+
+/// Fills the form from the tracks it edits whenever the targets or their stored values change
+/// (selection, undo, a command), so it never shows (and a control change never writes back) stale
+/// values (#444). A slider being dragged keeps its value until it is released.
+fn sync_rtp_form(ops: &mut OpsState, s: &soundcraft_model::Session, targets: Vec<soundcraft_model::TrackId>, dragging: bool) {
+    let values = rtp_form_values(s, &targets);
+    if ops.rtp_targets != targets || (ops.rtp_loaded != Some(values) && !dragging) {
+        let (velocity, transpose, duration, delay) = values;
+        ops.rtp_targets = targets;
+        ops.rtp_loaded = Some(values);
+        ops.rtp_velocity = velocity;
+        ops.rtp_transpose = transpose;
+        ops.rtp_duration = duration;
+        ops.rtp_delay = delay;
+    }
+}
+
 /// The values the form shows for `targets`: the first target's own Real-Time Properties, or the
 /// neutral defaults when nothing is selected.
-fn rtp_form_values(s: &soundcraft_model::Session, targets: &[soundcraft_model::TrackId]) -> (i64, i64, f64, i64) {
+fn rtp_form_values(s: &soundcraft_model::Session, targets: &[soundcraft_model::TrackId]) -> RtpValues {
     let Some(&t) = targets.first() else { return (0, 0, 100.0, 0) };
     let value = |key: &str, d: f64| s.edit.value(&format!("rtp.{}.{key}", t.0), d);
     (
@@ -385,5 +397,21 @@ mod tests {
         e.execute("event.midi_rtp", &json!({"track": t.0, "velocity": -12, "transpose": 7, "duration": 50.0, "delay": 480})).unwrap();
         assert_eq!(rtp_form_values(e.session(), &[]), (0, 0, 100.0, 0), "no target: the neutral defaults");
         assert_eq!(rtp_form_values(e.session(), &[t]), (-12, 7, 50.0, 480));
+    }
+
+    /// Undo keeps the same targets but changes their stored values: the form follows.
+    #[test]
+    fn the_rtp_form_follows_an_undo_on_the_same_targets() {
+        let mut e = soundcraft_engine::Engine::default();
+        e.execute("track.new", &json!({"kind": "instrument", "name": "Synth"})).unwrap();
+        let t = e.session().tracks.last().unwrap().id;
+        let mut ops = OpsState::default();
+        sync_rtp_form(&mut ops, e.session(), vec![t], false);
+        e.execute("event.midi_rtp", &json!({"track": t.0, "velocity": -12})).unwrap();
+        sync_rtp_form(&mut ops, e.session(), vec![t], false);
+        assert_eq!(ops.rtp_velocity, -12);
+        e.execute("edit.undo", &json!({})).unwrap();
+        sync_rtp_form(&mut ops, e.session(), vec![t], false);
+        assert_eq!(ops.rtp_velocity, 0, "the form kept the undone value");
     }
 }
