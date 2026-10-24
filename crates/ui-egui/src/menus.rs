@@ -166,6 +166,7 @@ const DIALOG_COMMANDS: &[&str] = &[
     "event.quantize",
     "event.transpose",
     "edit.strip_silence",
+    "clip.auto_rename",
     "clip.rename",
 ];
 

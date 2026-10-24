@@ -26,6 +26,8 @@ pub enum Dialog {
     StripSilence { threshold: f64, min_ms: f64, pre_ms: f64, post_ms: f64 },
     // Strip Silence › Rename: `strip` holds the Strip Silence values to return to.
     StripSilenceRename { strip: [f64; 4], names: StripNames },
+    // Clip List › Auto Rename: the names that editing gives the clips it separates from `clips`.
+    AutoRename { clips: Vec<ClipId>, names: StripNames },
     // `id: None` creates (Track › Group…); `id: Some` modifies that group (Groups list › Modify Group…).
     Group { id: Option<GroupId>, name: String, edit: bool, mix: bool, members: Vec<(u64, String, bool)> },
     Session { frame_rate: String, bit_depth: String },
@@ -61,6 +63,7 @@ impl Dialogs {
             Dialog::Fades { .. } => "fades",
             Dialog::StripSilence { .. } => "strip_silence",
             Dialog::StripSilenceRename { .. } => "strip_silence_rename",
+            Dialog::AutoRename { .. } => "auto_rename",
             Dialog::Group { id: None, .. } => "group",
             Dialog::Group { id: Some(_), .. } => "modify_group",
             Dialog::Session { .. } => "session",
@@ -95,6 +98,16 @@ impl Dialogs {
     pub fn open_clear(&mut self, e: &Engine, clips: Vec<ClipId>, sources: Vec<SourceId>) -> bool {
         let Some(message) = clear_message(e.session(), &clips, &sources) else { return false };
         self.open = Some(Dialog::ClearClips { clips, sources, message });
+        true
+    }
+
+    /// Clip List › Auto Rename: the clips' naming scheme, filled in from the first clip's. False
+    /// when none of the clips is in the session.
+    pub fn open_auto_rename(&mut self, e: &Engine, clips: Vec<ClipId>) -> bool {
+        let s = e.session();
+        let Some((_, first)) = clips.iter().find_map(|id| s.find_clip(*id)) else { return false };
+        let names = first.auto_name.and_then(|k| s.auto_names.get(&k)).map_or_else(StripNames::default, StripNames::from);
+        self.open = Some(Dialog::AutoRename { clips, names });
         true
     }
 
@@ -164,6 +177,7 @@ impl Dialogs {
                 let s = soundcraft_engine::score::ScoreSetup::from_session(e.session());
                 Dialog::ScoreSetup { title: s.title, composer: s.composer, bars_per_system: s.bars_per_system, show_track_names: s.show_track_names }
             }
+            "clip.auto_rename" => return self.open_auto_rename(e, e.session().edit.selected_clips.clone()),
             "clip.rename" => {
                 let target = soundcraft_engine::cmd::clip_ids_param(e, &json!({})).first().and_then(|id| e.session().find_clip(*id));
                 let Some((_, clip)) = target else { return false };
@@ -342,7 +356,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         Dialog::Spot(_) => "Spot",
         Dialog::Fades { .. } => "Fades",
         Dialog::StripSilence { .. } => "Strip Silence",
-        Dialog::StripSilenceRename { .. } => "Rename Selected Clips",
+        Dialog::StripSilenceRename { .. } | Dialog::AutoRename { .. } => "Rename Selected Clips",
         Dialog::Group { id: None, .. } => "Create Group",
         Dialog::Group { id: Some(_), .. } => "Modify Group",
         Dialog::Session { .. } => "Session Setup",
@@ -600,7 +614,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     });
                 }
                 Dialog::StripSilenceRename { names, .. } => {
-                    strip_name_fields(ui, names);
+                    strip_name_fields(ui, names, STRIP_NAME_LABELS);
                     let cleared = ui.button("Clear").clicked();
                     if cleared {
                         *names = StripNames::default();
@@ -608,6 +622,13 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     // Enter on a focused Clear clicks it, and leaves the dialog open.
                     if buttons(ui, "OK", enter) && !cleared {
                         renamed = Some(names.clone());
+                    }
+                }
+                Dialog::AutoRename { clips, names } => {
+                    ui.label("Text for naming the clips that editing makes from the selected clips:");
+                    strip_name_fields(ui, names, AUTO_NAME_LABELS);
+                    if buttons(ui, "OK", enter) {
+                        action = Some(auto_rename_action(clips, names));
                     }
                 }
                 Dialog::Group { id, name, edit, mix, members } => {
@@ -708,6 +729,10 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         app.dialogs.pending_session = None;
         ctx.memory_mut(|m| m.data.remove::<bool>(egui::Id::new("dlg_cancel")));
     }
+    // Enter on a focused Cancel also presses OK. In Auto Rename, the dialog then closes without running the command.
+    if !keep && matches!(d, Dialog::AutoRename { .. }) {
+        action = None;
+    }
     if let Some(strip) = rename_from
         && keep
     {
@@ -794,16 +819,35 @@ fn strip_silence_action(mode: &str, values: [f64; 4], names: &StripNames) -> (St
     ("edit.strip_silence".into(), params)
 }
 
-/// The Name, Number, Zeros and Suffix fields of Rename Selected Clips, with the first name they give.
-fn strip_name_fields(ui: &mut egui::Ui, names: &mut StripNames) {
+/// The command Auto Rename's OK runs: the scheme for `clips`, or no scheme when the name is blank.
+fn auto_rename_action(clips: &[ClipId], names: &StripNames) -> (String, Value) {
+    let mut params = json!({"clips": clips});
+    if !names.name.trim().is_empty() {
+        params["name"] = json!(names.name);
+        params["number"] = json!(names.number);
+        params["zeros"] = json!(names.zeros);
+        params["suffix"] = json!(names.suffix);
+    }
+    ("clip.auto_rename".into(), params)
+}
+
+/// The labels of the number and zeros fields in Strip Silence's Rename Selected Clips.
+const STRIP_NAME_LABELS: [&str; 2] = ["Number", "Zeros"];
+/// The labels of the number and zeros fields in Auto Rename's Rename Selected Clips.
+const AUTO_NAME_LABELS: [&str; 2] = ["Starting Number", "Number of Places"];
+
+/// The Name, number, zeros and Suffix fields of Rename Selected Clips, with the first name they
+/// give. `labels` names the number and zeros fields.
+fn strip_name_fields(ui: &mut egui::Ui, names: &mut StripNames, labels: [&str; 2]) {
+    let [number, zeros] = labels;
     egui::Grid::new("strip_names").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
         ui.label("Name");
         ui.text_edit_singleline(&mut names.name);
         ui.end_row();
-        ui.label("Number");
+        ui.label(number);
         ui.add(egui::DragValue::new(&mut names.number).range(0..=StripNames::MAX_NUMBER));
         ui.end_row();
-        ui.label("Zeros");
+        ui.label(zeros);
         ui.add(egui::DragValue::new(&mut names.zeros).range(0..=StripNames::MAX_ZEROS));
         ui.end_row();
         ui.label("Suffix");

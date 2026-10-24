@@ -280,6 +280,7 @@ fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
             .unwrap_or_default();
         cb.automation.push(lanes);
     }
+    cb.keep_auto_names(e.session());
     cb.markers = e
         .session()
         .markers
@@ -316,10 +317,21 @@ fn cut_track(s: &mut Session, t: TrackId, r: soundcraft_time::Range, sh: bool, f
     ops::clear_range(s, t, r, sh);
 }
 
+/// The clipboard for a paste, with the Auto Rename schemes of its clips put into the session first
+/// ([`Clipboard::adopt_auto_names`]).
+pub(super) fn clipboard_for_paste(e: &mut Engine) -> Clipboard {
+    let mut cb = e.clipboard.clone();
+    if cb.tracks.iter().flatten().any(|c| c.auto_name.is_some()) {
+        cb.adopt_auto_names(e.session_mut());
+        e.clipboard = cb.clone();
+    }
+    cb
+}
+
 fn paste(e: &mut Engine, p: &Value) -> Result<Value> {
     let tracks = tracks_required(e, "edit.paste", p)?;
     let given = position_param(e, "edit.paste", p, "at")?;
-    let cb = e.clipboard.clone();
+    let cb = clipboard_for_paste(e);
     let s = e.session();
     let at = match given {
         Some(at) => at,
@@ -417,7 +429,7 @@ fn repeat_to_fill(e: &mut Engine, p: &Value) -> Result<Value> {
     let range = range_param(e, "edit.paste_repeat_to_fill", p)?;
     let len = e.clipboard.length.max(1);
     let tracks = tracks_required(e, "edit.paste_repeat_to_fill", p)?;
-    let cb = e.clipboard.clone();
+    let cb = clipboard_for_paste(e);
     let s = e.session_mut();
     let mut at = range.start;
     let mut n = 0;
@@ -801,12 +813,12 @@ fn strip_silence(e: &mut Engine, p: &Value) -> Result<Value> {
         Some(Value::String(m)) => crate::io::StripMode::from_id(m).ok_or_else(|| bad("edit.strip_silence", format!("unknown mode `{m}`")))?,
         Some(_) => return Err(bad("edit.strip_silence", "mode must be strip, extract or separate")),
     };
-    let names = strip_names(p)?;
+    let names = strip_names("edit.strip_silence", p)?;
     let s = e.session_mut();
     let mut kept = 0;
     let mut named = 0;
     for t in &tracks {
-        kept += crate::io::strip_silence(s, *t, r, thr, min_len, (pre, post), mode)?;
+        kept += crate::io::strip_silence(s, *t, r, thr, min_len, (pre, post), mode, names.is_some())?;
         if let Some(names) = &names {
             named += crate::io::name_stripped_clips(s, *t, r, names, named);
         }
@@ -814,11 +826,10 @@ fn strip_silence(e: &mut Engine, p: &Value) -> Result<Value> {
     Ok(json!({"clips": kept, "named": named}))
 }
 
-/// The naming scheme in `edit.strip_silence`'s `name`, `number`, `zeros` and `suffix` params, or
-/// `None` when `name` is missing or blank.
-fn strip_names(p: &Value) -> Result<Option<crate::io::StripNames>> {
+/// The naming scheme in the `name`, `number`, `zeros` and `suffix` params of `cmd`
+/// (`edit.strip_silence`, `clip.auto_rename`), or `None` when `name` is missing or blank.
+pub(super) fn strip_names(cmd: &str, p: &Value) -> Result<Option<crate::io::StripNames>> {
     use crate::io::StripNames;
-    let cmd = "edit.strip_silence";
     let text = |k: &str| match p.get(k) {
         None => Ok(None),
         Some(Value::String(v)) => Ok(Some(v.clone())),
