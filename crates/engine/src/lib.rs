@@ -531,6 +531,11 @@ mod panic_tests {
     #[test]
     fn a_panicking_command_restores_side_effect_state() {
         let mut e = Engine::default();
+        // Non-default values, so clearing them instead of restoring them would fail.
+        e.clipboard.length = 42;
+        e.messages.push("prior".into());
+        e.transport_requests.push(TransportRequest::Stop);
+        e.last_selection = Some((soundcraft_time::Range::new(20, 30), Vec::new()));
         let (clipboard, messages, requests, selection) =
             (e.clipboard.clone(), e.messages.clone(), e.transport_requests.clone(), e.last_selection.clone());
         let r = e.execute("test.panic_probe", &json!({"panic": true}));
