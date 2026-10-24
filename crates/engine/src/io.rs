@@ -2355,8 +2355,10 @@ mod strip_tests {
     #[test]
     fn an_unknown_strip_mode_is_refused() {
         let (mut e, t) = tone_gap_tone();
-        assert!(e.execute("edit.strip_silence", &json!({"track": t.0, "start": 0, "end": 144_000, "mode": "remove"})).is_err());
-        assert_eq!(e.session().track(t).unwrap().clips().len(), 1);
+        for mode in [json!("remove"), json!(null), json!(true), json!(1)] {
+            assert!(e.execute("edit.strip_silence", &json!({"track": t.0, "start": 0, "end": 144_000, "mode": mode})).is_err());
+            assert_eq!(e.session().track(t).unwrap().clips().len(), 1);
+        }
     }
 
     #[test]

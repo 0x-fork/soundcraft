@@ -796,9 +796,10 @@ fn strip_silence(e: &mut Engine, p: &Value) -> Result<Value> {
     let sr = e.session().sample_rate;
     let ms = |k: &str, d: f64| sr.samples(f64_or(p, k, d).clamp(0.0, 10_000.0) / 1000.0);
     let (min_len, pre, post) = (ms("min_length_ms", 50.0), ms("pad_before_ms", 5.0), ms("pad_after_ms", 20.0));
-    let mode = match str_param(p, "mode") {
+    let mode = match p.get("mode") {
         None => crate::io::StripMode::Strip,
-        Some(m) => crate::io::StripMode::from_id(m).ok_or_else(|| bad("edit.strip_silence", format!("unknown mode `{m}`")))?,
+        Some(Value::String(m)) => crate::io::StripMode::from_id(m).ok_or_else(|| bad("edit.strip_silence", format!("unknown mode `{m}`")))?,
+        Some(_) => return Err(bad("edit.strip_silence", "mode must be strip, extract or separate")),
     };
     let s = e.session_mut();
     let mut kept = 0;
