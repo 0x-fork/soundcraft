@@ -544,4 +544,8 @@ fn extensible_fmt_is_checked_in_full() {
     foreign[15] ^= 0xFF;
     let foreign = riff(&[(b"fmt ", extensible_fmt(22, 16, &foreign)), (b"data", data)]);
     assert!(!matches!(probe(&foreign, None), Ok(i) if i.sample_format == SampleFormat::Int16));
+    // The Ambisonic PCM subtype is PCM.
+    let ambi = [1, 0, 0, 0, 0x21, 0x07, 0xD3, 0x11, 0x86, 0x44, 0xC8, 0xC1, 0xCA, 0, 0, 0];
+    let ambi = riff(&[(b"fmt ", extensible_fmt(22, 16, &ambi)), (b"data", vec![0u8; 8])]);
+    assert_eq!(probe(&ambi, None).unwrap().sample_format, SampleFormat::Int16);
 }
