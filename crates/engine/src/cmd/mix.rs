@@ -709,8 +709,9 @@ fn clip_gain_to_vol(e: &mut Engine, p: &Value) -> Result<Value> {
                     pins.push((c.start - 1, level(c.start - 1)));
                 }
                 pins.push((c.end(), level(c.end())));
-                let mut ats: Vec<i64> =
-                    if c.gain_env.is_empty() { vec![c.start, c.end() - 1] } else { c.gain_env.iter().map(|&(o, _)| c.start + o).collect() };
+                // The clip edges always get a point, so the envelope's first and last values hold out to them.
+                let mut ats = vec![c.start, c.end() - 1];
+                ats.extend(c.gain_env.iter().map(|&(o, _)| c.start + o).filter(|&at| at > c.start && at < c.end() - 1));
                 // The lane's own points inside the clip carry the clip gain too.
                 if let Some(l) = &old {
                     ats.extend(l.points.iter().map(|pt| pt.at).filter(|&at| at > c.start && at < c.end() - 1));
@@ -911,6 +912,22 @@ mod tests {
         // The clip's own gain envelope rides on the lane value as well.
         let (before, after) = clip_gain_to_volume(&[(0, -6.0), (8192, -6.0)], vec![(2000, 0.0), (6000, -10.0)]);
         for (start, end) in [(3900, 4100), (5000, 5200)] {
+            let delta = rms_db(&before[start..end], &after[start..end]);
+            assert!(delta.abs() < 0.2, "{start}..{end} changed by {delta} dB");
+        }
+    }
+
+    #[test]
+    fn clip_gain_to_volume_holds_the_envelope_ends_out_to_the_clip_edges() {
+        let (mut e, t) = tone_session(&[(0, -6.0), (8192, -6.0)]);
+        let clip = e.session().track(t).unwrap().clips()[0].id;
+        let c = e.session_mut().find_clip_mut(clip).unwrap();
+        c.gain_db = 6.0;
+        c.gain_env = vec![(2000, 0.0), (6000, -10.0)];
+        let before = rendered(e.session());
+        e.execute("automation.clip_gain_to_volume", &json!({"track": t.0, "start": 0, "end": 8192})).unwrap();
+        let after = rendered(e.session());
+        for (start, end) in [(0, 1000), (1000, 2000), (6000, 7000), (7000, 8192)] {
             let delta = rms_db(&before[start..end], &after[start..end]);
             assert!(delta.abs() < 0.2, "{start}..{end} changed by {delta} dB");
         }
