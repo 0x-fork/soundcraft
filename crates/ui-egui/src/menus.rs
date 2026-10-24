@@ -504,7 +504,7 @@ fn wants_dialog(id: &str) -> bool {
 /// Handle UI-layer commands. Returns None when `id` is not a UI command.
 pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<Value, String>> {
     if matches!(id, "ui.dock" | "ui.dock.reset") {
-        return Some(crate::docking::command(app, id == "ui.dock.reset", p));
+        return Some(crate::docking::command(app, id, p));
     }
     if let Some(v) = crate::extra_windows::run(app, id, p) {
         return Some(Ok(v));
@@ -591,7 +591,7 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
         }
         "window.configurations" => toggle(&mut app.ui.show_configurations),
         "window.config_new" | "window.config_update" => {
-            if let Err(error) = app.ui.docking.validate().and_then(|()| app.ui.mix_docking.validate_mix()) {
+            if let Err(error) = crate::docking::validate(&app.ui.docking).and_then(|()| crate::docking::validate_mix(&app.ui.mix_docking)) {
                 return Some(Err(error));
             }
             let mut snap = app.ui.clone();
@@ -687,7 +687,7 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
                 }
                 match serde_json::from_value::<crate::UiState>(cur) {
                     Ok(ns) => {
-                        if let Err(error) = ns.docking.validate().and_then(|()| ns.mix_docking.validate_mix()) {
+                        if let Err(error) = crate::docking::validate(&ns.docking).and_then(|()| crate::docking::validate_mix(&ns.mix_docking)) {
                             return Some(Err(error));
                         }
                         crate::docking::cancel_replaced_state(app, &ns);
