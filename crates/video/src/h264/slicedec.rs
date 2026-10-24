@@ -570,6 +570,19 @@ impl<'a> SliceDecoder<'a> {
         (refs, mvs, false)
     }
 
+    /// Temporal direct motion vectors (8.4.1.2.1): mvL0 = (mvCol * DistScaleFactor + 128) >> 8
+    /// and mvL1 = mvL0 − mvCol. Motion vectors are always within the spec's −2^15 to 2^15 − 1
+    /// range, which crafted streams leave (stored mvs wrap by design), so the derivation runs in
+    /// i32 and clamps to that range instead of overflowing.
+    fn temporal_direct_mvs(dsf: i32, mv_col: [i16; 2]) -> ([i16; 2], [i16; 2]) {
+        const MV_MIN: i32 = -(1 << 15);
+        const MV_MAX: i32 = (1 << 15) - 1;
+        // mvL1 comes from the unclamped scaled value, as in the spec; only the results are clamped.
+        let m0 = mv_col.map(|c| (dsf * i32::from(c) + 128) >> 8);
+        let clamp = |v: i32| v.clamp(MV_MIN, MV_MAX) as i16;
+        (m0.map(clamp), [clamp(m0[0] - i32::from(mv_col[0])), clamp(m0[1] - i32::from(mv_col[1]))])
+    }
+
     /// Derive direct-mode motion for the 8x8 blocks in `b8_mask` of the current MB.
     fn derive_direct(&mut self, b8_mask: u8) -> Result<()> {
         let spatial = self.sh.direct_spatial_mv_pred;
@@ -604,13 +617,7 @@ impl<'a> SliceDecoder<'a> {
                         }
                     };
                     let (dsf, ltr) = self.tdirect.get(ref0 as usize).copied().unwrap_or((256, true));
-                    let (mv0, mv1) = if ltr {
-                        (mv_col, [0, 0])
-                    } else {
-                        let s = |c: i16| ((dsf * c as i32 + 128) >> 8) as i16;
-                        let m0 = [s(mv_col[0]), s(mv_col[1])];
-                        (m0, [m0[0] - mv_col[0], m0[1] - mv_col[1]])
-                    };
+                    let (mv0, mv1) = if ltr { (mv_col, [0, 0]) } else { Self::temporal_direct_mvs(dsf, mv_col) };
                     ([ref0, 0], [mv0, mv1])
                 };
                 self.set_motion(x, y, unit, unit, refs, mvs);
@@ -1474,7 +1481,38 @@ impl<'a> SliceDecoder<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::skip_run_fits;
+    use super::*;
+
+    /// Temporal direct (8.4.1.2.1) with co-located mvs at the i16 extremes: crafted streams get
+    /// there because stored mvs wrap by design (mvd is truncated, the mvp add wraps), so the
+    /// derivation must stay within the spec's −2^15 to 2^15 − 1 motion-vector range instead of
+    /// overflowing (it panicked in debug/overflow-checks builds).
+    #[test]
+    fn temporal_direct_mvs_at_i16_extremes_stay_in_the_spec_range() {
+        // DistScaleFactor extremes from the clamp in SliceDecoder::new (±1024/1023).
+        for dsf in [-1024, -1, 0, 1, 1023] {
+            for c0 in [i16::MAX, i16::MIN, 0, 40, -4] {
+                for c1 in [i16::MAX, i16::MIN, 0, 40, -4] {
+                    let (m0, m1) = SliceDecoder::temporal_direct_mvs(dsf, [c0, c1]);
+                    for mv in m0.into_iter().chain(m1) {
+                        assert!((-(1 << 15)..=(1 << 15) - 1).contains(&i32::from(mv)));
+                    }
+                }
+            }
+        }
+        // mvL0 = (mvCol * DistScaleFactor + 128) >> 8, mvL1 = mvL0 − mvCol (8.4.1.2.1).
+        let (m0, m1) = SliceDecoder::temporal_direct_mvs(-1024, [-32768, 32767]);
+        assert_eq!(m0, [32767, -32768]);
+        assert_eq!(m1, [32767, -32768]);
+        // mvL1 is derived from the unclamped mvL0: (512 * 32767 + 128) >> 8 = 65534, minus 32767.
+        let (m0, m1) = SliceDecoder::temporal_direct_mvs(512, [32767, 0]);
+        assert_eq!(m0, [32767, 0]);
+        assert_eq!(m1, [32767, 0]);
+        // DistScaleFactor 256 (tb == td) reproduces the co-located mv: mvL1 = 0.
+        let (m0, m1) = SliceDecoder::temporal_direct_mvs(256, [40, -4]);
+        assert_eq!(m0, [40, -4]);
+        assert_eq!(m1, [0, 0]);
+    }
 
     #[test]
     fn skip_run_must_fit_remaining_macroblocks_without_overflow() {
