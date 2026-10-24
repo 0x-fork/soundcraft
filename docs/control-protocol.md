@@ -89,6 +89,10 @@ a portal answer it uses Dark. Manual Light and Dark stay fixed when the OS appea
 An offscreen render without `--system-theme` supplies no OS appearance and therefore resolves
 System to Dark, or on Linux to the desktop's portal setting when one is available.
 
+`view.scroll_into_view {"track":"Bass"}` (a track id or name; without it, the first selected
+track) brings the track to the top of the Edit window and the left of the Mix window, the same as
+Scroll Into View in the track name menu. A window not on screen catches up when it is next shown.
+
 ## Panel docking
 
 Tracks and Groups, Clips, MIDI Editor, Memory Locations, and Undo History use movable panels. Commands target the active Edit or Mix view; floating panels stay inside the current viewport. Edit and Mix retain separate arrangements; Clips and MIDI Editor belong to Edit. Transport, plug-in, and specialist utility windows retain their existing hosts. The document/session view is protected. Layouts, active tabs, panel visibility, and floating rectangles are saved with the app's existing UI preferences. These operations do not edit document contents.
