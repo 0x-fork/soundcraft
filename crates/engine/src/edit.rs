@@ -149,9 +149,11 @@ pub fn copy_range(s: &Session, track: TrackId, range: Range) -> Vec<Clip> {
             let old = part.start;
             part.trim_start_to(isect.start);
             rebase_midi_start(&mut part, old, t);
+            part.fade_in = Fade::default();
         }
         if isect.end < part.end() {
             part.trim_end_to(isect.end);
+            part.fade_out = Fade::default();
         }
         part.start -= range.start;
         out.push(part);
@@ -872,6 +874,20 @@ mod tests {
 
     fn clips(s: &Session, t: TrackId) -> Vec<(Samples, Samples, Samples)> {
         s.track(t).unwrap().clips().iter().map(|c| (c.start, c.length, c.source_offset())).collect()
+    }
+
+    #[test]
+    fn copy_range_resets_fades_at_cut_edges() {
+        let (mut s, t) = session_with_clip();
+        if let Some(c) = s.track_mut(t).and_then(|t| t.playlist_mut()).and_then(|p| p.clips.first_mut()) {
+            c.fade_in = Fade { len: 100, shape: FadeShape::Linear, curvature: 0.0 };
+            c.fade_out = Fade { len: 100, shape: FadeShape::Linear, curvature: 0.0 };
+        }
+        let fades = |r: Range| -> Vec<(Samples, Samples)> { copy_range(&s, t, r).iter().map(|c| (c.fade_in.len, c.fade_out.len)).collect() };
+        assert_eq!(fades(Range::new(2000, 3000)), vec![(0, 0)]);
+        assert_eq!(fades(Range::new(0, 3000)), vec![(100, 0)]);
+        assert_eq!(fades(Range::new(2000, 6000)), vec![(0, 100)]);
+        assert_eq!(fades(Range::new(0, 6000)), vec![(100, 100)]);
     }
 
     #[test]
