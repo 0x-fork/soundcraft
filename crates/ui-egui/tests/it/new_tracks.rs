@@ -1,9 +1,10 @@
 //! New Tracks opens from the Tracks list's + button, and from a double-click below the last
 //! track (Edit) or right of the last strip (Mix).
 
+use egui::accesskit::Role;
 use egui::{Pos2, pos2, vec2};
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{Queryable, by};
 use soundcraft_ui_egui::{MainWindow, Services, SoundApp};
 
 fn harness(tracks: usize) -> Harness<'static, SoundApp> {
@@ -72,6 +73,7 @@ fn the_new_tracks_name_field_is_wide_enough_to_read_a_name() {
     h.get_by_label_contains("New Tracks").click();
     h.run_steps(4);
     assert_eq!(h.state().dialogs.open_name(), Some("new_tracks"));
-    let width = h.get_by_value("Audio").rect().width();
+    // The field's text run carries the same value as the field itself.
+    let width = h.get(by().role(Role::TextInput).value("Audio")).rect().width();
     assert!(width >= 200.0, "the Name field is only {width}px wide");
 }
