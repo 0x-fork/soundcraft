@@ -2256,7 +2256,7 @@ mod bundle_tests {
         use std::io::Write as _;
         let e = crate::demo::demo_engine();
         let (bytes, _) = session_bundle(e.session()).unwrap();
-        let (text, files) = read_bundle(&bytes).unwrap();
+        let (text, files) = read_bundle(&bytes, BUNDLE_LIMITS).unwrap();
         let mut s = Session::from_json(&text).unwrap();
         s.sources[1].path = s.sources[0].path.clone();
         let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
