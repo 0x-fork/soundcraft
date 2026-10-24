@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~5% and ~110–180 h away (the alpha gate's three failing workflows)
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-24 · **Change:** trivial (Strip Silence Extract and Separate) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-24 · **Change:** trivial (Strip Silence Rename) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
 Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
@@ -122,6 +122,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 ## Progress log
 
+- **2026-10-24:** The Strip Silence window has a Rename button. It opens Rename Selected Clips, where a name, a starting number, a count of zeros and a suffix set the names of the clips that Strip, Extract and Separate leave in the selection (for example SFX023.Reel1, SFX024.Reel1). The app keeps the scheme for later uses of Strip Silence until the app quits, or until Clear and then OK empty it. No readiness percentage change.
 - **2026-10-24:** The Strip Silence window has Extract and Separate buttons. Extract removes the audio and keeps the silent parts of the selection, and Separate separates the clips at the edges of the silence without removing anything. Minimum Strip Duration goes up to 4,000 ms. No readiness percentage change.
 - **2026-10-23:** A built-in Ring Modulator (`ring_mod`) applies ring modulation, frequency modulation or a positive or negative resonator, and an LFO, an envelope follower or sample and hold moves its frequency. AudioSuite › Modulation › Sci-Fi now runs it instead of the Flanger. No readiness percentage change.
 - **2026-10-19:** Float32 WAV and AIFF-C encoding preserve finite samples above full scale. Integer PCM still clips at full scale. Tests cover whole-file and streaming encoders, non-finite samples, and bounce output with normalization on and off. No readiness percentage change.
@@ -167,6 +168,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | trivial | Progress log: Strip Silence Rename; readiness estimates unchanged |
 | 2026-10-24 | trivial | Progress log: Strip Silence Extract and Separate; readiness estimates unchanged |
 | 2026-10-23 | trivial | Progress log: Ring Modulator plugin; readiness estimates unchanged |
 | 2026-10-19 | trivial | Float32 file encoding preserves finite headroom (#791); readiness estimates unchanged |
