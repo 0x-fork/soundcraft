@@ -3800,6 +3800,7 @@ dependencies = [
  "soundcraft-video",
  "soundcraft-vst3-host",
  "toml",
+ "zbus",
 ]
 
 [[package]]
