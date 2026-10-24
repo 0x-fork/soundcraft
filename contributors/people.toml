@@ -58,3 +58,6 @@ sync_github_name = false
 
 [people.mattburlage]
 display_name = "Matt Smith-Burlage"
+
+[people.ProdByBuddha]
+sync_github_name = true
