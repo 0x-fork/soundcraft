@@ -173,7 +173,7 @@ fn info(args: &[String]) -> ExitCode {
 
 fn convert(args: &[String]) -> ExitCode {
     let (Some(input), Some(output)) = (args.first(), args.get(1)) else { return fail("convert IN OUT") };
-    const OPTIONS: &Options = &[("--rate", true), ("--bit-depth", true), ("--normalize", false)];
+    const OPTIONS: &Options = &[("--rate", true), ("--bit-depth", true), ("--normalize", false), ("--dither", false), ("--no-dither", false)];
     if let Err(e) = check_options(&args[2..], OPTIONS) {
         return fail(e);
     }
