@@ -45,6 +45,7 @@ mod shared_controls;
 mod shortcuts;
 mod side_lists_access;
 mod side_lists_text;
+mod strip_silence_dialog;
 mod toolbar_scroll;
 mod toolbar_tempo;
 mod track_height;

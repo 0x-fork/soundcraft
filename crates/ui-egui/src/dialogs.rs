@@ -555,15 +555,27 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                 }
                 Dialog::StripSilence { threshold, min_ms, pre_ms, post_ms } => {
                     ui.add(egui::Slider::new(threshold, -96.0..=0.0).text("Threshold dB"));
-                    ui.add(egui::Slider::new(min_ms, 0.0..=2000.0).text("Min strip duration ms"));
+                    ui.add(egui::Slider::new(min_ms, 0.0..=4000.0).text("Min strip duration ms"));
                     ui.add(egui::Slider::new(pre_ms, 0.0..=500.0).text("Clip start pad ms"));
                     ui.add(egui::Slider::new(post_ms, 0.0..=2000.0).text("Clip end pad ms"));
-                    if buttons(ui, "Strip", enter) {
-                        action = Some((
-                            "edit.strip_silence".into(),
-                            json!({"threshold_db": threshold, "min_length_ms": min_ms, "pad_before_ms": pre_ms, "pad_after_ms": post_ms}),
-                        ));
-                    }
+                    let values = [*threshold, *min_ms, *pre_ms, *post_ms];
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let mut mode = None;
+                        if ui.button("Extract").clicked() {
+                            mode = Some("extract");
+                        }
+                        if ui.button("Separate").clicked() {
+                            mode = Some("separate");
+                        }
+                        // Enter on a focused Extract or Separate clicks that button, so Enter presses Strip only when neither was clicked.
+                        if buttons(ui, "Strip", enter) && mode.is_none() {
+                            mode = Some("strip");
+                        }
+                        if let Some(mode) = mode {
+                            action = Some(strip_silence_action(mode, values));
+                        }
+                    });
                 }
                 Dialog::Group { id, name, edit, mix, members } => {
                     ui.horizontal(|ui| {
@@ -714,6 +726,16 @@ fn run_then(app: &mut SoundApp, cmd: &str, params: Value) -> Result<Value, Strin
     app.run(cmd, params)
 }
 
+/// The command a Strip Silence button runs: `mode` is strip, extract or separate, and `values` holds
+/// the threshold in dB, the minimum strip duration and the clip start and end pads in milliseconds.
+fn strip_silence_action(mode: &str, values: [f64; 4]) -> (String, Value) {
+    let [threshold, min_ms, pre_ms, post_ms] = values;
+    (
+        "edit.strip_silence".into(),
+        json!({"threshold_db": threshold, "min_length_ms": min_ms, "pad_before_ms": pre_ms, "pad_after_ms": post_ms, "mode": mode}),
+    )
+}
+
 /// Cancel/OK row; returns true when OK was pressed (or Enter).
 fn buttons(ui: &mut egui::Ui, ok: &str, enter: bool) -> bool {
     buttons_enabled(ui, ok, enter, true)
@@ -848,6 +870,36 @@ mod tests {
         assert!(soundcraft_engine::command_specs().iter().any(|c| c.id == cmd), "{cmd} is not a command");
         assert_eq!(params["at"], 96_000);
         assert_eq!(params["bpm"], 133.5);
+    }
+
+    #[test]
+    fn strip_silence_buttons_send_strip_extract_and_separate() {
+        let mut e = soundcraft_engine::demo::demo_engine();
+        let kick = e.session().track_by_name("Kick").unwrap().id;
+        let end = e.session().content_end();
+        e.execute("edit.select", &json!({"tracks": [kick.0], "start": 0, "end": end})).unwrap();
+        let mut d = Dialogs::default();
+        assert!(d.open_for_command(&e, "edit.strip_silence"));
+        let Some(Dialog::StripSilence { threshold, min_ms, pre_ms, post_ms }) = d.open.take() else {
+            panic!("Strip Silence did not open its dialog")
+        };
+        let values = [threshold, min_ms, pre_ms, post_ms];
+        let clips = |e: &Engine| e.session().track(kick).unwrap().clips().iter().map(|c| (c.start, c.end())).collect::<Vec<_>>();
+        let covered = |c: &[(i64, i64)]| c.iter().map(|(a, b)| b - a).sum::<i64>();
+        let before = clips(&e);
+        let mut run = |mode: &str| {
+            let (cmd, params) = strip_silence_action(mode, values);
+            assert_eq!(params["mode"], mode);
+            e.execute(&cmd, &params).unwrap();
+            let after = clips(&e);
+            e.execute("edit.undo", &json!({})).unwrap();
+            after
+        };
+        let (strip, extract, separate) = (run("strip"), run("extract"), run("separate"));
+        assert!(separate.len() > before.len(), "Separate cuts the clips");
+        assert_eq!(covered(&separate), covered(&before), "Separate keeps all the audio");
+        assert!(!strip.is_empty() && !extract.is_empty());
+        assert_eq!(covered(&strip) + covered(&extract), covered(&before), "Strip and Extract keep opposite parts");
     }
 
     #[test]

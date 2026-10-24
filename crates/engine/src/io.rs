@@ -733,10 +733,36 @@ pub fn transients_in(s: &Session, t: TrackId, r: Range, sens: f32) -> Vec<Sample
     soundcraft_dsp::offline::detect_transients(&audio, s.sample_rate.as_f64() as f32, sens).into_iter().map(|i| r.start + i as i64).collect()
 }
 
-/// Strip Silence: keep only the non-silent ranges of clips inside `r`.
-pub fn strip_silence(s: &mut Session, t: TrackId, r: Range, thr: f32, min_len: Samples, pre: Samples, post: Samples) -> Result<usize> {
+/// What Strip Silence does with the clips inside the selection once it has found the silence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StripMode {
+    /// Remove the silent parts and keep the parts that hold audio.
+    Strip,
+    /// Remove the parts that hold audio and keep the silent parts.
+    Extract,
+    /// Separate the clips at the boundaries of the silent parts without removing any clip.
+    Separate,
+}
+
+impl StripMode {
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "strip" => Some(Self::Strip),
+            "extract" => Some(Self::Extract),
+            "separate" => Some(Self::Separate),
+            _ => None,
+        }
+    }
+}
+
+/// Strip Silence: separate the clips inside `r` where silence starts and ends, then keep only the
+/// non-silent ranges (`Strip`), only the silent ranges (`Extract`), or every piece (`Separate`).
+/// `pad` is the clip start and end pad added around each non-silent range. Returns the number of
+/// ranges kept: non-silent ranges for `Strip` and `Separate`, silent ranges that still hold a clip for
+/// `Extract`.
+pub fn strip_silence(s: &mut Session, t: TrackId, r: Range, thr: f32, min_len: Samples, pad: (Samples, Samples), mode: StripMode) -> Result<usize> {
     let r = bounded_to_track(s, t, r);
-    let keep = non_silent(s, t, r, thr, min_len, pre, post)?;
+    let keep = non_silent(s, t, r, thr, min_len, pad.0, pad.1)?;
     let mut cut_points = vec![r.start];
     for (a, b) in &keep {
         cut_points.push(*a);
@@ -746,7 +772,9 @@ pub fn strip_silence(s: &mut Session, t: TrackId, r: Range, thr: f32, min_len: S
     for p in &cut_points {
         crate::edit::separate_at(s, t, *p);
     }
-    // Remove pieces that fall in the gaps.
+    if mode == StripMode::Separate {
+        return Ok(keep.len());
+    }
     let mut gaps = Vec::new();
     let mut prev = r.start;
     for (a, b) in &keep {
@@ -758,8 +786,13 @@ pub fn strip_silence(s: &mut Session, t: TrackId, r: Range, thr: f32, min_len: S
     if prev < r.end {
         gaps.push(Range::new(prev, r.end));
     }
-    if let Some(pl) = s.track_mut(t).and_then(|x| x.playlist_mut()) {
-        pl.clips.retain(|c| !gaps.iter().any(|g| c.start >= g.start && c.end() <= g.end));
+    let audio: Vec<Range> = keep.iter().map(|(a, b)| Range::new(*a, *b)).collect();
+    let remove = if mode == StripMode::Extract { &audio } else { &gaps };
+    let inside = |c: &Clip, g: &Range| c.start >= g.start && c.end() <= g.end;
+    let Some(pl) = s.track_mut(t).and_then(|x| x.playlist_mut()) else { return Ok(if mode == StripMode::Extract { 0 } else { keep.len() }) };
+    pl.clips.retain(|c| !remove.iter().any(|g| inside(c, g)));
+    if mode == StripMode::Extract {
+        return Ok(gaps.iter().filter(|g| pl.clips.iter().any(|c| inside(c, g))).count());
     }
     Ok(keep.len())
 }
@@ -2275,6 +2308,55 @@ mod strip_tests {
         let r = e.execute("edit.strip_silence", &json!({"track": t.0, "start": 0, "end": far + 96_000})).unwrap();
         assert_eq!(r["clips"], 2);
         assert!(e.session().track(t).unwrap().clips().iter().any(|c| c.start >= far));
+    }
+
+    /// A stereo track with one three-second clip: a second of tone, a second of silence, a second of tone.
+    fn tone_gap_tone() -> (Engine, TrackId) {
+        let mut e = Engine::default();
+        e.execute("track.new", &json!({"format": "stereo"})).unwrap();
+        let t = e.session().tracks[0].id;
+        let s = e.session_mut();
+        let mut ch = vec![0.5; 144_000];
+        ch[48_000..96_000].fill(0.0);
+        let src = add_source(s, "tone gap tone", AudioBuffer { sample_rate: 48_000, channels: vec![ch.clone(), ch] }, None, FileFormat::Wav);
+        let id = s.new_clip_id();
+        crate::edit::place_clip(s, t, Clip::audio(id, "tone gap tone", src, 0, 0, 144_000));
+        (e, t)
+    }
+
+    fn strip_mode(mode: &str) -> (Value, Vec<(Samples, Samples)>) {
+        let (mut e, t) = tone_gap_tone();
+        let p = json!({"track": t.0, "start": 0, "end": 144_000, "pad_before_ms": 0, "pad_after_ms": 0, "mode": mode});
+        let r = e.execute("edit.strip_silence", &p).unwrap();
+        (r, e.session().track(t).unwrap().clips().iter().map(|c| (c.start, c.end())).collect())
+    }
+
+    #[test]
+    fn strip_keeps_the_audio_and_removes_the_silence() {
+        let (r, clips) = strip_mode("strip");
+        assert_eq!(r["clips"], 2);
+        assert_eq!(clips, vec![(0, 48_000), (96_000, 144_000)]);
+    }
+
+    #[test]
+    fn extract_keeps_the_silence_and_removes_the_audio() {
+        let (r, clips) = strip_mode("extract");
+        assert_eq!(r["clips"], 1);
+        assert_eq!(clips, vec![(48_000, 96_000)]);
+    }
+
+    #[test]
+    fn separate_cuts_at_the_silence_and_removes_nothing() {
+        let (r, clips) = strip_mode("separate");
+        assert_eq!(r["clips"], 2);
+        assert_eq!(clips, vec![(0, 48_000), (48_000, 96_000), (96_000, 144_000)]);
+    }
+
+    #[test]
+    fn an_unknown_strip_mode_is_refused() {
+        let (mut e, t) = tone_gap_tone();
+        assert!(e.execute("edit.strip_silence", &json!({"track": t.0, "start": 0, "end": 144_000, "mode": "remove"})).is_err());
+        assert_eq!(e.session().track(t).unwrap().clips().len(), 1);
     }
 
     #[test]
