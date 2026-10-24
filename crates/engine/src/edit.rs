@@ -441,14 +441,17 @@ pub fn heal(s: &mut Session, track: TrackId, range: Range) -> usize {
     healed
 }
 
-/// Give `l` the gain envelope of `l` followed by `r`, which starts where `l` ends, so every sample keeps its gain.
+/// Give `l` the gain envelope of `l` followed by `r`, which starts at or after where `l` ends, so
+/// every sample keeps its gain. Call it before `l.length` grows to cover `r`.
 fn join_gain_env(l: &mut Clip, r: &Clip) {
     let cut = l.length;
-    let (end_db, start_db) = (l.env_db_at(cut - 1), r.env_db_at(0));
+    let seam = r.start.saturating_sub(l.start);
+    let last = cut.saturating_sub(1);
+    let (end_db, start_db) = (l.env_db_at(last), r.env_db_at(0));
     l.gain_env.retain(|&(at, _)| at < cut);
-    l.gain_env.extend(r.gain_env.iter().filter(|&&(at, _)| at >= 0).map(|&(at, db)| (at.saturating_add(cut), db)));
+    l.gain_env.extend(r.gain_env.iter().filter(|&&(at, _)| at >= 0).map(|&(at, db)| (at.saturating_add(seam), db)));
     // Pin both sides of the seam where the joined points would interpolate across it.
-    for (at, db) in [(cut, start_db), (cut - 1, end_db)] {
+    for (at, db) in [(seam, start_db), (last, end_db)] {
         if (l.env_db_at(at) - db).abs() > 1e-4 {
             let i = l.gain_env.partition_point(|&(t, _)| t < at);
             l.gain_env.insert(i, (at, db));
@@ -987,6 +990,23 @@ mod tests {
                 let want = if rel < 2000 { l.gain_at(rel) } else { r.gain_at(rel - 2000) };
                 assert!((healed.gain_at(rel) - want).abs() < 1e-4, "sample {rel}: {} != {want}", healed.gain_at(rel));
             }
+        }
+    }
+
+    #[test]
+    fn heal_keeps_gain_envelopes_across_a_gap() {
+        let (mut s, t) = session_with_clip();
+        clear_range(&mut s, t, Range::new(2000, 3000), false);
+        let pl = s.track_mut(t).and_then(|t| t.playlist_mut()).unwrap();
+        pl.clips[0].gain_env = vec![(0, 0.0), (999, -6.0)];
+        pl.clips[1].gain_env = vec![(0, -12.0), (1999, -3.0)];
+        let (l, r) = (pl.clips[0].clone(), pl.clips[1].clone());
+        assert_eq!(heal(&mut s, t, Range::new(1500, 3500)), 1);
+        let healed = &s.track(t).unwrap().clips()[0];
+        assert_eq!(healed.length, 4000);
+        for rel in (0..1000).chain(2000..4000) {
+            let want = if rel < 1000 { l.gain_at(rel) } else { r.gain_at(rel - 2000) };
+            assert!((healed.gain_at(rel) - want).abs() < 1e-4, "sample {rel}: {} != {want}", healed.gain_at(rel));
         }
     }
 
