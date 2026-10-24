@@ -88,10 +88,8 @@ fn spawn(app: &mut SoundApp, params: Value, ctx: &egui::Context) {
         ctx.request_repaint();
     };
     match std::thread::Builder::new().name("audio-import".into()).spawn(work) {
-        Ok(_) => {
-            app.ui.status = format!("Importing {name}…");
-            app.imports.running = Some(Running { params, name, rate, rx });
-        }
+        // No status line here: it may hold the previous file's failure, and the progress note names this file.
+        Ok(_) => app.imports.running = Some(Running { params, name, rate, rx }),
         // No thread to spare: import the old way rather than not at all.
         Err(_) => {
             run_now(app, params);
@@ -213,5 +211,25 @@ mod tests {
         assert_eq!(app.imports.label().map(|l| l.1), Some(1), "the second waits for the first");
         settle(&mut app, &ctx);
         assert_eq!(app.engine.session().tracks.len(), 1, "the good file still imports");
+    }
+
+    #[test]
+    fn a_failed_import_stays_on_the_status_line_while_the_next_one_starts() {
+        let ctx = egui::Context::default();
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        let junk = tone_wav("junk-status.wav");
+        std::fs::write(&junk, b"not audio").unwrap();
+        start(&mut app, json!({"path": junk}));
+        start(&mut app, json!({"path": tone_wav("next-status.wav")}));
+        for _ in 0..2_000 {
+            step(&mut app, &ctx);
+            if app.imports.label().is_some_and(|(name, _)| name == "next-status.wav") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(app.imports.label().is_some_and(|(name, _)| name == "next-status.wav"), "the second import never started");
+        assert!(!app.ui.status.is_empty() && !app.ui.status.starts_with("Importing"), "the failure was overwritten: {}", app.ui.status);
+        settle(&mut app, &ctx);
     }
 }
