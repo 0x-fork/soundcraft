@@ -256,8 +256,16 @@ impl Clip {
         let end = self.end();
         let new_start = new_start.max(end.saturating_sub(MAX_POSITION)).clamp(-MAX_POSITION, MAX_POSITION).min(end.saturating_sub(1));
         let delta = new_start.saturating_sub(self.start);
-        if let ClipContent::Audio { offset, .. } | ClipContent::Video { offset, .. } = &mut self.content {
-            *offset = offset.saturating_add(delta);
+        // The mixer plays a stretched audio clip from `offset + rel / stretch`.
+        let stretch = if self.stretch.is_finite() && self.stretch > 0.0 { self.stretch } else { 1.0 };
+        match &mut self.content {
+            ClipContent::Audio { offset, .. } if (stretch - 1.0).abs() >= 1e-9 => {
+                *offset = offset.saturating_add((delta as f64 / stretch).round() as Samples);
+            }
+            ClipContent::Audio { offset, .. } | ClipContent::Video { offset, .. } => {
+                *offset = offset.saturating_add(delta);
+            }
+            ClipContent::Midi { .. } => {}
         }
         // MIDI note ticks are re-anchored by the engine, which knows the tempo map.
         self.length = self.length.saturating_sub(delta).clamp(1, MAX_POSITION);

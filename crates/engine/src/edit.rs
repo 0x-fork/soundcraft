@@ -425,7 +425,7 @@ pub fn heal(s: &mut Session, track: TrackId, range: Range) -> usize {
             let gap = if contiguous { c.start.saturating_sub(prev.end()) } else { 0 };
             let same = match (&prev.content, &c.content) {
                 (ClipContent::Audio { source: a, offset: oa }, ClipContent::Audio { source: b, offset: ob }) => {
-                    a == b && oa.saturating_add(prev.length).saturating_add(gap) == *ob
+                    a == b && oa.saturating_add(source_len(prev.length.saturating_add(gap), prev.stretch)) == *ob
                 }
                 _ => false,
             };
