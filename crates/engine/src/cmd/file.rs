@@ -113,9 +113,10 @@ pub fn specs() -> Vec<CommandSpec> {
             crate::io::write_file(&path, &bytes)?;
             Ok(json!({"path": path, "bytes": bytes.len()}))
         }),
-        cmd!(noundo "file.export_session_text", "Session Info as Text...", ["File", "Export"], None, "{path?}", always, |e, p| {
+        cmd!(noundo "file.export_session_text", "Session Info as Text...", ["File", "Export"], None, "{path?, replace?: false}", always, |e, p| {
             let text = crate::inspect::session_text(e);
             if let Some(path) = str_param(p, "path") {
+                refuse_replacing(e, "file.export_session_text", std::path::Path::new(path), p)?;
                 crate::io::write_file(path, text.as_bytes())?;
             }
             Ok(json!({"text": text}))
@@ -351,6 +352,24 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, bytes).unwrap();
         path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn export_session_text_needs_replace_to_overwrite() {
+        let dir = std::env::temp_dir().join(format!("sc-export-text-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("info.txt");
+        let path_str = path.to_string_lossy().into_owned();
+        let mut e = Engine::default();
+        e.execute("file.export_session_text", &json!({"path": path_str})).unwrap();
+        std::fs::write(&path, "keep me").unwrap();
+        let err = e.execute("file.export_session_text", &json!({"path": path_str})).unwrap_err();
+        assert!(err.to_string().contains("replace: true"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me");
+        e.execute("file.export_session_text", &json!({"path": path_str, "replace": true})).unwrap();
+        assert_ne!(std::fs::read_to_string(&path).unwrap(), "keep me");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

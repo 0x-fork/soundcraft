@@ -75,7 +75,10 @@ pub fn stored_path(stored: &str, session: &Path) -> std::result::Result<PathBuf,
 /// Create `dir` and its parents, inside the automation write root when there is one.
 pub(crate) fn make_dir(dir: impl AsRef<Path>) -> Result<()> {
     let dir = dir.as_ref();
-    crate::file_access::check_write(dir).map_err(EngineError::Io)?;
+    // The empty folder of a bare file name ("t.scraft") is the working directory, which the root
+    // check would refuse as an empty path.
+    let checked = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+    crate::file_access::check_write(checked).map_err(EngineError::Io)?;
     std::fs::create_dir_all(dir).map_err(|err| EngineError::Io(format!("{}: {err}", dir.display())))
 }
 
@@ -1104,7 +1107,7 @@ pub fn replaces(e: &Engine, command: &str, file: &Path) -> bool {
         "session.save" | "session.save_as" | "session.save_copy" => {
             file.exists() && !e.path.as_deref().is_some_and(|own| same_path(Path::new(own), file))
         }
-        "session.save_template" | "file.export_selected_tracks_as_session" => file.exists(),
+        "session.save_template" | "file.export_selected_tracks_as_session" | "file.export_session_text" => file.exists(),
         _ => false,
     }
 }
@@ -1451,13 +1454,18 @@ fn add_recording_in(
         if s.track(tid).is_none() {
             continue;
         }
-        let resampled = buf.sample_rate != s.sample_rate.hz();
+        let hz = s.sample_rate.hz();
+        let resampled = buf.sample_rate != hz;
+        let mut buf = buf;
+        if resampled && buf.sample_rate > 0 {
+            buf.channels = soundcraft_dsp::offline::resample(&buf.channels, buf.sample_rate, hz);
+            buf.sample_rate = hz;
+        }
         let name = path.file_stem().and_then(OsStr::to_str).unwrap_or("Take");
-        let src = add_source(s, name, buf, Some(&path.to_string_lossy()), FileFormat::Wav);
-        let Some(x) = s.sources.last_mut() else { continue };
-        x.unsaved = resampled;
-        let len = i64::try_from(x.frames).unwrap_or(0);
+        let len = i64::try_from(buf.frames()).unwrap_or(0);
         let pass = pass.unwrap_or(len).max(1);
+        // Work out what each pass keeps first, so a take nothing is placed from isn't registered.
+        let mut kept_passes = Vec::new();
         for offset in (0..len).step_by(usize::try_from(pass).unwrap_or(usize::MAX)).take(1_000) {
             let n = pass.min(len - offset);
             if offset > 0 && n < pass / 8 {
@@ -1470,6 +1478,16 @@ fn add_recording_in(
                 }
                 None => (start, 0, n),
             };
+            kept_passes.push((offset, clip_start, cut, clip_len));
+        }
+        if kept_passes.is_empty() {
+            continue;
+        }
+        let src = add_source(s, name, buf, Some(&path.to_string_lossy()), FileFormat::Wav);
+        if let Some(x) = s.sources.last_mut() {
+            x.unsaved = resampled;
+        }
+        for (offset, clip_start, cut, clip_len) in kept_passes {
             if offset > 0
                 && let Some(t) = s.track_mut(tid)
             {
@@ -1580,6 +1598,39 @@ mod record_tests {
         place_recording(&mut e, &plan, vec![(vox, take)]);
         let clips: Vec<_> = e.session().track(vox).unwrap().clips().iter().map(|c| (c.start, c.length, c.source_offset())).collect();
         assert_eq!(clips, vec![(0, 1_400, 0), (1_400, 200, 400), (1_600, 1_400, 1_600)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_punch_that_misses_the_take_leaves_the_session_alone() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-punch-miss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut e = Engine::default();
+        let vox = armed(&mut e, "Vox", "mono", "In 1");
+        let take = dir.join("Audio Files/Take.wav");
+        write_take(&take, 1_000);
+        let shared = add_source(
+            e.session_mut(),
+            "Take",
+            AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.0; 100]] },
+            Some(&take.to_string_lossy()),
+            FileFormat::Wav,
+        );
+        let sources = e.session().sources.len();
+        let pool = e.session().pool.len();
+        let plan = Recording {
+            start: 1_000,
+            pass: None,
+            punch: Some(Range::new(5_000, 6_000)),
+            rate: 48_000,
+            takes: vec![Take { track: vox, path: take.clone(), channels: 1 }],
+        };
+        let placed = place_recording(&mut e, &plan, vec![(vox, take)]);
+        assert!(placed.is_empty());
+        assert_eq!(e.session().sources.len(), sources);
+        assert_eq!(e.session().pool.len(), pool);
+        assert!(e.session().sources.iter().any(|x| x.id == shared));
+        assert!(e.session().pool.contains(shared));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
