@@ -511,4 +511,21 @@ mod tests {
             assert!(c.end() - c.start == c.length, "end {new_end}: start {} end {}", c.start, c.end());
         }
     }
+
+    #[test]
+    fn trim_start_of_stretched_audio_advances_offset_by_source_time() {
+        // The mixer plays source `offset + rel / stretch`, so a split at timeline 1000 of a 2x clip
+        // must start the right half at source sample 500.
+        let mut c = Clip::audio(ClipId(1), "a", SourceId(1), 0, 0, 2000);
+        c.stretch = 2.0;
+        c.trim_start_to(1000);
+        assert_eq!(c.source_offset(), 500);
+        let mut c = Clip::audio(ClipId(2), "b", SourceId(1), 0, 0, 2000);
+        c.stretch = 0.5;
+        c.trim_start_to(1000);
+        assert_eq!(c.source_offset(), 2000);
+        let mut c = Clip::audio(ClipId(3), "c", SourceId(1), 0, 0, 2000);
+        c.trim_start_to(1000);
+        assert_eq!(c.source_offset(), 1000);
+    }
 }

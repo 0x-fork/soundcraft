@@ -407,6 +407,11 @@ pub fn trim_end_to(s: &mut Session, track: TrackId, at: Samples) -> usize {
     n
 }
 
+/// Source samples covered by `length` timeline samples of a clip with the given `stretch`.
+fn source_len(length: Samples, stretch: f64) -> Samples {
+    if stretch.is_finite() && stretch > 0.0 && (stretch - 1.0).abs() >= 1e-9 { (length as f64 / stretch).round() as Samples } else { length }
+}
+
 /// Heal separations inside `range`: merge neighbouring audio clips that continue the same file,
 /// either touching (a split) or with an empty gap that matches the gap in the source (a cut).
 pub fn heal(s: &mut Session, track: TrackId, range: Range) -> usize {
@@ -1008,6 +1013,18 @@ mod tests {
             let want = if rel < 1000 { l.gain_at(rel) } else { r.gain_at(rel - 2000) };
             assert!((healed.gain_at(rel) - want).abs() < 1e-4, "sample {rel}: {} != {want}", healed.gain_at(rel));
         }
+    }
+
+    #[test]
+    fn split_then_heal_rejoins_stretched_clip() {
+        let (mut s, t) = session_with_clip();
+        if let Some(c) = s.track_mut(t).and_then(|t| t.playlist_mut()).and_then(|p| p.clips.first_mut()) {
+            c.stretch = 2.0;
+        }
+        assert_eq!(separate_at(&mut s, t, 3000), 1);
+        assert_eq!(clips(&s, t), vec![(1000, 2000, 1000), (3000, 2000, 2000)]);
+        assert_eq!(heal(&mut s, t, Range::new(0, 10_000)), 1);
+        assert_eq!(clips(&s, t), vec![(1000, 4000, 1000)]);
     }
 
     #[test]
