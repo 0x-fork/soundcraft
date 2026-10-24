@@ -399,8 +399,7 @@ impl AudioState {
 
 /// Clamp to the device range, mapping NaN and infinities to silence.
 fn out_sample(v: f32) -> f32 {
-    let v = v.clamp(-1.0, 1.0);
-    if v.is_finite() { v } else { 0.0 }
+    if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 }
 }
 
 /// UI-thread bookkeeping of the third-party instances the audio thread holds.
