@@ -475,7 +475,7 @@ pub enum VariFiSelection {
 /// the speed. The speed is `1 - u²` for Slow Down and `1 - (1 - u)²` for Speed Up, where `u`
 /// runs from 0 to 1 over the result; both curves average 2/3 of normal speed. With `fades`, the
 /// gain follows the same curve: a fade-out for Slow Down and a fade-in for Speed Up. Every channel
-/// is read at the same positions.
+/// is read at the same positions, and a channel shorter than the others is silent past its end.
 pub fn vari_fi(ch: &[Vec<f32>], change: VariFiChange, selection: VariFiSelection, fades: bool) -> Vec<Vec<f32>> {
     let len = max_len(ch) as f64;
     let (total, first, played) = match selection {
@@ -498,19 +498,20 @@ pub fn vari_fi(ch: &[Vec<f32>], change: VariFiChange, selection: VariFiSelection
             }
         }
     };
+    // The interpolation reads the first or last sample of the input for taps before or after it.
+    let last = (len as i64 - 1).max(0);
     ch.iter()
         .map(|x| {
-            let last = x.len() as i64 - 1;
             (0..out_len)
                 .map(|n| {
                     let (pos, speed) = at(n as f64 / total);
                     let t = first + played * pos;
-                    let lo = (t - hw).ceil().max(0.0) as i64;
-                    let hi = ((t + hw).floor() as i64).min(last);
+                    let lo = (t - hw).ceil() as i64;
+                    let hi = (t + hw).floor() as i64;
                     let mut acc = 0.0f32;
                     let mut j = lo;
                     while j <= hi {
-                        if let Some(&v) = x.get(j as usize) {
+                        if let Some(&v) = x.get(j.clamp(0, last) as usize) {
                             acc += v * table.at(t - j as f64);
                         }
                         j += 1;

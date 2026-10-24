@@ -78,6 +78,12 @@ fn vari_fi_fades_follow_the_speed() {
     for u in [0.25, 0.5, 0.75, 0.9] {
         near(off[0][(u * len as f64) as usize], 0.5, &format!("slow down without fades at {u}"));
     }
+    // ... at the stop too, where the reads reach either end of the input.
+    let up = offline::vari_fi(&x, VariFiChange::SpeedUp, VariFiSelection::FitTo, false);
+    near(up[0][0], 0.5, "speed up without fades from the stop");
+    near(off[0][len - 1], 0.5, "slow down without fades at the stop");
+    let off = offline::vari_fi(&x, VariFiChange::SlowDown, VariFiSelection::Extend, false);
+    near(off[0][off[0].len() - 1], 0.5, "slow down with Extend and without fades at the stop");
 }
 
 #[test]
@@ -107,4 +113,6 @@ fn vari_fi_handles_empty_and_uneven_channels() {
     let out = offline::vari_fi(&[vec![0.5; 300], vec![0.5; 30]], VariFiChange::SlowDown, VariFiSelection::Extend, false);
     assert_eq!((out[0].len(), out[1].len()), (450, 450));
     assert!(out.iter().flatten().all(|v| v.is_finite()));
+    near(out[0][449], 0.5, "the longer channel at the stop");
+    assert!(out[1][200..].iter().all(|v| v.abs() < 1e-3), "the shorter channel is silent past its end");
 }
