@@ -655,7 +655,7 @@ fn draw_rulers(app: &mut SoundApp, ui: &mut Ui, area: Rect, tl: Rect, rulers: &[
                 } else {
                     soundcraft_time::FrameRate::Fps25
                 };
-                timebase_ruler(&painter, &s, tl, Ruler { row, view, f: TimeFormat::Timecode, rate: alt, bottom: i + 1 == rulers.len() });
+                timebase_ruler(ui, &painter, &s, tl, row, view, TimeFormat::Timecode, alt, i + 1 == rulers.len());
             }
             "markers" | "markers2" | "markers3" | "markers4" | "markers5" | "chords" => {
                 let lane: u8 = match id.as_str() {
@@ -710,7 +710,7 @@ fn draw_rulers(app: &mut SoundApp, ui: &mut Ui, area: Rect, tl: Rect, rulers: &[
             }
             _ => {
                 if let Some(f) = fmt {
-                    timebase_ruler(&painter, &s, tl, Ruler { row, view, f, rate: s.frame_rate, bottom: i + 1 == rulers.len() });
+                    timebase_ruler(ui, &painter, &s, tl, row, view, f, s.frame_rate, i + 1 == rulers.len());
                     // Clicking a timebase ruler locates.
                     let resp = ui.interact(row, ui.id().with(("ruler", id.as_str())), Sense::click_and_drag());
                     if (resp.clicked() || resp.dragged())
@@ -732,17 +732,17 @@ fn draw_rulers(app: &mut SoundApp, ui: &mut Ui, area: Rect, tl: Rect, rulers: &[
     ui.painter().line_segment([pos2(area.min.x, area.max.y - 1.0), pos2(area.max.x, area.max.y - 1.0)], Stroke::new(1.0, t.border));
 }
 
-/// One timebase ruler row: its rect, the visible range, the format and frame rate, and whether it is the bottom row.
-struct Ruler {
+fn timebase_ruler(
+    _ui: &Ui,
+    painter: &egui::Painter,
+    s: &Session,
+    tl: Rect,
     row: Rect,
     view: Range,
     f: TimeFormat,
     rate: soundcraft_time::FrameRate,
     bottom: bool,
-}
-
-fn timebase_ruler(painter: &egui::Painter, s: &Session, tl: Rect, ruler: Ruler) {
-    let Ruler { row, view, f, rate, bottom } = ruler;
+) {
     let t = Tokens::current();
     let sr = s.sample_rate;
     let spp = s.edit.zoom.samples_per_px;
@@ -921,7 +921,7 @@ fn track_row(app: &mut SoundApp, ui: &mut Ui, id: TrackId, row: Rect, tl: Rect, 
         if !clip.range().overlaps(&view) {
             continue;
         }
-        draw_clip(app, &painter, &s, track, clip, LaneView { sorted, tl, lane, dim: auto_view.is_some() });
+        draw_clip(app, &painter, &s, track, sorted, clip, tl, lane, auto_view.is_some());
     }
     draw_live_take(app, &painter, &s, track, tl, lane);
     crate::video_track::draw_lane(app, &painter, &s, track, tl, lane);
@@ -967,7 +967,7 @@ fn playlist_lanes(app: &mut SoundApp, ui: &mut Ui, track: &Track, row: Rect, mai
         let sorted = track.clips().is_sorted_by_key(|c| c.start);
         let view = Range::new(sample_at(&s, tl, tl.min.x), sample_at(&s, tl, tl.max.x));
         for c in pl.clips.iter().filter(|c| c.range().overlaps(&view)) {
-            draw_clip(app, &painter, &s, track, c, LaneView { sorted, tl, lane, dim: false });
+            draw_clip(app, &painter, &s, track, sorted, c, tl, lane, false);
         }
         let resp = ui.interact(lane, ui.id().with(("pl_lane", track.id.0, i)), Sense::click());
         if resp.clicked()
@@ -1678,17 +1678,8 @@ fn grid_veil(line: Color32, bg: Color32) -> Color32 {
     }
 }
 
-/// Where and how a track's clips are drawn. `sorted`: whether `track.clips()` is sorted by start
-/// (worked out once per track and frame).
-struct LaneView {
-    sorted: bool,
-    tl: Rect,
-    lane: Rect,
-    dim: bool,
-}
-
-fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track, clip: &Clip, view: LaneView) {
-    let LaneView { sorted, tl, lane, dim } = view;
+/// `sorted`: whether `track.clips()` is sorted by start (worked out once per track and frame).
+fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track, sorted: bool, clip: &Clip, tl: Rect, lane: Rect, dim: bool) {
     let x0 = x_of(s, tl, clip.start);
     let x1 = x_of(s, tl, clip.end()).max(x0 + 1.0);
     let r = Rect::from_min_max(pos2(x0, lane.min.y + 1.0), pos2(x1, lane.max.y - 1.0));
