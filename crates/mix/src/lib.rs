@@ -2383,6 +2383,13 @@ pub fn render_track_pre_fader(s: &Session, track: TrackId, range: Range) -> Vec<
 
 /// A built-in plugin, else a hosted CLAP plugin (`clap:<id>`).
 fn create_plugin(id: &str) -> Option<Box<dyn Plugin>> {
+    // Tests never load real plug-ins; adopt a fake instead. Scanning the machine's plug-in folders
+    // loads every installed plug-in in-process, and some never unload, so a test that reached the
+    // real hosts would hang on a developer machine (CI has none installed).
+    #[cfg(test)]
+    if is_third_party(id) {
+        return None;
+    }
     soundcraft_dsp::create(id)
         .or_else(|| soundcraft_clap_host::create(id))
         .or_else(|| soundcraft_vst3_host::create(id))
@@ -2435,6 +2442,10 @@ mod audio_thread_tests {
 
 #[cfg(test)]
 mod tests {
+    //! Rule: tests never call the real plug-in hosts. Third-party ids are not created here
+    //! (create_plugin returns None under cfg(test)); a test that needs a hosted plug-in
+    //! adopts a fake under a clap:test.* id via MixEngine::adopt.
+
     use super::*;
     use soundcraft_audio_io::AudioBuffer;
     use soundcraft_model::{Insert, SourceAudio, SourceId};
@@ -3134,7 +3145,7 @@ mod tests {
         s.track_mut(t).unwrap().mixer.inserts[0].as_mut().unwrap().params.insert("gain".into(), -12.0);
         render_block(&mut eng, &s, 1024);
         assert_eq!(sets.load(std::sync::atomic::Ordering::Relaxed), 2, "later session edits apply");
-        // Offline (not external): unknown third-party plugins are simply absent.
+        // Offline (not external): third-party plugins are simply absent (tests never load real ones).
         let out = render_range(&s, Range::new(0, 1024), 512);
         assert!(out[0][100] > 0.3);
     }
