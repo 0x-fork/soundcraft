@@ -805,9 +805,13 @@ fn strip_silence(e: &mut Engine, p: &Value) -> Result<Value> {
 }
 
 fn fades_create(e: &mut Engine, p: &Value) -> Result<Value> {
-    let shape = str_param(p, "shape")
-        .map_or(Some(FadeShape::EqualPower), FadeShape::from_id)
-        .ok_or_else(|| bad("edit.fades_create", "unknown fade shape"))?;
+    let shape = match p.get("shape") {
+        None => FadeShape::EqualPower,
+        Some(v) => v
+            .as_str()
+            .and_then(FadeShape::from_id)
+            .ok_or_else(|| bad("edit.fades_create", "shape must be linear|equal power|s-curve|exponential|logarithmic"))?,
+    };
     if p.get("clip").is_some() || p.get("side").is_some() {
         let curvature = match p.get("curvature") {
             None => 0.0,
@@ -834,9 +838,6 @@ fn fades_create(e: &mut Engine, p: &Value) -> Result<Value> {
         let available = clip.length.min(clip.end().saturating_sub(clip.start));
         if available <= 0 {
             return Err(bad("edit.fades_create", "clip has no length"));
-        }
-        if p.get("shape").is_some_and(|v| !v.is_string()) {
-            return Err(bad("edit.fades_create", "shape must be a fade shape name"));
         }
         let fade = Fade { len: length.min(available), shape, curvature };
         let clip = e.session_mut().find_clip_mut(id).ok_or_else(|| bad("edit.fades_create", "clip not found"))?;
@@ -1072,6 +1073,19 @@ mod tests {
         let before = e.session().clone();
         assert!(e.execute("edit.fades_create", &json!({"clip": id, "side": "in", "length": 1})).is_err());
         assert_eq!(e.session(), &before);
+    }
+
+    #[test]
+    fn range_fades_refuse_a_shape_that_is_not_a_shape_name() {
+        for shape in [json!("bad"), json!(null), json!(true), json!(1)] {
+            let (mut e, t, _) = trim_session(&[(0, 10_000, 0), (10_000, 10_000, 10_000)]);
+            let before = e.session().clone();
+            let history = e.undo_history();
+            let params = json!({"tracks": [t], "start": 9_500, "end": 10_500, "shape": shape});
+            assert!(e.execute("edit.fades_create", &params).is_err(), "{params}");
+            assert_eq!(e.session(), &before, "{params}");
+            assert_eq!(e.undo_history(), history, "{params}");
+        }
     }
 
     #[test]
