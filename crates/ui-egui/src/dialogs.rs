@@ -8,6 +8,7 @@ use soundcraft_engine::Engine;
 use soundcraft_engine::io::StripNames;
 use soundcraft_model::{ClipId, GroupId, Session, SourceId, TrackId};
 use soundcraft_time::Samples;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum Dialog {
@@ -56,6 +57,39 @@ pub struct Dialogs {
     pending_session: Option<(String, Vec<u8>)>,
     /// The naming scheme Strip Silence gives the clips it leaves, kept from one use to the next.
     pub strip_names: StripNames,
+    /// The Strip Silence rectangles the Edit window draws while Strip Silence is open.
+    strip_rectangles: StripRectangles,
+}
+
+/// What Strip keeps on each track: the Strip Silence rectangles.
+pub type StripRects = Arc<Vec<(TrackId, Vec<soundcraft_time::Range>)>>;
+
+/// The session revision and the Strip Silence values (as bits) that rectangles were found for.
+type StripKey = (u64, [u64; 4]);
+
+/// The Strip Silence rectangles last found, and the scan running for newer values.
+#[derive(Default)]
+struct StripRectangles {
+    shown: Option<(StripKey, StripRects)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    running: Option<StripScanning>,
+}
+
+/// A Strip Silence scan on a worker thread: what it was started for, where its result arrives, and
+/// the flag that stops it.
+#[cfg(not(target_arch = "wasm32"))]
+struct StripScanning {
+    key: StripKey,
+    rx: std::sync::mpsc::Receiver<StripRects>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A scan whose rectangles nobody will draw stops before its next window of audio.
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for StripScanning {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl Dialogs {
@@ -82,6 +116,15 @@ impl Dialogs {
             Dialog::ScoreSetup { .. } => "score_setup",
             Dialog::SaveChanges { .. } => "save_changes",
         })
+    }
+
+    /// Whether a worker thread is finding Strip Silence rectangles.
+    pub fn strip_scan_running(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.strip_rectangles.running.is_some() {
+            return true;
+        }
+        false
     }
 
     pub fn open_rename_track(&mut self, id: TrackId, name: &str) {
@@ -590,11 +633,16 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     }
                 }
                 Dialog::StripSilence { threshold, min_ms, pre_ms, post_ms } => {
+                    let before = [*threshold, *min_ms, *pre_ms, *post_ms];
                     ui.add(egui::Slider::new(threshold, -96.0..=0.0).text("Threshold dB"));
                     ui.add(egui::Slider::new(min_ms, 0.0..=4000.0).text("Min strip duration ms"));
                     ui.add(egui::Slider::new(pre_ms, 0.0..=500.0).text("Clip start pad ms"));
                     ui.add(egui::Slider::new(post_ms, 0.0..=2000.0).text("Clip end pad ms"));
                     let values = [*threshold, *min_ms, *pre_ms, *post_ms];
+                    // The Edit window is drawn before this window, so it draws the rectangles for new values in the next frame.
+                    if values != before {
+                        ui.ctx().request_repaint();
+                    }
                     if !strip_names.name.trim().is_empty() {
                         let names = format!("New clips are named {}, {} and so on.", strip_names.clip_name(0), strip_names.clip_name(1));
                         ui.label(egui::RichText::new(names).small().color(Tokens::current().text_dim));
@@ -819,6 +867,79 @@ fn run_then(app: &mut SoundApp, cmd: &str, params: Value) -> Result<Value, Strin
         return Ok(Value::Null);
     }
     app.run(cmd, params)
+}
+
+/// The ranges Strip keeps on each selected track, found by the scan of `edit.strip_silence_preview`
+/// with the values of the open Strip Silence window (or of the one Rename Selected Clips goes back
+/// to). The Edit window draws them as the Strip Silence rectangles. Empty when neither window is
+/// open. A scan runs again only when the session or a value changes. Off the web it runs on a worker
+/// thread, one at a time, and the rectangles last found stay until it ends. A scan for older values,
+/// or one that runs on after the window closes, stops before its next window of audio.
+pub fn strip_silence_rectangles(app: &mut SoundApp, ctx: &egui::Context) -> StripRects {
+    let values = match &app.dialogs.open {
+        Some(Dialog::StripSilence { threshold, min_ms, pre_ms, post_ms }) => [*threshold, *min_ms, *pre_ms, *post_ms],
+        Some(Dialog::StripSilenceRename { strip, .. }) => *strip,
+        _ => {
+            app.dialogs.strip_rectangles = StripRectangles::default();
+            return Arc::default();
+        }
+    };
+    let key: StripKey = (app.engine.revision, values.map(f64::to_bits));
+    let r = &mut app.dialogs.strip_rectangles;
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(job) = &r.running {
+        match job.rx.try_recv() {
+            Ok(rects) => {
+                r.shown = Some((job.key, rects));
+                r.running = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => r.running = None,
+            // Values changed since it started: stop it, and the next scan starts when it has ended.
+            Err(std::sync::mpsc::TryRecvError::Empty) if job.key != key => job.stop.store(true, std::sync::atomic::Ordering::Relaxed),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+    let shown = r.shown.as_ref().map(|(k, rects)| (*k == key, Arc::clone(rects)));
+    #[cfg(not(target_arch = "wasm32"))]
+    let busy = r.running.is_some();
+    #[cfg(target_arch = "wasm32")]
+    let busy = false;
+    if let Some((true, rects)) = shown {
+        return rects;
+    }
+    if busy {
+        return shown.map(|(_, rects)| rects).unwrap_or_default();
+    }
+    let [threshold, min_ms, pre_ms, post_ms] = values;
+    let params = json!({"threshold_db": threshold, "min_length_ms": min_ms, "pad_before_ms": pre_ms, "pad_after_ms": post_ms});
+    let Ok(scan) = soundcraft_engine::cmd::strip_silence_scan(&app.engine, &params) else {
+        app.dialogs.strip_rectangles.shown = Some((key, Arc::default()));
+        return Arc::default();
+    };
+    let scan = Arc::new(scan);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (ctx, job) = (ctx.clone(), Arc::clone(&scan));
+        let work = move || {
+            let found = job.run();
+            // A stopped scan sends nothing: its sender drops, and the rectangles last found stay.
+            if !job.stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = tx.send(Arc::new(found.unwrap_or_default()));
+            }
+            ctx.request_repaint();
+        };
+        if std::thread::Builder::new().name("strip-silence-scan".into()).spawn(work).is_ok() {
+            app.dialogs.strip_rectangles.running = Some(StripScanning { key, rx, stop: Arc::clone(&scan.stop) });
+            return shown.map(|(_, rects)| rects).unwrap_or_default();
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = ctx;
+    // The browser has no threads, and without a thread to spare the scan runs on this one.
+    let rects: StripRects = Arc::new(scan.run().unwrap_or_default());
+    app.dialogs.strip_rectangles.shown = Some((key, Arc::clone(&rects)));
+    rects
 }
 
 /// The command a Strip Silence button runs: `mode` is strip, extract or separate, and `values` holds

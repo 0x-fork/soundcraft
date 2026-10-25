@@ -8,6 +8,7 @@ use soundcraft_time::{Range, Samples};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Largest import we accept (samples per channel × channels), ~4 GiB of f32.
 pub(crate) const MAX_IMPORT_SAMPLES: usize = 1 << 30;
@@ -805,7 +806,7 @@ pub fn name_stripped_clips(s: &mut Session, t: TrackId, r: Range, names: &StripN
 /// `Extract`.
 pub fn strip_silence(s: &mut Session, t: TrackId, r: Range, thr: f32, min_len: Samples, pad: (Samples, Samples), mode: StripMode) -> Result<usize> {
     let r = bounded_to_track(s, t, r);
-    let keep = non_silent(s, t, r, thr, min_len, pad.0, pad.1)?;
+    let keep = non_silent(s, t, r, thr, min_len, pad, &AtomicBool::new(false))?;
     let mut cut_points = vec![r.start];
     for (a, b) in &keep {
         cut_points.push(*a);
@@ -840,13 +841,63 @@ pub fn strip_silence(s: &mut Session, t: TrackId, r: Range, thr: f32, min_len: S
     Ok(keep.len())
 }
 
+/// The ranges [`strip_silence`] finds on `t` inside `r` with the same settings: the non-silent ranges
+/// with `pad` added, which Strip keeps. The session is read and not changed. Setting `stop` ends the
+/// scan with an error before the next window of audio is rendered.
+pub fn strip_silence_ranges(
+    s: &Session,
+    t: TrackId,
+    r: Range,
+    thr: f32,
+    min_len: Samples,
+    pad: (Samples, Samples),
+    stop: &AtomicBool,
+) -> Result<Vec<Range>> {
+    let r = bounded_to_track(s, t, r);
+    Ok(non_silent(s, t, r, thr, min_len, pad, stop)?.into_iter().map(|(a, b)| Range::new(a, b)).collect())
+}
+
+/// A Strip Silence scan of a session's tracks, which can run on another thread
+/// (`cmd::strip_silence_scan` makes one from Strip Silence's params).
+#[derive(Clone)]
+pub struct StripScan {
+    pub session: Arc<Session>,
+    pub tracks: Vec<TrackId>,
+    pub range: Range,
+    pub threshold_db: f32,
+    pub min_len: Samples,
+    pub pad: (Samples, Samples),
+    /// Set from another thread to end [`StripScan::run`] early, with an error.
+    pub stop: Arc<AtomicBool>,
+}
+
+impl StripScan {
+    /// The ranges Strip keeps on each track ([`strip_silence_ranges`]).
+    pub fn run(&self) -> Result<Vec<(TrackId, Vec<Range>)>> {
+        let s = &self.session;
+        self.tracks
+            .iter()
+            .map(|t| Ok((*t, strip_silence_ranges(s, *t, self.range, self.threshold_db, self.min_len, self.pad, &self.stop)?)))
+            .collect()
+    }
+}
+
 /// Most samples (over all channels) Strip Silence renders at once.
 const STRIP_WINDOW_SAMPLES: usize = 1 << 24;
 
 /// The non-silent ranges of `t`'s clips in `r`. The audio is rendered a window at a time where
 /// audio clips play, so all of `r` is scanned however long it is (one render stops at
-/// `MAX_RENDER_SAMPLES`); at most a day of clips, Pro Tools' longest session.
-fn non_silent(s: &Session, t: TrackId, r: Range, thr: f32, min_len: Samples, pre: Samples, post: Samples) -> Result<Vec<(Samples, Samples)>> {
+/// `MAX_RENDER_SAMPLES`); at most a day of clips, Pro Tools' longest session. `pad` is the clip start
+/// and end pad. Setting `stop` ends the scan with an error before the next window is rendered.
+fn non_silent(
+    s: &Session,
+    t: TrackId,
+    r: Range,
+    thr: f32,
+    min_len: Samples,
+    (pre, post): (Samples, Samples),
+    stop: &AtomicBool,
+) -> Result<Vec<(Samples, Samples)>> {
     let Some(tr) = s.track(t) else { return Ok(Vec::new()) };
     let mut clips: Vec<Range> = tr.clips().iter().filter(|c| c.is_audio() && !c.muted).filter_map(|c| c.range().intersect(&r)).collect();
     clips.sort_by_key(|x| x.start);
@@ -868,6 +919,9 @@ fn non_silent(s: &Session, t: TrackId, r: Range, thr: f32, min_len: Samples, pre
         scan.skip(len(x.start - at));
         at = x.start;
         while at < x.end {
+            if stop.load(Ordering::Relaxed) {
+                return Err(EngineError::Disabled("edit.strip_silence_preview".into(), "the scan was stopped".into()));
+            }
             let end = at.saturating_add(window).min(x.end);
             scan.push(&soundcraft_mix::render_clips(s, t, Range::new(at, end)));
             at = end;
@@ -2393,6 +2447,42 @@ mod strip_tests {
         let (r, clips) = strip_mode("separate");
         assert_eq!(r["clips"], 2);
         assert_eq!(clips, vec![(0, 48_000), (48_000, 96_000), (96_000, 144_000)]);
+    }
+
+    #[test]
+    fn the_rectangles_are_what_strip_keeps_and_change_nothing() {
+        let (mut e, t) = tone_gap_tone();
+        let p = json!({"track": t.0, "start": 0, "end": 144_000, "pad_before_ms": 10, "pad_after_ms": 20});
+        let rev = e.revision;
+        let r = e.execute("edit.strip_silence_preview", &p).unwrap();
+        assert_eq!(e.revision, rev, "the preview changed the session");
+        assert_eq!(e.session().track(t).unwrap().clips().len(), 1);
+        assert_eq!(r["tracks"][0]["track"], t.0);
+        let ranges: Vec<(Samples, Samples)> =
+            r["tracks"][0]["ranges"].as_array().unwrap().iter().map(|x| (x[0].as_i64().unwrap(), x[1].as_i64().unwrap())).collect();
+        assert_eq!(ranges, vec![(0, 48_960), (95_520, 144_000)]);
+        e.execute("edit.strip_silence", &p).unwrap();
+        let kept: Vec<(Samples, Samples)> = e.session().track(t).unwrap().clips().iter().map(|c| (c.start, c.end())).collect();
+        assert_eq!(kept, ranges);
+    }
+
+    #[test]
+    fn a_stopped_scan_ends_with_an_error() {
+        let (e, t) = tone_gap_tone();
+        let scan = crate::cmd::strip_silence_scan(&e, &json!({"track": t.0, "start": 0, "end": 144_000})).unwrap();
+        assert_eq!(scan.run().unwrap()[0].1.len(), 2);
+        scan.stop.store(true, Ordering::Relaxed);
+        assert!(scan.run().is_err());
+    }
+
+    #[test]
+    fn the_rectangles_follow_the_threshold() {
+        let (mut e, t) = tone_gap_tone();
+        // The tone plays at -6 dB.
+        let r = e.execute("edit.strip_silence_preview", &json!({"track": t.0, "start": 0, "end": 144_000, "threshold_db": -3})).unwrap();
+        assert_eq!(r["tracks"][0]["ranges"], json!([]));
+        let r = e.execute("edit.strip_silence_preview", &json!({"track": t.0, "start": 0, "end": 144_000, "threshold_db": -12})).unwrap();
+        assert_eq!(r["tracks"][0]["ranges"].as_array().map(Vec::len), Some(2));
     }
 
     #[test]

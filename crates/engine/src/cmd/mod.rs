@@ -62,6 +62,7 @@ mod panic_probe {
 pub use file::bounce_job;
 
 pub(crate) use edit::remember_selection;
+pub use edit::strip_silence_scan;
 
 pub type Run = fn(&mut Engine, &Value) -> Result<Value>;
 /// `Err(reason)` = disabled.
