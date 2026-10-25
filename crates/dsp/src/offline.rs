@@ -465,7 +465,8 @@ pub enum SpeedRampChange {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpeedRampSelection {
     /// The result is as long as the input. Two thirds of the input are played: the first two
-    /// thirds for Speed Up, the last two thirds for Slow Down.
+    /// thirds for Slow Down, the last two thirds for Speed Up, so each joins its neighbour
+    /// without a jump.
     FitTo,
     /// All of the input is played, and the result is 150 % of its length.
     Extend,
@@ -482,7 +483,7 @@ pub fn speed_ramp(ch: &[Vec<f32>], change: SpeedRampChange, selection: SpeedRamp
         SpeedRampSelection::Extend => ((len * 1.5).round(), 0.0, len),
         SpeedRampSelection::FitTo => {
             let played = len * 2.0 / 3.0;
-            (len, if change == SpeedRampChange::SlowDown { len - played } else { 0.0 }, played)
+            (len, if change == SpeedRampChange::SlowDown { 0.0 } else { len - played }, played)
         }
     };
     let out_len = (total as usize).min(MAX_OFFLINE_SAMPLES);

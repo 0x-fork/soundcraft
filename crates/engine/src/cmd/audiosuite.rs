@@ -274,10 +274,10 @@ mod tests {
             (c.start, c.length, c.name, audio)
         };
         // The defaults: Slow Down, Fit To, Fades On. Halfway through, the read position is 11/16 of the
-        // way through the last two thirds, and the gain is the speed there, 3/4.
+        // way through the first two thirds, and the gain is the speed there, 3/4.
         let (start, length, name, audio) = run(json!({}));
         assert_eq!((start, length, name.as_str()), (480, 4800, "ramp-speeramp"));
-        let want = (1.0 / 3.0 + 2.0 / 3.0 * 11.0 / 16.0) * 0.75;
+        let want = (2.0 / 3.0 * 11.0 / 16.0) * 0.75;
         assert!((audio[2400] - want).abs() < 2e-3, "slow down halfway: got {}, want {want}", audio[2400]);
         assert!(audio[4790].abs() < 0.01, "the fade-out ends near silence, got {}", audio[4790]);
         // Speed Up with Extend and no fades: all of the clip is played over 150 % of its length, and the

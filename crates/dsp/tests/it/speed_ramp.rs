@@ -24,21 +24,22 @@ fn speed_ramp_fit_to_keeps_the_length_and_plays_two_thirds() {
     let x = vec![ramp(len)];
     let slow = offline::speed_ramp(&x, SpeedRampChange::SlowDown, SpeedRampSelection::FitTo, false);
     assert_eq!(slow[0].len(), len);
-    // Slow Down plays the last two thirds: it starts at normal speed one third in and stops at the end.
+    // Slow Down plays the first two thirds: it starts at normal speed at the start and stops at the end.
     for u in [0.0, 0.25, 0.5, 0.75, 0.9] {
         let n = (u * len as f64) as usize;
-        near(slow[0][n], 1.0 / 3.0 + 2.0 / 3.0 * slow_down_pos(u), &format!("slow down at {u}"));
+        near(slow[0][n], 2.0 / 3.0 * slow_down_pos(u), &format!("slow down at {u}"));
     }
-    let step = |a: &[f32], n: usize| f64::from(a[n + 1] - a[n]) * len as f64;
+    // The speed over 50 samples: a one-sample step inside the input also shows the interpolation's ripple.
+    let step = |a: &[f32], n: usize| f64::from(a[n + 50] - a[n]) * len as f64 / 50.0;
     assert!((step(&slow[0], 100) - 1.0).abs() < 0.01, "slow down starts at normal speed: {}", step(&slow[0], 100));
     assert!(step(&slow[0], len - 200) < 0.02, "slow down ends near a stop: {}", step(&slow[0], len - 200));
 
-    // Speed Up plays the first two thirds: it starts from a stop and reaches normal speed at the end.
+    // Speed Up plays the last two thirds: it starts from a stop and reaches normal speed at the end.
     let fast = offline::speed_ramp(&x, SpeedRampChange::SpeedUp, SpeedRampSelection::FitTo, false);
     assert_eq!(fast[0].len(), len);
     for u in [0.1, 0.25, 0.5, 0.75, 0.99] {
         let n = (u * len as f64) as usize;
-        near(fast[0][n], 2.0 / 3.0 * speed_up_pos(u), &format!("speed up at {u}"));
+        near(fast[0][n], 1.0 / 3.0 + 2.0 / 3.0 * speed_up_pos(u), &format!("speed up at {u}"));
     }
     assert!(step(&fast[0], 200) < 0.02, "speed up starts near a stop: {}", step(&fast[0], 200));
     assert!((step(&fast[0], len - 100) - 1.0).abs() < 0.01, "speed up ends at normal speed: {}", step(&fast[0], len - 100));
