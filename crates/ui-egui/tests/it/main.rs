@@ -8,6 +8,7 @@ mod audio_device;
 mod bounce;
 mod bounce_dialog;
 mod clip_gain_fader;
+mod clip_looping;
 mod clip_menu;
 mod command_reachability;
 mod commands_filter;

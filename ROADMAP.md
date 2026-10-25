@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~5% and ~110–180 h away (the alpha gate's three failing workflows)
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** trivial (AudioSuite Vari-Fi speed ramps, Auto Pan plugin, Subharmonic plugin, Ring Modulator plugin, Float32 file headroom) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** trivial (Clip Looping dialog, AudioSuite Vari-Fi speed ramps, Auto Pan plugin, Subharmonic plugin, Ring Modulator plugin, Float32 file headroom) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
 Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
@@ -122,6 +122,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 ## Progress log
 
+- **2026-10-24:** Clip › Loop… (Cmd+Alt+L) opens the Clip Looping dialog: Number of Loops, Loop Length in the main counter's time format, or Loop Until End of Session or Next Clip. A loop length that is not a whole number of loops cuts the last loop short, and Unloop removes that short loop too. No readiness percentage change.
 - **2026-10-24:** AudioSuite ▸ Pitch Shift ▸ Vari-Fi slows the selected clips down to a complete stop or speeds them up from one, and the pitch follows the speed. Fit To keeps each clip's length and plays two-thirds of it; Extend plays all of it and makes the clip 150 % long. Fades On fades the audio out with the slowdown or in with the speedup. Before, the menu item resampled the clip at a constant speed. No readiness percentage change.
 - **2026-10-24:** A built-in Auto Pan plugin pans the mono sum of a stereo track between left and right. An LFO with seven waveforms moves it at a rate in BPM or at the session tempo, running free, once, in step with the transport, or when the level crosses a threshold or a manual trigger changes; an envelope follower can move it by level instead. Width, Manual and Path set the field, and Output sets the level. No readiness percentage change.
 - **2026-10-24:** A built-in Subharmonic (`subharmonic`) adds the octave below a lower and an upper band of the input, chosen from four frequency ranges, with a direct bass band, a gain and a solo for each band, Drive with six characters, HP and LP filters, and a Mix that keeps one path at full level. No readiness percentage change.
@@ -169,6 +170,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | trivial | Progress log: Clip Looping dialog; readiness estimates unchanged |
 | 2026-10-24 | trivial | Progress log: AudioSuite Vari-Fi speed ramps; readiness estimates unchanged |
 | 2026-10-24 | trivial | Progress log: Auto Pan plugin; readiness estimates unchanged |
 | 2026-10-24 | trivial | Progress log: Subharmonic plugin; readiness estimates unchanged |
