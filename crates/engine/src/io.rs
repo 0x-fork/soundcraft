@@ -2465,6 +2465,7 @@ mod strip_tests {
             json!({"name": "SFX", "number": StripNames::MAX_NUMBER + 1}),
             json!({"name": "SFX", "zeros": StripNames::MAX_ZEROS + 1}),
             json!({"name": "SFX", "suffix": null}),
+            json!({"name": "S".repeat(300)}),
         ] {
             let (mut e, t) = tone_gap_tone();
             let mut p = json!({"track": t.0, "start": 0, "end": 144_000});

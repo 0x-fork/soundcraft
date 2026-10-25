@@ -837,11 +837,17 @@ fn strip_names(p: &Value) -> Result<Option<crate::io::StripNames>> {
         return Ok(None);
     };
     let d = StripNames::default();
+    let suffix = suffix.unwrap_or(d.suffix);
+    // 29 characters stay free for the number: 9 zeros and the 20 digits of a u64.
+    let max_text = soundcraft_model::MAX_NAME_CHARS - 29;
+    if name.chars().count() + suffix.chars().count() > max_text {
+        return Err(bad(cmd, format!("`name` and `suffix` together must be at most {max_text} characters")));
+    }
     Ok(Some(StripNames {
         name,
         number: number.unwrap_or(d.number),
         zeros: zeros.and_then(|z| usize::try_from(z).ok()).unwrap_or(d.zeros),
-        suffix: suffix.unwrap_or(d.suffix),
+        suffix,
     }))
 }
 
