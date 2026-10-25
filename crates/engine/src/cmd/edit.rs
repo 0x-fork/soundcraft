@@ -888,12 +888,7 @@ pub(super) fn strip_names(cmd: &str, p: &Value) -> Result<Option<crate::io::Stri
     if name.chars().count() + suffix.chars().count() > max_text {
         return Err(bad(cmd, format!("`name` and `suffix` together must be at most {max_text} characters")));
     }
-    Ok(Some(StripNames {
-        name,
-        number: number.unwrap_or(d.number),
-        zeros: zeros.and_then(|z| usize::try_from(z).ok()).unwrap_or(d.zeros),
-        suffix,
-    }))
+    Ok(Some(StripNames { name, number: number.unwrap_or(d.number), zeros: zeros.and_then(|z| usize::try_from(z).ok()).unwrap_or(d.zeros), suffix }))
 }
 
 fn fades_create(e: &mut Engine, p: &Value) -> Result<Value> {
