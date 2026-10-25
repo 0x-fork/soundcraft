@@ -755,6 +755,49 @@ impl StripMode {
     }
 }
 
+/// The names Strip Silence gives the clips it leaves in the selection: `name`, then `zeros` zeros,
+/// then a number that starts at `number` and counts up one clip at a time, then `suffix`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StripNames {
+    pub name: String,
+    pub number: u64,
+    pub zeros: usize,
+    pub suffix: String,
+}
+
+impl Default for StripNames {
+    fn default() -> Self {
+        Self { name: String::new(), number: 1, zeros: 0, suffix: String::new() }
+    }
+}
+
+impl StripNames {
+    /// The largest first number.
+    pub const MAX_NUMBER: u64 = 999_999_999;
+    /// The most zeros before the number.
+    pub const MAX_ZEROS: usize = 9;
+
+    /// The name of the clip `i` places after the first one.
+    pub fn clip_name(&self, i: u64) -> String {
+        format!("{}{}{}{}", self.name, "0".repeat(self.zeros), self.number.saturating_add(i), self.suffix)
+    }
+}
+
+/// Names the audio clips that lie inside `r` on `t` with `names`, in time order, the first of them
+/// `next` places after `names.number`. Returns how many clips it named.
+pub fn name_stripped_clips(s: &mut Session, t: TrackId, r: Range, names: &StripNames, next: u64) -> u64 {
+    let r = bounded_to_track(s, t, r);
+    let Some(pl) = s.track_mut(t).and_then(|x| x.playlist_mut()) else { return 0 };
+    let mut inside: Vec<&mut Clip> = pl.clips.iter_mut().filter(|c| c.is_audio() && c.start >= r.start && c.end() <= r.end).collect();
+    inside.sort_by_key(|c| (c.start, c.id.0));
+    let mut named = 0;
+    for c in inside {
+        c.name = names.clip_name(next.saturating_add(named));
+        named += 1;
+    }
+    named
+}
+
 /// Strip Silence: separate the clips inside `r` where silence starts and ends, then keep only the
 /// non-silent ranges (`Strip`), only the silent ranges (`Extract`), or every piece (`Separate`).
 /// `pad` is the clip start and end pad added around each non-silent range. Returns the number of
@@ -2358,6 +2401,76 @@ mod strip_tests {
         for mode in [json!("remove"), json!(null), json!(true), json!(1)] {
             assert!(e.execute("edit.strip_silence", &json!({"track": t.0, "start": 0, "end": 144_000, "mode": mode})).is_err());
             assert_eq!(e.session().track(t).unwrap().clips().len(), 1);
+        }
+    }
+
+    fn names(e: &Engine, t: TrackId) -> Vec<String> {
+        e.session().track(t).unwrap().clips().iter().map(|c| c.name.clone()).collect()
+    }
+
+    #[test]
+    fn strip_names_follow_the_guide_example() {
+        let n = StripNames { name: "SFX".into(), number: 23, zeros: 1, suffix: ".Reel1".into() };
+        assert_eq!((0..4).map(|i| n.clip_name(i)).collect::<Vec<_>>(), ["SFX023.Reel1", "SFX024.Reel1", "SFX025.Reel1", "SFX026.Reel1"]);
+    }
+
+    #[test]
+    fn strip_names_the_clips_it_keeps() {
+        let (mut e, t) = tone_gap_tone();
+        let p = json!({"track": t.0, "start": 0, "end": 144_000, "pad_before_ms": 0, "pad_after_ms": 0, "name": "SFX", "number": 23, "zeros": 1, "suffix": ".Reel1"});
+        let r = e.execute("edit.strip_silence", &p).unwrap();
+        assert_eq!(r["named"], 2);
+        assert_eq!(names(&e, t), ["SFX023.Reel1", "SFX024.Reel1"]);
+    }
+
+    #[test]
+    fn separate_names_every_piece_in_time_order() {
+        let (mut e, t) = tone_gap_tone();
+        let p = json!({"track": t.0, "start": 0, "end": 144_000, "pad_before_ms": 0, "pad_after_ms": 0, "mode": "separate", "name": "Take "});
+        e.execute("edit.strip_silence", &p).unwrap();
+        assert_eq!(names(&e, t), ["Take 1", "Take 2", "Take 3"]);
+    }
+
+    #[test]
+    fn strip_numbers_run_on_from_one_track_to_the_next() {
+        let (mut e, a) = tone_gap_tone();
+        e.execute("track.new", &json!({"format": "stereo"})).unwrap();
+        let b = e.session().tracks[1].id;
+        let s = e.session_mut();
+        let src = s.sources[0].id;
+        let id = s.new_clip_id();
+        crate::edit::place_clip(s, b, Clip::audio(id, "copy", src, 0, 0, 144_000));
+        let p = json!({"tracks": [a.0, b.0], "start": 0, "end": 144_000, "pad_before_ms": 0, "pad_after_ms": 0, "name": "Hit", "zeros": 2});
+        let r = e.execute("edit.strip_silence", &p).unwrap();
+        assert_eq!(r["named"], 4);
+        assert_eq!(names(&e, a), ["Hit001", "Hit002"]);
+        assert_eq!(names(&e, b), ["Hit003", "Hit004"]);
+    }
+
+    #[test]
+    fn strip_without_a_name_keeps_the_clip_names() {
+        let (mut e, t) = tone_gap_tone();
+        let r = e.execute("edit.strip_silence", &json!({"track": t.0, "start": 0, "end": 144_000, "name": " "})).unwrap();
+        assert_eq!(r["named"], 0);
+        assert_eq!(names(&e, t), ["tone gap tone", "tone gap tone"]);
+    }
+
+    #[test]
+    fn bad_naming_params_are_refused() {
+        for bad in [
+            json!({"suffix": ".Reel1"}),
+            json!({"name": "", "number": 2}),
+            json!({"name": 7}),
+            json!({"name": "SFX", "number": -1}),
+            json!({"name": "SFX", "number": StripNames::MAX_NUMBER + 1}),
+            json!({"name": "SFX", "zeros": StripNames::MAX_ZEROS + 1}),
+            json!({"name": "SFX", "suffix": null}),
+        ] {
+            let (mut e, t) = tone_gap_tone();
+            let mut p = json!({"track": t.0, "start": 0, "end": 144_000});
+            p.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+            assert!(e.execute("edit.strip_silence", &p).is_err(), "{bad} was taken");
+            assert_eq!(names(&e, t), ["tone gap tone"], "{bad} changed the track");
         }
     }
 

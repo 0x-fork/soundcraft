@@ -121,7 +121,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Strip Silence",
             ["Edit"],
             Some("Cmd+U"),
-            "{threshold_db?: -48, min_length_ms?: 50, pad_before_ms?: 5, pad_after_ms?: 20, mode?: strip|extract|separate} (strip removes the silence; extract removes the audio and keeps the silence; separate separates the clips at the edges of the silence and does not remove any)",
+            "{threshold_db?: -48, min_length_ms?: 50, pad_before_ms?: 5, pad_after_ms?: 20, mode?: strip|extract|separate, name?, number?: 1, zeros?: 0, suffix?} (strip removes the silence; extract removes the audio and keeps the silence; separate separates the clips at the edges of the silence and does not remove any; with a name, the clips left in the selection are named name, zeros, a number counting up from number, suffix)",
             has_range,
             strip_silence
         ),
@@ -801,12 +801,48 @@ fn strip_silence(e: &mut Engine, p: &Value) -> Result<Value> {
         Some(Value::String(m)) => crate::io::StripMode::from_id(m).ok_or_else(|| bad("edit.strip_silence", format!("unknown mode `{m}`")))?,
         Some(_) => return Err(bad("edit.strip_silence", "mode must be strip, extract or separate")),
     };
+    let names = strip_names(p)?;
     let s = e.session_mut();
     let mut kept = 0;
+    let mut named = 0;
     for t in &tracks {
         kept += crate::io::strip_silence(s, *t, r, thr, min_len, (pre, post), mode)?;
+        if let Some(names) = &names {
+            named += crate::io::name_stripped_clips(s, *t, r, names, named);
+        }
     }
-    Ok(json!({"clips": kept}))
+    Ok(json!({"clips": kept, "named": named}))
+}
+
+/// The naming scheme in `edit.strip_silence`'s `name`, `number`, `zeros` and `suffix` params, or
+/// `None` when `name` is missing or blank.
+fn strip_names(p: &Value) -> Result<Option<crate::io::StripNames>> {
+    use crate::io::StripNames;
+    let cmd = "edit.strip_silence";
+    let text = |k: &str| match p.get(k) {
+        None => Ok(None),
+        Some(Value::String(v)) => Ok(Some(v.clone())),
+        Some(_) => Err(bad(cmd, format!("`{k}` must be text"))),
+    };
+    let whole = |k: &str, max: u64| match p.get(k) {
+        None => Ok(None),
+        Some(v) => v.as_u64().filter(|n| *n <= max).map(Some).ok_or_else(|| bad(cmd, format!("`{k}` must be a whole number from 0 to {max}"))),
+    };
+    let (name, suffix) = (text("name")?, text("suffix")?);
+    let (number, zeros) = (whole("number", StripNames::MAX_NUMBER)?, whole("zeros", StripNames::MAX_ZEROS as u64)?);
+    let Some(name) = name.filter(|n| !n.trim().is_empty()) else {
+        if suffix.is_some() || number.is_some() || zeros.is_some() {
+            return Err(bad(cmd, "`number`, `zeros` and `suffix` need a `name`"));
+        }
+        return Ok(None);
+    };
+    let d = StripNames::default();
+    Ok(Some(StripNames {
+        name,
+        number: number.unwrap_or(d.number),
+        zeros: zeros.and_then(|z| usize::try_from(z).ok()).unwrap_or(d.zeros),
+        suffix: suffix.unwrap_or(d.suffix),
+    }))
 }
 
 fn fades_create(e: &mut Engine, p: &Value) -> Result<Value> {

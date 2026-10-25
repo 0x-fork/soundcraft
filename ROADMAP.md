@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~5% and ~110–180 h away (the alpha gate's three failing workflows)
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** trivial (Strip Silence Extract and Separate, Clip Looping dialog, AudioSuite Vari-Fi speed ramps, Auto Pan plugin, Subharmonic plugin, Ring Modulator plugin, Float32 file headroom) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** trivial (Strip Silence Rename, Strip Silence Extract and Separate, Clip Looping dialog, AudioSuite Vari-Fi speed ramps, Auto Pan plugin, Subharmonic plugin, Ring Modulator plugin, Float32 file headroom) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
 Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
@@ -122,6 +122,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 ## Progress log
 
+- **2026-10-24:** The Strip Silence window has a Rename button. It opens Rename Selected Clips, where a name, a starting number, a count of zeros and a suffix set the names of the clips that Strip, Extract and Separate leave in the selection (for example SFX023.Reel1, SFX024.Reel1). The app keeps the scheme for later uses of Strip Silence until the app quits, or until Clear and then OK empty it. No readiness percentage change.
 - **2026-10-24:** The Strip Silence window has Extract and Separate buttons. Extract removes the audio and keeps the silent parts of the selection, and Separate separates the clips at the edges of the silence without removing anything. Minimum Strip Duration goes up to 4,000 ms. No readiness percentage change.
 - **2026-10-24:** Clip › Loop… (Cmd+Alt+L) opens the Clip Looping dialog: Number of Loops, Loop Length in the main counter's time format, or Loop Until End of Session or Next Clip. A loop length that is not a whole number of loops cuts the last loop short, and Unloop removes that short loop too. No readiness percentage change.
 - **2026-10-24:** AudioSuite ▸ Pitch Shift ▸ Vari-Fi slows the selected clips down to a complete stop or speeds them up from one, and the pitch follows the speed. Fit To keeps each clip's length and plays two-thirds of it; Extend plays all of it and makes the clip 150 % long. Fades On fades the audio out with the slowdown or in with the speedup. Before, the menu item resampled the clip at a constant speed. No readiness percentage change.
@@ -171,6 +172,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | trivial | Progress log: Strip Silence Rename; readiness estimates unchanged |
 | 2026-10-24 | trivial | Progress log: Strip Silence Extract and Separate; readiness estimates unchanged |
 | 2026-10-24 | trivial | Progress log: Clip Looping dialog; readiness estimates unchanged |
 | 2026-10-24 | trivial | Progress log: AudioSuite Vari-Fi speed ramps; readiness estimates unchanged |

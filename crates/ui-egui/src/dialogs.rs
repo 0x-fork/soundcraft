@@ -5,6 +5,7 @@ use crate::theme::{Tokens, bold};
 use egui::{Align2, vec2};
 use serde_json::{Value, json};
 use soundcraft_engine::Engine;
+use soundcraft_engine::io::StripNames;
 use soundcraft_model::{ClipId, GroupId, Session, SourceId, TrackId};
 use soundcraft_time::Samples;
 
@@ -23,6 +24,8 @@ pub enum Dialog {
     Spot(crate::spot::Spot),
     Fades { shape: String },
     StripSilence { threshold: f64, min_ms: f64, pre_ms: f64, post_ms: f64 },
+    // Strip Silence › Rename: `strip` holds the Strip Silence values to return to.
+    StripSilenceRename { strip: [f64; 4], names: StripNames },
     // `id: None` creates (Track › Group…); `id: Some` modifies that group (Groups list › Modify Group…).
     Group { id: Option<GroupId>, name: String, edit: bool, mix: bool, members: Vec<(u64, String, bool)> },
     Session { frame_rate: String, bit_depth: String },
@@ -51,6 +54,8 @@ pub struct Dialogs {
     after_save: Option<(String, Value)>,
     /// A session the browser read while the open one had changes, waiting for `SaveChanges`.
     pending_session: Option<(String, Vec<u8>)>,
+    /// The naming scheme Strip Silence gives the clips it leaves, kept from one use to the next.
+    pub strip_names: StripNames,
 }
 
 impl Dialogs {
@@ -69,6 +74,7 @@ impl Dialogs {
             Dialog::Spot(_) => "spot",
             Dialog::Fades { .. } => "fades",
             Dialog::StripSilence { .. } => "strip_silence",
+            Dialog::StripSilenceRename { .. } => "strip_silence_rename",
             Dialog::Group { id: None, .. } => "group",
             Dialog::Group { id: Some(_), .. } => "modify_group",
             Dialog::Session { .. } => "session",
@@ -343,6 +349,10 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
     let mut action: Option<(String, Value)> = None;
     let mut save_first: Option<(String, Value)> = None;
     let confirmed = matches!(d, Dialog::SaveChanges { .. });
+    // Strip Silence's Rename button, and the naming scheme its dialog's OK keeps.
+    let mut rename_from: Option<[f64; 4]> = None;
+    let mut renamed: Option<StripNames> = None;
+    let strip_names = app.dialogs.strip_names.clone();
     let title = match &d {
         Dialog::NewTracks { .. } => "New Tracks",
         Dialog::NewSession { .. } => "New Session",
@@ -356,6 +366,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         Dialog::Spot(_) => "Spot",
         Dialog::Fades { .. } => "Fades",
         Dialog::StripSilence { .. } => "Strip Silence",
+        Dialog::StripSilenceRename { .. } => "Rename Selected Clips",
         Dialog::Group { id: None, .. } => "Create Group",
         Dialog::Group { id: Some(_), .. } => "Modify Group",
         Dialog::Session { .. } => "Session Setup",
@@ -584,11 +595,19 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     ui.add(egui::Slider::new(pre_ms, 0.0..=500.0).text("Clip start pad ms"));
                     ui.add(egui::Slider::new(post_ms, 0.0..=2000.0).text("Clip end pad ms"));
                     let values = [*threshold, *min_ms, *pre_ms, *post_ms];
+                    if !strip_names.name.trim().is_empty() {
+                        let names = format!("New clips are named {}, {} and so on.", strip_names.clip_name(0), strip_names.clip_name(1));
+                        ui.label(egui::RichText::new(names).small().color(Tokens::current().text_dim));
+                    }
                     ui.separator();
                     ui.horizontal(|ui| {
                         let mut mode = None;
+                        let mut rename = false;
                         if ui.button("Extract").clicked() {
                             mode = Some("extract");
+                        }
+                        if ui.button("Rename…").clicked() {
+                            rename = true;
                         }
                         if ui.button("Separate").clicked() {
                             mode = Some("separate");
@@ -597,10 +616,24 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         if buttons(ui, "Strip", enter) && mode.is_none() {
                             mode = Some("strip");
                         }
-                        if let Some(mode) = mode {
-                            action = Some(strip_silence_action(mode, values));
+                        // Enter on a focused Rename… also presses Strip, so Rename… goes first.
+                        if rename {
+                            rename_from = Some(values);
+                        } else if let Some(mode) = mode {
+                            action = Some(strip_silence_action(mode, values, &strip_names));
                         }
                     });
+                }
+                Dialog::StripSilenceRename { names, .. } => {
+                    strip_name_fields(ui, names);
+                    let cleared = ui.button("Clear").clicked();
+                    if cleared {
+                        *names = StripNames::default();
+                    }
+                    // Enter on a focused Clear clicks it, and leaves the dialog open.
+                    if buttons(ui, "OK", enter) && !cleared {
+                        renamed = Some(names.clone());
+                    }
                 }
                 Dialog::Group { id, name, edit, mix, members } => {
                     ui.horizontal(|ui| {
@@ -717,6 +750,26 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         app.dialogs.pending_session = None;
         ctx.memory_mut(|m| m.data.remove::<bool>(egui::Id::new("dlg_cancel")));
     }
+    if let Some(strip) = rename_from
+        && keep
+    {
+        d = Dialog::StripSilenceRename { strip, names: strip_names };
+    }
+    // OK, Cancel and Escape in Rename Selected Clips go back to Strip Silence; OK keeps the names.
+    // Enter on a focused Cancel also presses OK, and `keep` is false then, so Cancel wins.
+    let back = match &d {
+        Dialog::StripSilenceRename { strip, .. } if !keep || renamed.is_some() => Some(*strip),
+        _ => None,
+    };
+    if let Some([threshold, min_ms, pre_ms, post_ms]) = back {
+        if let Some(names) = renamed
+            && keep
+        {
+            app.dialogs.strip_names = names;
+        }
+        d = Dialog::StripSilence { threshold, min_ms, pre_ms, post_ms };
+        keep = true;
+    }
     if let Some(then) = save_first {
         keep = false;
         if !app.dialogs.open_for_command(&app.engine, "session.save") {
@@ -770,12 +823,41 @@ fn run_then(app: &mut SoundApp, cmd: &str, params: Value) -> Result<Value, Strin
 
 /// The command a Strip Silence button runs: `mode` is strip, extract or separate, and `values` holds
 /// the threshold in dB, the minimum strip duration and the clip start and end pads in milliseconds.
-fn strip_silence_action(mode: &str, values: [f64; 4]) -> (String, Value) {
+/// `names` names the clips it leaves when its name is not blank.
+fn strip_silence_action(mode: &str, values: [f64; 4], names: &StripNames) -> (String, Value) {
     let [threshold, min_ms, pre_ms, post_ms] = values;
-    (
-        "edit.strip_silence".into(),
-        json!({"threshold_db": threshold, "min_length_ms": min_ms, "pad_before_ms": pre_ms, "pad_after_ms": post_ms, "mode": mode}),
-    )
+    let mut params = json!({"threshold_db": threshold, "min_length_ms": min_ms, "pad_before_ms": pre_ms, "pad_after_ms": post_ms, "mode": mode});
+    if !names.name.trim().is_empty() {
+        params["name"] = json!(names.name);
+        params["number"] = json!(names.number);
+        params["zeros"] = json!(names.zeros);
+        params["suffix"] = json!(names.suffix);
+    }
+    ("edit.strip_silence".into(), params)
+}
+
+/// The Name, Number, Zeros and Suffix fields of Rename Selected Clips, with the first name they give.
+fn strip_name_fields(ui: &mut egui::Ui, names: &mut StripNames) {
+    egui::Grid::new("strip_names").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+        ui.label("Name");
+        ui.text_edit_singleline(&mut names.name);
+        ui.end_row();
+        ui.label("Number");
+        ui.add(egui::DragValue::new(&mut names.number).range(0..=StripNames::MAX_NUMBER));
+        ui.end_row();
+        ui.label("Zeros");
+        ui.add(egui::DragValue::new(&mut names.zeros).range(0..=StripNames::MAX_ZEROS));
+        ui.end_row();
+        ui.label("Suffix");
+        ui.text_edit_singleline(&mut names.suffix);
+        ui.end_row();
+    });
+    let example = if names.name.trim().is_empty() {
+        "Without a name, the clips keep their names.".to_string()
+    } else {
+        format!("First clip: {}", names.clip_name(0))
+    };
+    ui.label(egui::RichText::new(example).small().color(Tokens::current().text_dim));
 }
 
 /// Cancel/OK row; returns true when OK was pressed (or Enter).
@@ -1008,7 +1090,7 @@ mod tests {
         let covered = |c: &[(i64, i64)]| c.iter().map(|(a, b)| b - a).sum::<i64>();
         let before = clips(&e);
         let mut run = |mode: &str| {
-            let (cmd, params) = strip_silence_action(mode, values);
+            let (cmd, params) = strip_silence_action(mode, values, &StripNames::default());
             assert_eq!(params["mode"], mode);
             e.execute(&cmd, &params).unwrap();
             let after = clips(&e);
@@ -1020,6 +1102,25 @@ mod tests {
         assert_eq!(covered(&separate), covered(&before), "Separate keeps all the audio");
         assert!(!strip.is_empty() && !extract.is_empty());
         assert_eq!(covered(&strip) + covered(&extract), covered(&before), "Strip and Extract keep opposite parts");
+    }
+
+    #[test]
+    fn strip_silence_sends_the_naming_scheme_only_with_a_name() {
+        let values = [-48.0, 50.0, 5.0, 20.0];
+        let (_, plain) = strip_silence_action("strip", values, &StripNames::default());
+        assert!(plain.get("name").is_none() && plain.get("suffix").is_none());
+        let names = StripNames { name: "SFX".into(), number: 23, zeros: 1, suffix: ".Reel1".into() };
+        let (cmd, params) = strip_silence_action("separate", values, &names);
+        assert_eq!((params["name"].clone(), params["number"].clone(), params["zeros"].clone()), (json!("SFX"), json!(23), json!(1)));
+        assert_eq!(params["suffix"], ".Reel1");
+        let mut e = soundcraft_engine::demo::demo_engine();
+        let kick = e.session().track_by_name("Kick").unwrap().id;
+        let end = e.session().content_end();
+        e.execute("edit.select", &json!({"tracks": [kick.0], "start": 0, "end": end})).unwrap();
+        e.execute(&cmd, &params).unwrap();
+        let named: Vec<String> = e.session().track(kick).unwrap().clips().iter().map(|c| c.name.clone()).collect();
+        assert!(named.len() > 1);
+        assert_eq!(named[..2], ["SFX023.Reel1", "SFX024.Reel1"]);
     }
 
     #[test]
