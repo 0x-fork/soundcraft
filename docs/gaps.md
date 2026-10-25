@@ -137,7 +137,7 @@ launch #142; Linux #45, #107.
 
 ### G-08. Built-in plugins
 
-See [`plugin-parity.md`](plugin-parity.md): 25 processors + 3 instruments against Pro Tools'
+See [`plugin-parity.md`](plugin-parity.md): 27 processors + 3 instruments against Pro Tools'
 roughly 80 bundled processors and instruments; no fidelity checks; generic parameter UIs; EQ
 parametric request #139. ≈ 80–120 h.
 
@@ -221,7 +221,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-24 | trivial | G-08: 25 processors + 3 instruments, as the plugin registry holds; G-20: the sampler shipped (#108), so it is no longer listed as missing |
+| 2026-10-24 | trivial | G-08: 27 processors + 3 instruments, as the plugin registry holds; G-20: the sampler shipped (#108), so it is no longer listed as missing |
 | 2026-10-19 | trivial | G-04: Float32 encoding retains finite headroom (#791); integer clipping and non-finite handling retained |
 | 2026-10-18 | trivial | G-04: mono device stereo/surround fold-down fixed and regression-tested; estimates unchanged |
 | 2026-10-16 | trivial | G-04: master volume automation block boundaries fixed and regression-tested; estimates unchanged |
