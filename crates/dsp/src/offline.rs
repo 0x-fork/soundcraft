@@ -452,18 +452,18 @@ pub fn pitch_shift(ch: &[Vec<f32>], semitones: f32, sample_rate: f32) -> Vec<Vec
     out
 }
 
-/// Which way [`vari_fi`] ramps the playback speed.
+/// Which way [`speed_ramp`] ramps the playback speed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VariFiChange {
+pub enum SpeedRampChange {
     /// From normal speed down to a complete stop.
     SlowDown,
     /// From a complete stop up to normal speed.
     SpeedUp,
 }
 
-/// How much of the input [`vari_fi`] plays, and how long the result is.
+/// How much of the input [`speed_ramp`] plays, and how long the result is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VariFiSelection {
+pub enum SpeedRampSelection {
     /// The result is as long as the input. Two thirds of the input are played: the first two
     /// thirds for Speed Up, the last two thirds for Slow Down.
     FitTo,
@@ -476,13 +476,13 @@ pub enum VariFiSelection {
 /// runs from 0 to 1 over the result; both curves average 2/3 of normal speed. With `fades`, the
 /// gain follows the same curve: a fade-out for Slow Down and a fade-in for Speed Up. Every channel
 /// is read at the same positions, and a channel shorter than the others is silent past its end.
-pub fn vari_fi(ch: &[Vec<f32>], change: VariFiChange, selection: VariFiSelection, fades: bool) -> Vec<Vec<f32>> {
+pub fn speed_ramp(ch: &[Vec<f32>], change: SpeedRampChange, selection: SpeedRampSelection, fades: bool) -> Vec<Vec<f32>> {
     let len = max_len(ch) as f64;
     let (total, first, played) = match selection {
-        VariFiSelection::Extend => ((len * 1.5).round(), 0.0, len),
-        VariFiSelection::FitTo => {
+        SpeedRampSelection::Extend => ((len * 1.5).round(), 0.0, len),
+        SpeedRampSelection::FitTo => {
             let played = len * 2.0 / 3.0;
-            (len, if change == VariFiChange::SlowDown { len - played } else { 0.0 }, played)
+            (len, if change == SpeedRampChange::SlowDown { len - played } else { 0.0 }, played)
         }
     };
     let out_len = (total as usize).min(MAX_OFFLINE_SAMPLES);
@@ -491,8 +491,8 @@ pub fn vari_fi(ch: &[Vec<f32>], change: VariFiChange, selection: VariFiSelection
     // The fraction of the played input reached at `u`, and the speed there (0 to 1).
     let at = |u: f64| -> (f64, f64) {
         match change {
-            VariFiChange::SlowDown => ((3.0 * u - u * u * u) / 2.0, 1.0 - u * u),
-            VariFiChange::SpeedUp => {
+            SpeedRampChange::SlowDown => ((3.0 * u - u * u * u) / 2.0, 1.0 - u * u),
+            SpeedRampChange::SpeedUp => {
                 let r = 1.0 - u;
                 (1.0 - (3.0 * r - r * r * r) / 2.0, 1.0 - r * r)
             }

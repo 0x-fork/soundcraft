@@ -49,8 +49,8 @@ fn audiosuite_refuses_results_longer_than_one_render() {
 }
 
 #[test]
-fn vari_fi_refuses_mono_clips_longer_than_one_render() {
-    // A mono clip may be longer than one offline buffer, so Vari-Fi must refuse it rather than cut its ramp short.
+fn speed_ramp_refuses_mono_clips_longer_than_one_render() {
+    // A mono clip may be longer than one offline buffer, so the speed ramp must refuse it rather than cut it short.
     for (frames, selection) in [(MAX_OFFLINE_SAMPLES + 1, 0), (MAX_OFFLINE_SAMPLES * 2 / 3 + 1, 1)] {
         let mut s = Session::default();
         let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, Some("Talk"));
@@ -59,7 +59,7 @@ fn vari_fi_refuses_mono_clips_longer_than_one_render() {
         let id = s.new_clip_id();
         soundcraft_engine::edit::place_clip(&mut s, t, Clip::audio(id, "Talk", src, 0, 0, frames as i64));
         let mut e = Engine::new(s);
-        refused(&mut e, "audiosuite.process", &json!({"process": "vari_fi", "params": {"selection": selection}, "clips": [id.0]}));
+        refused(&mut e, "audiosuite.process", &json!({"process": "speed_ramp", "params": {"selection": selection}, "clips": [id.0]}));
     }
 }
 

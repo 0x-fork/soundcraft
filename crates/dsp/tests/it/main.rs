@@ -5,5 +5,5 @@ mod fuzz;
 mod offline_meters;
 mod offline_normalize;
 mod plugins;
+mod speed_ramp;
 mod transients;
-mod vari_fi;
