@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~5% and ~110–180 h away (the alpha gate's three failing workflows)
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** trivial (Subharmonic plugin, Ring Modulator plugin, Float32 file headroom) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** trivial (Auto Pan plugin, Subharmonic plugin, Ring Modulator plugin, Float32 file headroom) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
 Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
@@ -122,6 +122,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 ## Progress log
 
+- **2026-10-24:** A built-in Auto Pan plugin pans the mono sum of a stereo track between left and right. An LFO with seven waveforms moves it at a rate in BPM or at the session tempo, running free, once, in step with the transport, or when the level crosses a threshold or a manual trigger changes; an envelope follower can move it by level instead. Width, Manual and Path set the field, and Output sets the level. No readiness percentage change.
 - **2026-10-24:** A built-in Subharmonic (`subharmonic`) adds the octave below a lower and an upper band of the input, chosen from four frequency ranges, with a direct bass band, a gain and a solo for each band, Drive with six characters, HP and LP filters, and a Mix that keeps one path at full level. No readiness percentage change.
 - **2026-10-23:** A built-in Ring Modulator (`ring_mod`) applies ring modulation, frequency modulation or a positive or negative resonator, and an LFO, an envelope follower or sample and hold moves its frequency. AudioSuite › Modulation › Sci-Fi now runs it instead of the Flanger. No readiness percentage change.
 - **2026-10-19:** Float32 WAV and AIFF-C encoding preserve finite samples above full scale. Integer PCM still clips at full scale. Tests cover whole-file and streaming encoders, non-finite samples, and bounce output with normalization on and off. No readiness percentage change.
@@ -167,6 +168,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | trivial | Progress log: Auto Pan plugin; readiness estimates unchanged |
 | 2026-10-24 | trivial | Progress log: Subharmonic plugin; readiness estimates unchanged |
 | 2026-10-23 | trivial | Progress log: Ring Modulator plugin; readiness estimates unchanged |
 | 2026-10-19 | trivial | Float32 file encoding preserves finite headroom (#791); readiness estimates unchanged |
