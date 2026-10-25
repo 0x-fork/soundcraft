@@ -127,13 +127,17 @@ impl Clipboard {
     }
 
     /// Before a paste into `s`: point the copied clips at schemes that `s` holds. A scheme that `s`
-    /// holds with the same [`AutoName::id`](soundcraft_model::AutoName::id) is used as it is, and
-    /// its numbers count on. Any other goes into `s` under a new key, counting on from where it was
-    /// when it was copied.
+    /// holds with the same [`AutoName::id`](soundcraft_model::AutoName::id), name, zeros and suffix
+    /// is used as it is, and its numbers count on. Any other goes into `s` under a new key, counting
+    /// on from where it was when it was copied.
     pub fn adopt_auto_names(&mut self, s: &mut Session) {
         let mut keys = std::collections::BTreeMap::new();
         for (k, a) in &self.auto_names {
-            let held = s.auto_names.iter().find(|(_, h)| a.id != 0 && h.id == a.id).map(|(key, _)| *key);
+            let held = s
+                .auto_names
+                .iter()
+                .find(|(_, h)| a.id != 0 && h.id == a.id && h.name == a.name && h.zeros == a.zeros && h.suffix == a.suffix)
+                .map(|(key, _)| *key);
             let key = match held {
                 Some(key) => key,
                 None => {

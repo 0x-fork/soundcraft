@@ -160,6 +160,35 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_keeps_its_scheme_when_another_session_holds_its_id_with_other_text() {
+        let mut e = crate::demo::demo_engine();
+        let (t, id, start, len) = first_kick(&e);
+        e.execute("clip.auto_rename", &json!({"clips": [id], "name": "SFX"})).unwrap();
+        let copied = e.session().auto_names.values().next().unwrap().id;
+        e.execute("edit.copy", &json!({"tracks": [t], "start": start, "end": start + len})).unwrap();
+        // Another session holds a scheme under the same id with another name.
+        e.replace_session(crate::demo::demo_engine().session().clone());
+        let bass = e.session().track_by_name("Bass").unwrap().clips()[0].id;
+        let s = e.session_mut();
+        let key = s.alloc();
+        s.auto_names.insert(key, soundcraft_model::AutoName { name: "Other".into(), number: 100, zeros: 0, suffix: String::new(), id: copied });
+        s.tracks
+            .iter_mut()
+            .flat_map(|t| t.playlists.iter_mut())
+            .flat_map(|pl| pl.clips.iter_mut())
+            .filter(|c| c.id == bass)
+            .for_each(|c| c.auto_name = Some(key));
+        let t = first_kick(&e).0;
+        let at = e.session().content_end() + 48_000;
+        e.execute("edit.paste", &json!({"tracks": [t], "at": at})).unwrap();
+        e.execute("edit.separate", &json!({"tracks": [t], "at": at + len / 2})).unwrap();
+        assert_eq!(names_in(&e, t, at, at + len)[1], "SFX1");
+        let s = e.session();
+        assert_eq!(s.auto_names.len(), 2);
+        assert_eq!(s.auto_names[&key].number, 100, "the other scheme's count is untouched");
+    }
+
+    #[test]
     fn bad_auto_rename_params_are_refused() {
         let mut e = crate::demo::demo_engine();
         let (_, id, _, _) = first_kick(&e);
