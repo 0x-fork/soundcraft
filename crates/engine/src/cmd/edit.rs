@@ -121,7 +121,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Strip Silence",
             ["Edit"],
             Some("Cmd+U"),
-            "{threshold_db?: -48, min_length_ms?: 50, pad_before_ms?: 5, pad_after_ms?: 20}",
+            "{threshold_db?: -48, min_length_ms?: 50, pad_before_ms?: 5, pad_after_ms?: 20, mode?: strip|extract|separate} (strip removes the silence; extract removes the audio and keeps the silence; separate separates the clips at the edges of the silence and does not remove any)",
             has_range,
             strip_silence
         ),
@@ -796,10 +796,15 @@ fn strip_silence(e: &mut Engine, p: &Value) -> Result<Value> {
     let sr = e.session().sample_rate;
     let ms = |k: &str, d: f64| sr.samples(f64_or(p, k, d).clamp(0.0, 10_000.0) / 1000.0);
     let (min_len, pre, post) = (ms("min_length_ms", 50.0), ms("pad_before_ms", 5.0), ms("pad_after_ms", 20.0));
+    let mode = match p.get("mode") {
+        None => crate::io::StripMode::Strip,
+        Some(Value::String(m)) => crate::io::StripMode::from_id(m).ok_or_else(|| bad("edit.strip_silence", format!("unknown mode `{m}`")))?,
+        Some(_) => return Err(bad("edit.strip_silence", "mode must be strip, extract or separate")),
+    };
     let s = e.session_mut();
     let mut kept = 0;
     for t in &tracks {
-        kept += crate::io::strip_silence(s, *t, r, thr, min_len, pre, post)?;
+        kept += crate::io::strip_silence(s, *t, r, thr, min_len, (pre, post), mode)?;
     }
     Ok(json!({"clips": kept}))
 }
