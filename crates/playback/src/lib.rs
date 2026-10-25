@@ -923,6 +923,8 @@ impl Player {
 
 fn take_meter_snapshot(source: &mut MeterSnapshot, out: &mut MeterSnapshot) {
     if !source.fresh {
+        // No block since the last take: keep the readings, but not those of deleted tracks.
+        out.tracks.retain(|id, _| source.tracks.contains_key(id));
         return;
     }
     copy_meter_snapshot(source, out);
@@ -1336,6 +1338,25 @@ mod tests {
         st.fill(&mut out, 2);
         assert!(!shared.meters.lock().unwrap().tracks.contains_key(&t));
         assert!(!st.unsent.tracks.contains_key(&t) && !st.mix.meters.contains_key(&t));
+    }
+
+    #[test]
+    fn a_take_without_new_blocks_still_drops_deleted_tracks() {
+        let gone = TrackId(7);
+        let mut source = MeterSnapshot::default();
+        source.accumulate(&StripMeter::default(), &HashMap::from([(gone, StripMeter::default())]));
+        let mut ui = MeterSnapshot::default();
+        take_meter_snapshot(&mut source, &mut ui);
+        source.forget(&[gone]);
+        take_meter_snapshot(&mut source, &mut ui);
+        assert!(ui.tracks.is_empty());
+    }
+
+    #[test]
+    fn a_channel_count_change_takes_the_new_stereo_peaks() {
+        let mut acc = StripMeter { peak: [0.9, 0.9], peaks: vec![0.9], ..StripMeter::default() };
+        acc.accumulate(&StripMeter { peak: [0.9, 0.0], peaks: vec![0.9, 0.0], ..StripMeter::default() });
+        assert_eq!(acc.peak, [0.9, 0.0]);
     }
 
     #[test]
