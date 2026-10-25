@@ -317,10 +317,14 @@ impl AutoName {
     /// The most zeros before the number.
     pub const MAX_ZEROS: usize = 9;
 
+    /// Room for `name` and `suffix` together: 29 characters stay free for 9 zeros and the 20
+    /// digits of a u64, so a clip name never loses its number to [`MAX_NAME_CHARS`].
+    pub const MAX_TEXT_CHARS: usize = MAX_NAME_CHARS - 29;
+
     /// Repair a scheme read from a file: names that can be drawn and at most [`Self::MAX_ZEROS`] zeros.
     pub fn sanitize(&mut self) {
-        truncate_chars(&mut self.name, MAX_NAME_CHARS);
-        truncate_chars(&mut self.suffix, MAX_NAME_CHARS);
+        truncate_chars(&mut self.name, Self::MAX_TEXT_CHARS);
+        truncate_chars(&mut self.suffix, Self::MAX_TEXT_CHARS - self.name.chars().count());
         self.zeros = self.zeros.min(Self::MAX_ZEROS);
     }
 }
@@ -899,5 +903,12 @@ mod tests {
         assert_eq!(tr.active_playlist, 0);
         assert_eq!(tr.mixer.volume_db, 0.0);
         assert!(s.next_id > t.0);
+    }
+
+    #[test]
+    fn a_loaded_auto_name_scheme_leaves_room_for_its_number() {
+        let mut scheme = crate::AutoName { name: "n".repeat(300), suffix: "s".repeat(300), ..Default::default() };
+        scheme.sanitize();
+        assert_eq!(scheme.name.chars().count() + scheme.suffix.chars().count(), crate::AutoName::MAX_TEXT_CHARS);
     }
 }
