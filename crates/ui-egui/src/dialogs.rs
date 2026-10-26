@@ -11,6 +11,7 @@ use soundcraft_time::Samples;
 use std::sync::Arc;
 
 pub mod ops_windows;
+pub mod recovery;
 pub mod spot;
 
 #[derive(Debug, Clone)]
