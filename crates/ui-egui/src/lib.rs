@@ -27,7 +27,6 @@ pub mod theme;
 pub mod toolbar;
 pub mod updates_ui;
 pub mod video_track;
-pub mod video_window;
 pub mod waveform;
 pub mod widgets;
 
@@ -45,6 +44,7 @@ pub use panels::extra_windows;
 pub use panels::midi_editor;
 pub use panels::sampler_window;
 pub use panels::score_editor;
+pub use panels::video_window;
 pub use panels::windows;
 
 /// Which main window is in front (Window › Mix / Edit).

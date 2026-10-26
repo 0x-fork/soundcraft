@@ -10,6 +10,7 @@ pub mod extra_windows;
 pub mod midi_editor;
 pub mod sampler_window;
 pub mod score_editor;
+pub mod video_window;
 pub mod windows;
 
 /// Drag a Tracks list row to reorder the tracks: a line marks the gap it will land in.
