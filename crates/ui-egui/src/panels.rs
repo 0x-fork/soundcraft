@@ -8,6 +8,7 @@ use soundcraft_model::{ClipId, SourceId};
 
 pub mod extra_windows;
 pub mod midi_editor;
+pub mod sampler_window;
 pub mod score_editor;
 pub mod windows;
 

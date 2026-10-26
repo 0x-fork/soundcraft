@@ -21,7 +21,6 @@ pub mod palette;
 pub mod panels;
 mod recent;
 pub mod recovery;
-pub mod sampler_window;
 pub mod shortcuts;
 pub mod spot;
 pub mod theme;
@@ -44,6 +43,7 @@ use std::sync::mpsc::Receiver;
 pub use control::ControlRequest;
 pub use panels::extra_windows;
 pub use panels::midi_editor;
+pub use panels::sampler_window;
 pub use panels::score_editor;
 pub use panels::windows;
 
