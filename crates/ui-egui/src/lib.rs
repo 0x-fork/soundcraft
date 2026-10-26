@@ -18,7 +18,6 @@ pub mod menus;
 pub mod mix_window;
 pub mod palette;
 pub mod panels;
-mod recent;
 pub mod shortcuts;
 pub mod theme;
 pub mod toolbar;
@@ -38,6 +37,7 @@ use std::sync::mpsc::Receiver;
 
 pub use control::ControlRequest;
 pub use dialogs::ops_windows;
+use dialogs::recent;
 pub use dialogs::recovery;
 pub use dialogs::spot;
 pub use panels::extra_windows;
