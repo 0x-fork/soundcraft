@@ -34,7 +34,6 @@ pub mod video_track;
 pub mod video_window;
 pub mod waveform;
 pub mod widgets;
-pub mod windows;
 
 use serde_json::{Value, json};
 use soundcraft_engine::{Engine, TransportRequest};
@@ -46,6 +45,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
 
 pub use control::ControlRequest;
+pub use panels::windows;
 
 /// Which main window is in front (Window › Mix / Edit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

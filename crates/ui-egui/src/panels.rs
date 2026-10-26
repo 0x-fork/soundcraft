@@ -6,6 +6,8 @@ use egui::{Align2, Color32, Rect, Sense, Stroke, Ui, pos2, vec2};
 use serde_json::json;
 use soundcraft_model::{ClipId, SourceId};
 
+pub mod windows;
+
 /// Drag a Tracks list row to reorder the tracks: a line marks the gap it will land in.
 fn drag_track(app: &mut SoundApp, ui: &Ui, row: Rect, id: u64, dropped: bool) {
     let s = app.engine.session();
