@@ -15,7 +15,6 @@ pub mod fonts;
 pub mod icons;
 pub mod import;
 pub mod menus;
-pub mod midi_editor;
 pub mod mix_window;
 pub mod ops_windows;
 pub mod palette;
@@ -45,6 +44,7 @@ use std::sync::mpsc::Receiver;
 
 pub use control::ControlRequest;
 pub use panels::extra_windows;
+pub use panels::midi_editor;
 pub use panels::windows;
 
 /// Which main window is in front (Window › Mix / Edit).
