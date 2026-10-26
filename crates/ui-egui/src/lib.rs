@@ -16,7 +16,6 @@ pub mod icons;
 pub mod import;
 pub mod menus;
 pub mod mix_window;
-pub mod ops_windows;
 pub mod palette;
 pub mod panels;
 mod recent;
@@ -39,6 +38,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
 
 pub use control::ControlRequest;
+pub use dialogs::ops_windows;
 pub use dialogs::spot;
 pub use panels::extra_windows;
 pub use panels::midi_editor;

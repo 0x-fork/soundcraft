@@ -10,6 +10,7 @@ use soundcraft_model::{ClipId, GroupId, Session, SourceId, TrackId};
 use soundcraft_time::Samples;
 use std::sync::Arc;
 
+pub mod ops_windows;
 pub mod spot;
 
 #[derive(Debug, Clone)]
