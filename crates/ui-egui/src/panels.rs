@@ -8,6 +8,7 @@ use soundcraft_model::{ClipId, SourceId};
 
 pub mod extra_windows;
 pub mod midi_editor;
+pub mod score_editor;
 pub mod windows;
 
 /// Drag a Tracks list row to reorder the tracks: a line marks the gap it will land in.
