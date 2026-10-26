@@ -11,7 +11,6 @@ pub mod credits;
 pub mod dialogs;
 pub mod docking;
 pub mod edit_window;
-pub mod extra_windows;
 pub mod fonts;
 pub mod icons;
 pub mod import;
@@ -45,6 +44,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
 
 pub use control::ControlRequest;
+pub use panels::extra_windows;
 pub use panels::windows;
 
 /// Which main window is in front (Window › Mix / Edit).
