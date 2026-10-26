@@ -22,7 +22,6 @@ pub mod panels;
 mod recent;
 pub mod recovery;
 pub mod shortcuts;
-pub mod spot;
 pub mod theme;
 pub mod toolbar;
 pub mod updates_ui;
@@ -40,6 +39,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
 
 pub use control::ControlRequest;
+pub use dialogs::spot;
 pub use panels::extra_windows;
 pub use panels::midi_editor;
 pub use panels::sampler_window;
