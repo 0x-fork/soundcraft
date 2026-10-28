@@ -140,7 +140,12 @@ Locally on Windows: `dotnet tool install -g wix --version 5.0.2`, then
 `packaging/linux/package.sh` stages one FHS tree and makes every format from it: both binaries,
 `ai.storyteller.soundcraft.desktop` (with `MimeType=` for sessions, WAV, AIFF, FLAC, MP3 and
 MIDI), hicolor icons from 16 px to 512 px plus a scalable SVG, AppStream metainfo, and a
-shared-mime-info file declaring `application/x-soundcraft-session` (`*.scraft`).
+shared-mime-info file declaring `application/x-soundcraft-session` (`*.scraft`), and
+`soundcraft-cli`'s man pages and bash, zsh and fish completions. The `man-and-completions` example,
+built with the binaries, writes those; a cross build runs it through `EMULATOR` and leaves them out
+without one. The zsh completion is in `/usr/share/zsh/site-functions`, which Fedora's and
+openSUSE's zsh read; the `.deb` also links it from `/usr/share/zsh/vendor-completions`, which
+Debian's zsh reads instead.
 
 - **AppImage** (maintained `AppImage/appimagetool`, static runtime: no libfuse2 needed). Each
   embeds the update information
@@ -170,7 +175,8 @@ Locally (on Linux): install nfpm, then `packaging/linux/package.sh` (or `--forma
 
 GitHub has no FreeBSD runners, so the `freebsd` job builds inside a FreeBSD 14.3 VM
 (`vmactions/freebsd-vm`, pinned by commit) and runs `packaging/freebsd/package.sh`, which stages
-a `/usr/local`-style tree (binaries, desktop entry, MIME type, metainfo, icons, docs) as a
+a `/usr/local`-style tree (binaries, desktop entry, MIME type, metainfo, icons, docs, and
+`soundcraft-cli`'s man pages and shell completions) as a
 `.tar.gz`. Install with `tar -xzf soundcraft-*-freebsd-x86_64.tar.gz --strip-components 1 -C /usr/local`.
 `.github/workflows/freebsd.yml` builds and tests the workspace there on every push to `main`.
 
